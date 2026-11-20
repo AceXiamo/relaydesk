@@ -32,6 +32,7 @@ export const PRIORITIES = new Set<TaskPriority>([
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, repo TEXT NOT NULL,
+    repos TEXT NOT NULL DEFAULT '[]',
     intake_key TEXT NOT NULL, bot_key TEXT NOT NULL, agent_key TEXT NOT NULL,
     allowed_origins TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,
     agent_instructions TEXT NOT NULL DEFAULT ''
@@ -72,14 +73,74 @@ export function field(
   return raw.trim();
 }
 
+export const MAX_PROJECT_REPOS = 20;
+
 export function parseRepository(value: string): string {
   const match = value.match(
-    /^(?:https:\/\/github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i,
+    /^(?:https?:\/\/(?:www\.)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i,
   );
   if (!match || match[1] === "." || match[1] === ".." || match[2] === "." || match[2] === "..") {
     throw new ApiError(400, "Use a GitHub owner/repository or repository URL");
   }
   return `${match[1]}/${match[2]}`;
+}
+
+export function parseRepositories(data: Record<string, unknown>): string[] {
+  if ("repos" in data && data.repos !== undefined) {
+    const raw = data.repos;
+    if (!Array.isArray(raw) || raw.length === 0) {
+      throw new ApiError(400, "Select at least one GitHub repository");
+    }
+    if (raw.length > MAX_PROJECT_REPOS) {
+      throw new ApiError(400, `A project can bind at most ${MAX_PROJECT_REPOS} repositories`);
+    }
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const entry of raw) {
+      if (typeof entry !== "string" || entry.length > 200 || !entry.trim()) {
+        throw new ApiError(400, "Use a GitHub owner/repository or repository URL");
+      }
+      const parsed = parseRepository(entry.trim());
+      const key = parsed.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(parsed);
+      }
+    }
+    if (result.length === 0) {
+      throw new ApiError(400, "Select at least one GitHub repository");
+    }
+    return result;
+  }
+  return [parseRepository(field(data, "repo", 200))];
+}
+
+function deserializeProjectRepos(row: { repo: string; repos?: string | null }): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  if (typeof row.repos === "string" && row.repos.trim()) {
+    try {
+      const parsed = JSON.parse(row.repos);
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (typeof item === "string" && item.trim()) {
+            const clean = item.trim();
+            const key = clean.toLowerCase();
+            if (!seen.has(key)) {
+              seen.add(key);
+              result.push(clean);
+            }
+          }
+        }
+      }
+    } catch {
+      // fall back to single repo column
+    }
+  }
+  if (result.length === 0 && row.repo) {
+    result.push(row.repo);
+  }
+  return result;
 }
 
 export function serializeOrigins(values: unknown): string {
@@ -132,6 +193,7 @@ export interface RawProjectRow {
   id: string;
   name: string;
   repo: string;
+  repos?: string;
   intake_key: string;
   bot_key: string;
   agent_key: string;
@@ -164,10 +226,12 @@ export interface RawTaskRow {
 }
 
 export function toProjectView(row: RawProjectRow): ProjectDetail {
+  const repos = deserializeProjectRepos(row);
   return {
     id: row.id,
     name: row.name,
-    repo: row.repo,
+    repo: repos[0] ?? row.repo,
+    repos,
     intake_key: row.intake_key,
     bot_key: row.bot_key,
     agent_key: row.agent_key,
@@ -178,10 +242,12 @@ export function toProjectView(row: RawProjectRow): ProjectDetail {
 }
 
 export function toAgentProject(row: RawProjectRow): AgentProjectInfo {
+  const repos = deserializeProjectRepos(row);
   return {
     id: row.id,
     name: row.name,
-    repo: row.repo,
+    repo: repos[0] ?? row.repo,
+    repos,
     agent_instructions: row.agent_instructions,
   };
 }
@@ -236,6 +302,20 @@ export class Store {
         "ALTER TABLE projects ADD COLUMN agent_instructions TEXT NOT NULL DEFAULT ''",
       );
     }
+    if (!cols.some((c) => c.name === "repos")) {
+      this.db.exec(
+        "ALTER TABLE projects ADD COLUMN repos TEXT NOT NULL DEFAULT '[]'",
+      );
+    }
+    const unmigrated = this.db
+      .prepare("SELECT id, repo FROM projects WHERE (repos IS NULL OR repos = '' OR repos = '[]') AND repo != ''")
+      .all() as Array<{ id: string; repo: string }>;
+    if (unmigrated.length > 0) {
+      const updateStmt = this.db.prepare("UPDATE projects SET repos = ? WHERE id = ?");
+      for (const row of unmigrated) {
+        updateStmt.run(JSON.stringify([row.repo]), row.id);
+      }
+    }
   }
 
   close(): void {
@@ -259,9 +339,25 @@ export class Store {
   }
 
   listProjects(): ProjectSummary[] {
-    return this.db
-      .prepare("SELECT id, name, repo, created_at FROM projects ORDER BY created_at")
-      .all() as unknown as ProjectSummary[];
+    const rows = this.db
+      .prepare("SELECT id, name, repo, repos, created_at FROM projects ORDER BY created_at")
+      .all() as unknown as Array<{
+      id: string;
+      name: string;
+      repo: string;
+      repos?: string;
+      created_at: string;
+    }>;
+    return rows.map((row) => {
+      const repos = deserializeProjectRepos(row);
+      return {
+        id: row.id,
+        name: row.name,
+        repo: repos[0] ?? row.repo,
+        repos,
+        created_at: row.created_at,
+      };
+    });
   }
 
   getProjectRow(projectId: string): RawProjectRow {
@@ -282,20 +378,22 @@ export class Store {
 
   createProject(data: Record<string, unknown>): ProjectDetail {
     const name = field(data, "name", 100);
-    const repo = parseRepository(field(data, "repo", 200));
+    const repos = parseRepositories(data);
+    const repo = repos[0];
     const allowedOrigins = serializeOrigins(data.allowed_origins ?? []);
     const agentInstructions = field(data, "agent_instructions", 8000, false);
     const projectId = uuidHex();
     const created = nowIso();
     this.db
       .prepare(
-        `INSERT INTO projects(id, name, repo, intake_key, bot_key, agent_key, allowed_origins, created_at, agent_instructions)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO projects(id, name, repo, repos, intake_key, bot_key, agent_key, allowed_origins, created_at, agent_instructions)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         projectId,
         name,
         repo,
+        JSON.stringify(repos),
         tokenUrlSafe(32),
         tokenUrlSafe(32),
         tokenUrlSafe(32),
@@ -309,9 +407,14 @@ export class Store {
   updateProject(projectId: string, data: Record<string, unknown>): ProjectDetail {
     const project = this.getProjectRow(projectId);
     const name = "name" in data ? field(data, "name", 100) : project.name;
-    const repo =
-      "repo" in data ? parseRepository(field(data, "repo", 200)) : project.repo;
-    if (repo !== project.repo) {
+    const currentRepos = deserializeProjectRepos(project);
+    const nextRepos =
+      "repos" in data || "repo" in data ? parseRepositories(data) : currentRepos;
+    const nextRepoSet = new Set(nextRepos.map((r) => r.toLowerCase()));
+    const removedExistingRepo = currentRepos.some(
+      (r) => !nextRepoSet.has(r.toLowerCase()),
+    );
+    if (removedExistingRepo) {
       const active = this.db
         .prepare("SELECT 1 FROM tasks WHERE project_id = ? AND owner = 'agent' LIMIT 1")
         .get(projectId);
@@ -319,6 +422,7 @@ export class Store {
         throw new ApiError(409, "Complete active handoffs before rebinding the repository");
       }
     }
+    const repo = nextRepos[0];
     const allowed =
       "allowed_origins" in data
         ? serializeOrigins(data.allowed_origins)
@@ -329,9 +433,9 @@ export class Store {
         : project.agent_instructions;
     this.db
       .prepare(
-        "UPDATE projects SET name = ?, repo = ?, allowed_origins = ?, agent_instructions = ? WHERE id = ?",
+        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ? WHERE id = ?",
       )
-      .run(name, repo, allowed, instructions, projectId);
+      .run(name, repo, JSON.stringify(nextRepos), allowed, instructions, projectId);
     return toProjectView(this.getProjectRow(projectId));
   }
 

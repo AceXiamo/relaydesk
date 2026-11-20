@@ -17,9 +17,11 @@ import {
   GithubError,
   fetchGithubRepositories,
   fetchGithubRepositoriesAcrossConnections,
+  inspectGithubToken,
   listGithubConnectionSummaries,
   readGithubConnections,
   removeGithubConnection,
+  resolveScopeOwner,
   toGithubConnectionSummary,
   upsertGithubConnection,
 } from "./github.ts";
@@ -33,7 +35,7 @@ import {
   validateAiBaseUrl,
 } from "./ai-config.ts";
 import { intakeReply, operatorReply, testAiConnection } from "./assistant.ts";
-import type { AuthMode, AuthStatusPayload } from "../app/lib/types.ts";
+import type { AuthMode, AuthStatusPayload, GithubOwnerInfo } from "../app/lib/types.ts";
 
 export interface ApiContextOptions {
   store: Store;
@@ -425,24 +427,97 @@ export class ApiRouter {
     }
     const data = await this.readJson(req);
     try {
-      if (subparts.length === 1 && subparts[0] === "connect") {
-        const token = field(data, "token", 512);
-        if (!/^[A-Za-z0-9_]+$/.test(token)) {
-          throw new ApiError(400, "请输入有效的 GitHub token");
+      if (subparts.length === 1 && subparts[0] === "inspect") {
+        const rawToken = typeof data.token === "string" ? data.token.trim() : "";
+        const id =
+          typeof data.id === "string" && data.id.trim()
+            ? data.id.trim().slice(0, 64)
+            : undefined;
+        let token = rawToken;
+        if (token) {
+          if (token.length > 512 || !/^[A-Za-z0-9_]+$/.test(token)) {
+            throw new ApiError(400, "请输入有效的 GitHub token");
+          }
+        } else if (id) {
+          const existing = readGithubConnections(this.store.dbPath).find((c) => c.id === id);
+          if (!existing) {
+            throw new ApiError(404, "未找到对应的 GitHub Key。");
+          }
+          token = existing.token;
+        } else {
+          throw new ApiError(400, "请输入 GitHub token");
         }
+        return await inspectGithubToken(token);
+      }
+      if (subparts.length === 1 && subparts[0] === "connect") {
+        const rawToken = typeof data.token === "string" ? data.token.trim() : "";
         const label =
           typeof data.label === "string" ? data.label.trim().slice(0, 80) : "";
         const id =
           typeof data.id === "string" && data.id.trim()
             ? data.id.trim().slice(0, 64)
             : undefined;
-        const catalog = await fetchGithubRepositories(token, { page: 1 });
+        const existingConn = id
+          ? readGithubConnections(this.store.dbPath).find((c) => c.id === id)
+          : undefined;
+        if (id && !existingConn && !rawToken) {
+          throw new ApiError(404, "未找到对应的 GitHub Key。");
+        }
+
+        let token = rawToken;
+        if (token) {
+          if (token.length > 512 || !/^[A-Za-z0-9_]+$/.test(token)) {
+            throw new ApiError(400, "请输入有效的 GitHub token");
+          }
+        } else if (existingConn) {
+          token = existingConn.token;
+        } else {
+          throw new ApiError(400, "请输入有效的 GitHub token");
+        }
+
+        let scopeOwner: GithubOwnerInfo | null | undefined;
+        if ("scope_owner" in data) {
+          const rawScope = data.scope_owner;
+          if (rawScope === null || rawScope === "" || rawScope === "auto") {
+            scopeOwner = null;
+          } else if (rawScope && typeof rawScope === "object") {
+            const obj = rawScope as Record<string, unknown>;
+            const scopeLogin =
+              typeof obj.login === "string" ? obj.login.trim().replace(/^@/, "") : "";
+            const scopeType =
+              obj.type === "Organization" || obj.type === "User" ? obj.type : null;
+            if (!scopeLogin || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(scopeLogin)) {
+              throw new ApiError(400, "无效的 GitHub 账号或组织名称");
+            }
+            if (!scopeType) {
+              throw new ApiError(400, "归属类型仅支持个人账号或组织");
+            }
+            scopeOwner = await resolveScopeOwner(token, {
+              login: scopeLogin,
+              type: scopeType,
+            });
+          } else {
+            throw new ApiError(400, "无效的归属作用域参数");
+          }
+        } else if (existingConn) {
+          scopeOwner = existingConn.scope_owner ?? null;
+        }
+
+        const effectiveScope = scopeOwner ?? null;
+        const catalog = await fetchGithubRepositories(token, {
+          page: 1,
+          scopeOwner: effectiveScope,
+        });
+        const finalScope = effectiveScope
+          ? catalog.owners[0] ?? effectiveScope
+          : null;
         const saved = upsertGithubConnection(this.store.dbPath, {
           id,
           label: label || undefined,
           token,
           viewer: catalog.viewer,
           owners: catalog.owners,
+          scope_owner: finalScope,
           repo_count: catalog.items.length,
         });
         const summaries = saved.connections.map(toGithubConnectionSummary);
@@ -481,12 +556,19 @@ export class ApiRouter {
           if (!target) {
             throw new ApiError(404, "未找到对应的 GitHub Key。");
           }
-          const catalog = await fetchGithubRepositories(target.token, { page: 1 });
+          const catalog = await fetchGithubRepositories(target.token, {
+            page: 1,
+            scopeOwner: target.scope_owner ?? null,
+          });
+          const finalScope = target.scope_owner
+            ? catalog.owners[0] ?? target.scope_owner
+            : null;
           const saved = upsertGithubConnection(this.store.dbPath, {
             id: target.id,
             token: target.token,
             viewer: catalog.viewer,
             owners: catalog.owners,
+            scope_owner: finalScope,
             repo_count: catalog.items.length,
           });
           const summaries = saved.connections.map(toGithubConnectionSummary);
@@ -501,12 +583,19 @@ export class ApiRouter {
         }
         let latest = existing;
         for (const conn of existing) {
-          const catalog = await fetchGithubRepositories(conn.token, { page: 1 });
+          const catalog = await fetchGithubRepositories(conn.token, {
+            page: 1,
+            scopeOwner: conn.scope_owner ?? null,
+          });
+          const finalScope = conn.scope_owner
+            ? catalog.owners[0] ?? conn.scope_owner
+            : null;
           const saved = upsertGithubConnection(this.store.dbPath, {
             id: conn.id,
             token: conn.token,
             viewer: catalog.viewer,
             owners: catalog.owners,
+            scope_owner: finalScope,
             repo_count: catalog.items.length,
           });
           latest = saved.connections;

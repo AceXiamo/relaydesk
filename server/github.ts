@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type {
   GithubConnectionSummary,
+  GithubInspectPayload,
   GithubOwnerInfo,
   GithubRepoItem,
   GithubRepoWarning,
@@ -32,6 +33,7 @@ export interface StoredGithubConnection {
   token_type: GithubTokenType;
   viewer: GithubOwnerInfo | null;
   owners: GithubOwnerInfo[];
+  scope_owner?: GithubOwnerInfo | null;
   repo_count: number;
   created_at: string;
   updated_at: string;
@@ -81,6 +83,7 @@ export function toGithubConnectionSummary(
     token_type: conn.token_type,
     viewer: conn.viewer,
     owners: conn.owners,
+    scope_owner: conn.scope_owner ?? null,
     repo_count: conn.repo_count,
     created_at: conn.created_at,
     updated_at: conn.updated_at,
@@ -115,6 +118,7 @@ function normalizeStoredConnection(raw: unknown): StoredGithubConnection | null 
       ? obj.token_type
       : detectGithubTokenType(token);
   const viewer = normalizeStoredOwner(obj.viewer);
+  const scopeOwner = normalizeStoredOwner(obj.scope_owner);
   const owners = Array.isArray(obj.owners)
     ? obj.owners
         .map((item) => normalizeStoredOwner(item))
@@ -123,7 +127,7 @@ function normalizeStoredConnection(raw: unknown): StoredGithubConnection | null 
   const label =
     typeof obj.label === "string" && obj.label.trim()
       ? obj.label.trim().slice(0, 80)
-      : inferConnectionLabel(viewer, owners);
+      : inferConnectionLabel(viewer, owners, scopeOwner);
   const now = new Date().toISOString();
   return {
     id,
@@ -132,6 +136,7 @@ function normalizeStoredConnection(raw: unknown): StoredGithubConnection | null 
     token_type: tokenType,
     viewer,
     owners,
+    scope_owner: scopeOwner,
     repo_count:
       typeof obj.repo_count === "number" && Number.isFinite(obj.repo_count) && obj.repo_count >= 0
         ? Math.floor(obj.repo_count)
@@ -146,7 +151,13 @@ function normalizeStoredConnection(raw: unknown): StoredGithubConnection | null 
 export function inferConnectionLabel(
   viewer: GithubOwnerInfo | null,
   owners: GithubOwnerInfo[],
+  scopeOwner?: GithubOwnerInfo | null,
 ): string {
+  if (scopeOwner?.login) {
+    return scopeOwner.type === "Organization"
+      ? scopeOwner.login
+      : `@${scopeOwner.login}`;
+  }
   const orgs = owners.filter((o) => o.type === "Organization");
   const users = owners.filter((o) => o.type === "User");
 
@@ -274,6 +285,7 @@ export function upsertGithubConnection(
     token: string;
     viewer: GithubOwnerInfo | null;
     owners: GithubOwnerInfo[];
+    scope_owner?: GithubOwnerInfo | null;
     repo_count: number;
   },
 ): { connection: StoredGithubConnection; connections: StoredGithubConnection[] } {
@@ -290,21 +302,22 @@ export function upsertGithubConnection(
     targetIdx = existing.findIndex((c) => c.token === token);
   }
 
-  const resolvedLabel =
-    (input.label ?? "").trim().slice(0, 80) ||
-    inferConnectionLabel(input.viewer, input.owners);
-
   let saved: StoredGithubConnection;
   let next: StoredGithubConnection[];
 
   if (targetIdx >= 0) {
     const prev = existing[targetIdx];
     const nextId = prev.id === "legacy" ? `gh_${randomBytes(6).toString("hex")}` : prev.id;
+    const nextScope =
+      input.scope_owner !== undefined ? input.scope_owner : (prev.scope_owner ?? null);
+    const resolvedLabel =
+      (input.label ?? "").trim().slice(0, 80) ||
+      inferConnectionLabel(input.viewer, input.owners, nextScope);
     const explicitLabel = (input.label ?? "").trim().slice(0, 80);
     const prevWasAutoLabel =
       prev.id === "legacy" ||
       !prev.label ||
-      prev.label === inferConnectionLabel(prev.viewer, prev.owners);
+      prev.label === inferConnectionLabel(prev.viewer, prev.owners, prev.scope_owner);
     saved = {
       id: nextId,
       label: explicitLabel || (prevWasAutoLabel ? resolvedLabel : prev.label),
@@ -312,6 +325,7 @@ export function upsertGithubConnection(
       token_type: tokenType,
       viewer: input.viewer,
       owners: input.owners,
+      scope_owner: nextScope,
       repo_count: input.repo_count,
       created_at: prev.created_at,
       updated_at: now,
@@ -321,6 +335,10 @@ export function upsertGithubConnection(
     if (existing.length >= MAX_GITHUB_CONNECTIONS) {
       throw new GithubError(`最多支持配置 ${MAX_GITHUB_CONNECTIONS} 个 GitHub Key。`);
     }
+    const nextScope = input.scope_owner ?? null;
+    const resolvedLabel =
+      (input.label ?? "").trim().slice(0, 80) ||
+      inferConnectionLabel(input.viewer, input.owners, nextScope);
     saved = {
       id: `gh_${randomBytes(6).toString("hex")}`,
       label: resolvedLabel,
@@ -328,6 +346,7 @@ export function upsertGithubConnection(
       token_type: tokenType,
       viewer: input.viewer,
       owners: input.owners,
+      scope_owner: nextScope,
       repo_count: input.repo_count,
       created_at: now,
       updated_at: now,
@@ -387,6 +406,7 @@ export interface FetchGithubReposOptions {
   page?: number;
   owner?: string;
   ownerType?: "User" | "Organization";
+  scopeOwner?: GithubOwnerInfo | null;
   apiBase?: string;
 }
 
@@ -623,6 +643,151 @@ async function fetchViewerAndOrgs(
   return { viewer, orgs };
 }
 
+const VALID_OWNER_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+export async function inspectGithubToken(
+  token: string,
+  apiBaseOverride?: string,
+): Promise<GithubInspectPayload> {
+  const apiBase = getGithubApiBase(apiBaseOverride);
+  const tokenType = detectGithubTokenType(token);
+
+  const [userRes, orgsRes, orgReposRes] = await Promise.all([
+    githubRequest<RawGithubUser>(token, "/user", apiBase),
+    githubRequest<RawGithubUser[]>(token, "/user/orgs?per_page=100", apiBase).catch(
+      () => null,
+    ),
+    githubRequest<RawGithubRepo[]>(
+      token,
+      "/user/repos?affiliation=organization_member&sort=updated&per_page=100&page=1",
+      apiBase,
+    ).catch(() => null),
+  ]);
+
+  if (userRes.status === 401) {
+    throw new GithubError("GitHub Token 无效或已过期，请检查后重试。");
+  }
+  if (userRes.status === 403) {
+    throw new GithubError("GitHub 拒绝了请求，请检查 Token 权限或 API 配额。");
+  }
+  if (!userRes.ok) {
+    throw new GithubError(`GitHub 返回 ${userRes.status}，请稍后重试。`);
+  }
+
+  let viewer: GithubOwnerInfo | null = null;
+  if (userRes.data && typeof userRes.data.login === "string" && userRes.data.login) {
+    const avatarUrl = normalizeAvatarUrl(userRes.data.avatar_url);
+    viewer = {
+      login: userRes.data.login,
+      type: userRes.data.type === "Organization" ? "Organization" : "User",
+      ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+    };
+  }
+
+  const orgsFromApi: GithubOwnerInfo[] = [];
+  if (orgsRes?.ok && Array.isArray(orgsRes.data)) {
+    for (const raw of orgsRes.data) {
+      if (raw && typeof raw.login === "string" && raw.login) {
+        const avatarUrl = normalizeAvatarUrl(raw.avatar_url);
+        orgsFromApi.push({
+          login: raw.login,
+          type: "Organization",
+          ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+        });
+      }
+    }
+  }
+
+  const orgRepoItems: GithubRepoItem[] = [];
+  if (orgReposRes?.ok && Array.isArray(orgReposRes.data)) {
+    for (const raw of orgReposRes.data) {
+      const parsed = normalizeRepo(raw);
+      if (parsed && parsed.owner_type === "Organization") {
+        orgRepoItems.push(parsed);
+      }
+    }
+  }
+
+  const candidates = mergeOwners(viewer, orgsFromApi, orgRepoItems);
+
+  // Best-effort suggestion only when unambiguous for Fine-grained PATs
+  let suggestedScope: GithubOwnerInfo | null = null;
+  if (tokenType === "fine_grained") {
+    const uniqueRepoOrgs = new Map<string, GithubOwnerInfo>();
+    for (const repo of orgRepoItems) {
+      const key = repo.owner.toLowerCase();
+      if (!uniqueRepoOrgs.has(key)) {
+        uniqueRepoOrgs.set(key, {
+          login: repo.owner,
+          type: "Organization",
+          ...(repo.owner_avatar ? { avatar_url: repo.owner_avatar } : {}),
+        });
+      }
+    }
+    if (uniqueRepoOrgs.size === 1 && orgsFromApi.length <= 1) {
+      suggestedScope = Array.from(uniqueRepoOrgs.values())[0] ?? null;
+    } else if (candidates.length === 1 && viewer) {
+      suggestedScope = viewer;
+    }
+  }
+
+  return {
+    token_type: tokenType,
+    viewer,
+    candidates,
+    suggested_scope: suggestedScope,
+  };
+}
+
+export async function resolveScopeOwner(
+  token: string,
+  input: { login: string; type: "User" | "Organization" },
+  apiBaseOverride?: string,
+): Promise<GithubOwnerInfo> {
+  const login = input.login.trim().replace(/^@/, "");
+  if (!VALID_OWNER_LOGIN_RE.test(login)) {
+    throw new GithubError("无效的 GitHub 账号或组织名称。");
+  }
+  const type: "User" | "Organization" =
+    input.type === "Organization" ? "Organization" : "User";
+  const apiBase = getGithubApiBase(apiBaseOverride);
+
+  if (type === "Organization") {
+    const orgRes = await githubRequest<RawGithubUser>(
+      token,
+      `/orgs/${encodeURIComponent(login)}`,
+      apiBase,
+    ).catch(() => null);
+    if (orgRes?.ok && orgRes.data && typeof orgRes.data.login === "string" && orgRes.data.login) {
+      const avatarUrl = normalizeAvatarUrl(orgRes.data.avatar_url);
+      return {
+        login: orgRes.data.login,
+        type: "Organization",
+        ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+      };
+    }
+    return { login, type: "Organization" };
+  }
+
+  const userRes = await githubRequest<RawGithubUser>(token, "/user", apiBase).catch(
+    () => null,
+  );
+  if (
+    userRes?.ok &&
+    userRes.data &&
+    typeof userRes.data.login === "string" &&
+    userRes.data.login.toLowerCase() === login.toLowerCase()
+  ) {
+    const avatarUrl = normalizeAvatarUrl(userRes.data.avatar_url);
+    return {
+      login: userRes.data.login,
+      type: "User",
+      ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+    };
+  }
+  return { login, type: "User" };
+}
+
 export async function fetchGithubRepositories(
   token: string,
   pageOrOptions: number | FetchGithubReposOptions = 1,
@@ -634,6 +799,155 @@ export async function fetchGithubRepositories(
   const owner = requestedOwner || "all";
   const apiBase = getGithubApiBase(opts.apiBase);
   const isFineGrained = detectGithubTokenType(token) === "fine_grained";
+  const scopeOwner = opts.scopeOwner ?? null;
+
+  // Explicit scope_owner lock (user manually selected an org or personal account for this Key)
+  if (scopeOwner) {
+    const scopeKey = scopeOwner.login.toLowerCase();
+    if (owner !== "all" && owner.toLowerCase() !== scopeKey) {
+      return {
+        repos: [],
+        items: [],
+        viewer: null,
+        owners: [scopeOwner],
+        owner,
+        page,
+        more: false,
+      };
+    }
+
+    const viewerPromise =
+      page === 1
+        ? fetchViewerAndOrgs(token, apiBase, { includeOrgs: false }).then((m) => m.viewer)
+        : Promise.resolve(null);
+
+    if (scopeOwner.type === "Organization") {
+      const [orgRes, viewer] = await Promise.all([
+        githubRequest<RawGithubRepo[]>(
+          token,
+          `/orgs/${encodeURIComponent(scopeOwner.login)}/repos?type=all&sort=updated&per_page=100&page=${page}`,
+          apiBase,
+        ),
+        viewerPromise,
+      ]);
+
+      if (orgRes.ok && Array.isArray(orgRes.data)) {
+        const items = dedupeAndSortRepos(
+          orgRes.data
+            .map((r) => normalizeRepo(r))
+            .filter((r): r is GithubRepoItem => r !== null),
+        );
+        const enrichedScope: GithubOwnerInfo = {
+          login: items[0]?.owner ?? scopeOwner.login,
+          type: "Organization",
+          ...(scopeOwner.avatar_url || items[0]?.owner_avatar
+            ? { avatar_url: scopeOwner.avatar_url || items[0]?.owner_avatar }
+            : {}),
+        };
+        return {
+          repos: items.map((r) => r.full_name),
+          items,
+          viewer,
+          owners: [enrichedScope],
+          owner,
+          page,
+          more: orgRes.link.includes('rel="next"'),
+        };
+      }
+
+      if (orgRes.status === 403 || orgRes.status === 404) {
+        const fallbackRes = await githubRequest<RawGithubRepo[]>(
+          token,
+          `/user/repos?affiliation=organization_member,collaborator&sort=updated&per_page=100&page=${page}`,
+          apiBase,
+        );
+        if (fallbackRes.ok && Array.isArray(fallbackRes.data)) {
+          const filtered = dedupeAndSortRepos(
+            fallbackRes.data
+              .map((r) => normalizeRepo(r))
+              .filter(
+                (r): r is GithubRepoItem =>
+                  r !== null && r.owner.toLowerCase() === scopeKey,
+              ),
+          );
+          if (filtered.length > 0 || page > 1) {
+            const enrichedScope: GithubOwnerInfo = {
+              login: filtered[0]?.owner ?? scopeOwner.login,
+              type: "Organization",
+              ...(scopeOwner.avatar_url || filtered[0]?.owner_avatar
+                ? { avatar_url: scopeOwner.avatar_url || filtered[0]?.owner_avatar }
+                : {}),
+            };
+            return {
+              repos: filtered.map((r) => r.full_name),
+              items: filtered,
+              viewer,
+              owners: [enrichedScope],
+              owner,
+              page,
+              more: fallbackRes.link.includes('rel="next"'),
+            };
+          }
+        }
+        if (orgRes.status === 404) {
+          throw new GithubError(`未找到组织「${scopeOwner.login}」，或当前 Token 无权访问。`);
+        }
+        throw new GithubError(
+          `GitHub 拒绝访问组织「${scopeOwner.login}」，请检查 Token 是否已授权该组织及 SSO。`,
+        );
+      }
+
+      if (orgRes.status === 401) {
+        throw new GithubError("GitHub Token 无效或已过期，请重新配置。");
+      }
+      throw new GithubError(`GitHub 返回 ${orgRes.status}，请稍后重试。`);
+    }
+
+    // scopeOwner.type === "User"
+    const [userReposRes, viewer] = await Promise.all([
+      githubRequest<RawGithubRepo[]>(
+        token,
+        `/user/repos?affiliation=owner&sort=updated&per_page=100&page=${page}`,
+        apiBase,
+      ),
+      viewerPromise,
+    ]);
+
+    if (userReposRes.status === 401 || userReposRes.status === 403) {
+      throw new GithubError("GitHub 拒绝了请求，请检查 Token、组织授权和 API 配额。");
+    }
+    if (!userReposRes.ok || !Array.isArray(userReposRes.data)) {
+      throw new GithubError(`GitHub 返回 ${userReposRes.status}，请稍后重试。`);
+    }
+
+    const items = dedupeAndSortRepos(
+      userReposRes.data
+        .map((r) => normalizeRepo(r))
+        .filter(
+          (r): r is GithubRepoItem =>
+            r !== null && r.owner.toLowerCase() === scopeKey,
+        ),
+    );
+    const matchedAvatar =
+      scopeOwner.avatar_url ||
+      (viewer && viewer.login.toLowerCase() === scopeKey ? viewer.avatar_url : undefined) ||
+      items[0]?.owner_avatar;
+    const enrichedScope: GithubOwnerInfo = {
+      login: items[0]?.owner ?? (viewer && viewer.login.toLowerCase() === scopeKey ? viewer.login : scopeOwner.login),
+      type: "User",
+      ...(matchedAvatar ? { avatar_url: matchedAvatar } : {}),
+    };
+
+    return {
+      repos: items.map((r) => r.full_name),
+      items,
+      viewer,
+      owners: [enrichedScope],
+      owner,
+      page,
+      more: userReposRes.link.includes('rel="next"'),
+    };
+  }
 
   // Best-effort fetch of viewer (& org list for classic PATs) on page 1.
   // For Fine-grained PATs, /user/orgs returns all of the user's public org memberships
@@ -814,6 +1128,9 @@ function collectCachedOwners(
 ): GithubOwnerInfo[] {
   const list: GithubOwnerInfo[] = [];
   for (const conn of connections) {
+    if (conn.scope_owner) {
+      list.push(conn.scope_owner);
+    }
     for (const owner of conn.owners) {
       list.push(owner);
     }
@@ -852,7 +1169,10 @@ export async function fetchGithubRepositoriesAcrossConnections(
     if (!target) {
       throw new GithubError("未找到指定的 GitHub Key 配置。");
     }
-    const res = await fetchGithubRepositories(target.token, opts);
+    const res = await fetchGithubRepositories(target.token, {
+      ...opts,
+      scopeOwner: target.scope_owner ?? undefined,
+    });
     const items = annotateItems(res.items, target);
     return {
       ...res,
@@ -864,9 +1184,12 @@ export async function fetchGithubRepositoriesAcrossConnections(
   // Single-connection fast path
   if (connections.length === 1) {
     const only = connections[0];
-    const res = await fetchGithubRepositories(only.token, opts);
+    const res = await fetchGithubRepositories(only.token, {
+      ...opts,
+      scopeOwner: only.scope_owner ?? undefined,
+    });
     const items = annotateItems(res.items, only);
-    const useFreshOwnersOnly = owner === "all" && page === 1;
+    const useFreshOwnersOnly = Boolean(only.scope_owner) || (owner === "all" && page === 1);
     const owners = useFreshOwnersOnly
       ? res.owners
       : mergeOwners(res.viewer ?? only.viewer, [...allCachedOwners, ...res.owners], items, {
@@ -885,13 +1208,38 @@ export async function fetchGithubRepositoriesAcrossConnections(
   let remaining: StoredGithubConnection[] = [];
   if (owner !== "all") {
     const ownerLower = owner.toLowerCase();
-    const matched = connections.filter((c) =>
-      c.owners.some((o) => o.login.toLowerCase() === ownerLower),
+    const scopedMatch = connections.filter(
+      (c) => c.scope_owner && c.scope_owner.login.toLowerCase() === ownerLower,
     );
-    if (matched.length > 0) {
-      candidates = matched;
-      const matchedIds = new Set(matched.map((c) => c.id));
-      remaining = connections.filter((c) => !matchedIds.has(c.id));
+    const unscopedMatch = connections.filter(
+      (c) =>
+        !c.scope_owner &&
+        c.owners.some((o) => o.login.toLowerCase() === ownerLower),
+    );
+    const unscopedOther = connections.filter(
+      (c) =>
+        !c.scope_owner &&
+        !c.owners.some((o) => o.login.toLowerCase() === ownerLower),
+    );
+    if (scopedMatch.length > 0 || unscopedMatch.length > 0) {
+      candidates = [...scopedMatch, ...unscopedMatch];
+      remaining = unscopedOther;
+    } else if (unscopedOther.length > 0) {
+      candidates = unscopedOther;
+      remaining = [];
+    } else {
+      // Every configured key is explicitly locked to a different owner
+      return {
+        repos: [],
+        items: [],
+        viewer: primaryViewer,
+        owners: mergeOwners(primaryViewer, allCachedOwners, [], {
+          includeViewerOnlyIfPresent: true,
+        }),
+        owner,
+        page,
+        more: false,
+      };
     }
   }
 
@@ -899,7 +1247,10 @@ export async function fetchGithubRepositoriesAcrossConnections(
     const settled = await Promise.allSettled(
       batch.map(async (conn) => ({
         conn,
-        payload: await fetchGithubRepositories(conn.token, opts),
+        payload: await fetchGithubRepositories(conn.token, {
+          ...opts,
+          scopeOwner: conn.scope_owner ?? undefined,
+        }),
       })),
     );
     const ok: Array<{ conn: StoredGithubConnection; payload: GithubReposPayload }> = [];
@@ -926,7 +1277,7 @@ export async function fetchGithubRepositoriesAcrossConnections(
 
   let { ok, warnings } = await queryBatch(candidates);
 
-  // If targeted connections failed or returned empty for a specific owner, try remaining keys
+  // If targeted connections failed or returned empty for a specific owner, try remaining unscoped keys
   if (
     owner !== "all" &&
     remaining.length > 0 &&
@@ -935,7 +1286,6 @@ export async function fetchGithubRepositoriesAcrossConnections(
     const fallback = await queryBatch(remaining);
     if (fallback.ok.length > 0) {
       ok = [...ok, ...fallback.ok];
-      // Clear warnings from the targeted batch only if fallback succeeded and we didn't want spurious errors
       warnings = [...warnings, ...fallback.warnings];
     }
   }
@@ -949,11 +1299,16 @@ export async function fetchGithubRepositoriesAcrossConnections(
     ok.flatMap((entry) => annotateItems(entry.payload.items, entry.conn)),
   );
   const fetchedOwners = ok.flatMap((entry) => entry.payload.owners);
+  const scopedOwners = connections
+    .map((c) => c.scope_owner)
+    .filter((o): o is GithubOwnerInfo => Boolean(o));
   const viewer = ok.find((entry) => entry.payload.viewer)?.payload.viewer ?? primaryViewer;
   const includeCached = owner !== "all" || page > 1 || warnings.length > 0;
   const mergedOwners = mergeOwners(
     viewer,
-    includeCached ? [...allCachedOwners, ...fetchedOwners] : fetchedOwners,
+    includeCached
+      ? [...allCachedOwners, ...scopedOwners, ...fetchedOwners]
+      : [...scopedOwners, ...fetchedOwners],
     mergedItems,
     {
       includeViewerOnlyIfPresent: true,

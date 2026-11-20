@@ -471,7 +471,7 @@ function ConsoleWorkspace() {
               setProjects((prev) =>
                 prev.map((p) =>
                   p.id === updated.id
-                    ? { ...p, name: updated.name, repo: updated.repo }
+                    ? { ...p, name: updated.name, repo: updated.repo, repos: updated.repos }
                     : p,
                 ),
               );
@@ -550,6 +550,7 @@ function ConsoleWorkspace() {
               id: proj.id,
               name: proj.name,
               repo: proj.repo,
+              repos: proj.repos,
               created_at: proj.created_at,
             },
           ]);

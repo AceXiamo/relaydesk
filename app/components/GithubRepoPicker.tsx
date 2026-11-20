@@ -11,10 +11,14 @@ import type {
 } from "~/lib/types.ts";
 
 interface GithubRepoPickerProps {
-  value: string;
+  values: string[];
   onChange: (
-    value: string,
-    meta?: { pickedFromGithub?: boolean; repoItem?: GithubRepoItem },
+    values: string[],
+    meta?: {
+      pickedFromGithub?: boolean;
+      latestRepo?: string;
+      repoItem?: GithubRepoItem;
+    },
   ) => void;
   githubConfigured: boolean;
   githubConnections?: GithubConnectionSummary[];
@@ -22,7 +26,10 @@ interface GithubRepoPickerProps {
   defaultExpanded?: boolean;
   /** Jump to Settings to connect GitHub when not configured */
   onOpenGithubSettings?: () => void;
-  required?: boolean;
+  /** Optional controlled manual input so parent forms can accept un-entered text on submit */
+  draftValue?: string;
+  onDraftChange?: (draft: string) => void;
+  maxRepos?: number;
 }
 
 interface ScopeCache {
@@ -32,18 +39,47 @@ interface ScopeCache {
 }
 
 const VALID_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const VALID_REPO_SLUG_RE = /^([\w.-]+)\/([\w.-]+)$/;
+
+export function parseManualRepoInput(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const httpsMatch = trimmed.match(
+    /^https?:\/\/(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git|\/)?$/i,
+  );
+  if (httpsMatch) {
+    const [owner, name] = httpsMatch[1].split("/");
+    if (owner && name && owner !== "." && owner !== ".." && name !== "." && name !== "..") {
+      return `${owner}/${name}`;
+    }
+    return null;
+  }
+  const sshMatch = trimmed.match(
+    /^(?:git@github\.com:|ssh:\/\/git@github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i,
+  );
+  if (sshMatch) {
+    const [owner, name] = sshMatch[1].split("/");
+    if (owner && name && owner !== "." && owner !== ".." && name !== "." && name !== "..") {
+      return `${owner}/${name}`;
+    }
+    return null;
+  }
+  const plainMatch = trimmed.replace(/\.git$/i, "").replace(/\/$/, "").match(VALID_REPO_SLUG_RE);
+  if (plainMatch) {
+    const [, owner, name] = plainMatch;
+    if (owner !== "." && owner !== ".." && name !== "." && name !== "..") {
+      return `${owner}/${name}`;
+    }
+  }
+  return null;
+}
 
 function parseNormalizedRepoPreview(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  const httpsMatch = trimmed.match(
-    /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git|\/)?$/i,
-  );
-  if (httpsMatch) return httpsMatch[1];
-  const sshMatch = trimmed.match(
-    /^git@github\.com:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/i,
-  );
-  if (sshMatch) return sshMatch[1];
+  if (/^(?:https?:\/\/|git@|ssh:\/\/)/i.test(trimmed)) {
+    return parseManualRepoInput(trimmed);
+  }
   return null;
 }
 
@@ -177,18 +213,32 @@ export function GithubOwnerAvatar({
 }
 
 export function GithubRepoPicker({
-  value,
+  values,
   onChange,
   githubConfigured,
   githubConnections = [],
   defaultExpanded = false,
   onOpenGithubSettings,
-  required = true,
+  draftValue,
+  onDraftChange,
+  maxRepos = 20,
 }: GithubRepoPickerProps) {
   const repoInputId = useId();
+  const [internalDraft, setInternalDraft] = useState("");
+  const manualInput = draftValue !== undefined ? draftValue : internalDraft;
+  const setManualInput = useCallback(
+    (next: string) => {
+      if (onDraftChange) onDraftChange(next);
+      else setInternalDraft(next);
+    },
+    [onDraftChange],
+  );
+  const [manualError, setManualError] = useState("");
+
   const seededOwners = useMemo(() => {
     const all: GithubOwnerInfo[] = [];
     for (const conn of githubConnections) {
+      if (conn.scope_owner) all.push(conn.scope_owner);
       for (const o of conn.owners) all.push(o);
     }
     const primaryViewer = githubConnections.find((c) => c.viewer)?.viewer?.login;
@@ -196,7 +246,13 @@ export function GithubRepoPicker({
   }, [githubConnections]);
 
   const connectionsSignature = useMemo(
-    () => githubConnections.map((c) => `${c.id}:${c.updated_at}`).join("|"),
+    () =>
+      githubConnections
+        .map(
+          (c) =>
+            `${c.id}:${c.updated_at}:${c.scope_owner?.type ?? ""}:${c.scope_owner?.login ?? ""}`,
+        )
+        .join("|"),
     [githubConnections],
   );
   const prevSigRef = useRef(connectionsSignature);
@@ -384,12 +440,69 @@ export function GithubRepoPicker({
     void fetchScope(cleaned, "Organization", 1, true);
   };
 
-  const handlePickRepo = (item: GithubRepoItem) => {
-    onChange(item.full_name, { pickedFromGithub: true, repoItem: item });
+  const selectedSet = useMemo(
+    () => new Set(values.map((v) => v.trim().toLowerCase()).filter(Boolean)),
+    [values],
+  );
+
+  const handleToggleRepo = (item: GithubRepoItem) => {
+    const key = item.full_name.toLowerCase();
+    setManualError("");
+    if (selectedSet.has(key)) {
+      const next = values.filter((v) => v.trim().toLowerCase() !== key);
+      onChange(next, { pickedFromGithub: true, repoItem: item });
+      return;
+    }
+    if (values.length >= maxRepos) {
+      setManualError(`单个项目最多绑定 ${maxRepos} 个 GitHub 仓库。`);
+      return;
+    }
+    onChange([...values, item.full_name], {
+      pickedFromGithub: true,
+      latestRepo: item.full_name,
+      repoItem: item,
+    });
   };
 
-  const normalizedPreview = parseNormalizedRepoPreview(value);
-  const selectedLower = (normalizedPreview ?? value).trim().toLowerCase();
+  const handleAddManualRepo = () => {
+    const parsed = parseManualRepoInput(manualInput);
+    if (!parsed) {
+      setManualError("请输入有效的 owner/repository 或 GitHub 仓库地址。");
+      return;
+    }
+    setManualError("");
+    const key = parsed.toLowerCase();
+    if (selectedSet.has(key)) {
+      setManualInput("");
+      return;
+    }
+    if (values.length >= maxRepos) {
+      setManualError(`单个项目最多绑定 ${maxRepos} 个 GitHub 仓库。`);
+      return;
+    }
+    onChange([...values, parsed], { pickedFromGithub: false, latestRepo: parsed });
+    setManualInput("");
+  };
+
+  const handleRemoveRepo = (repoToRemove: string) => {
+    const key = repoToRemove.trim().toLowerCase();
+    setManualError("");
+    onChange(
+      values.filter((v) => v.trim().toLowerCase() !== key),
+      { pickedFromGithub: false },
+    );
+  };
+
+  const handleSetPrimaryRepo = (repoToPromote: string) => {
+    const key = repoToPromote.trim().toLowerCase();
+    const target = values.find((v) => v.trim().toLowerCase() === key);
+    if (!target) return;
+    const rest = values.filter((v) => v.trim().toLowerCase() !== key);
+    onChange([target, ...rest], { pickedFromGithub: false });
+  };
+
+  const normalizedPreview = parseNormalizedRepoPreview(manualInput);
+  const manualParsed = parseManualRepoInput(manualInput);
   const orgOwners = owners.filter((o) => o.type === "Organization");
 
   const ownerMap = useMemo(() => {
@@ -400,25 +513,35 @@ export function GithubRepoPicker({
     return map;
   }, [owners]);
 
+  const resolveOwnerInfo = useCallback(
+    (repoFullName: string): GithubOwnerInfo | null => {
+      const clean = repoFullName.trim();
+      if (!clean.includes("/")) return null;
+      const ownerLogin = clean.split("/")[0]?.toLowerCase();
+      if (!ownerLogin) return null;
+      const knownOwner = ownerMap.get(ownerLogin);
+      if (knownOwner) return knownOwner;
+      for (const scope of Object.values(cache)) {
+        const knownItem = scope.items.find(
+          (item) => item.owner.toLowerCase() === ownerLogin,
+        );
+        if (knownItem) {
+          return {
+            login: knownItem.owner,
+            type: knownItem.owner_type,
+            avatar_url: knownItem.owner_avatar,
+          };
+        }
+      }
+      return null;
+    },
+    [cache, ownerMap],
+  );
+
   const inputMatchedOwner = useMemo(() => {
-    const clean = (normalizedPreview ?? value).trim();
-    if (!clean.includes("/")) return null;
-    const ownerLogin = clean.split("/")[0]?.toLowerCase();
-    if (!ownerLogin) return null;
-    const knownOwner = ownerMap.get(ownerLogin);
-    if (knownOwner) return knownOwner;
-    const knownItem = currentItems.find(
-      (item) => item.owner.toLowerCase() === ownerLogin,
-    );
-    if (knownItem) {
-      return {
-        login: knownItem.owner,
-        type: knownItem.owner_type,
-        avatar_url: knownItem.owner_avatar,
-      };
-    }
-    return null;
-  }, [currentItems, normalizedPreview, ownerMap, value]);
+    const clean = (manualParsed ?? manualInput).trim();
+    return resolveOwnerInfo(clean);
+  }, [manualInput, manualParsed, resolveOwnerInfo]);
 
   // Detect if user typed an org prefix like "my-org" or "my-org/" that isn't loaded yet
   const candidateOrgFromQuery = useMemo(() => {
@@ -437,15 +560,20 @@ export function GithubRepoPicker({
 
   return (
     <div className="space-y-2.5">
-      {/* Editable Repo Input */}
-      <div className="space-y-1.5">
+      {/* Editable Repo Input + Selected Repos Chips */}
+      <div className="space-y-2">
         <div className="flex items-center justify-between gap-2">
-          <label
-            htmlFor={repoInputId}
-            className="text-[12.5px] font-medium text-[var(--text-primary)]"
-          >
-            GitHub 仓库
-          </label>
+          <div className="flex items-center gap-2">
+            <label
+              htmlFor={repoInputId}
+              className="text-[12.5px] font-medium text-[var(--text-primary)]"
+            >
+              GitHub 仓库
+            </label>
+            <span className="text-[11px] font-medium px-1.5 py-0.5 rounded-md bg-[var(--surface-subtle)] text-[var(--text-muted)] tabular-nums">
+              已选 {values.length} 个
+            </span>
+          </div>
           {githubConfigured && !defaultExpanded && (
             <button
               type="button"
@@ -453,7 +581,7 @@ export function GithubRepoPicker({
               className="inline-flex items-center gap-1 text-[12px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
             >
               <Icon name="github" size={13} />
-              {expanded ? "收起仓库浏览器" : "从 GitHub 浏览（个人与组织）"}
+              {expanded ? "收起仓库浏览器" : "从 GitHub 浏览（支持多选）"}
               <Icon
                 name="chevron-down"
                 size={13}
@@ -463,52 +591,146 @@ export function GithubRepoPicker({
           )}
         </div>
 
-        <div className="relative">
-          <div className="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none flex items-center justify-center w-5 h-5">
-            {inputMatchedOwner?.avatar_url ? (
-              <GithubOwnerAvatar
-                login={inputMatchedOwner.login}
-                type={inputMatchedOwner.type}
-                avatarUrl={inputMatchedOwner.avatar_url}
-                size="sm"
-              />
-            ) : (
-              <Icon
-                name="github"
-                size={15}
-                className="text-[var(--text-muted)]"
-              />
+        {/* Selected Repositories Chips */}
+        {values.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 p-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/55">
+            {values.map((repoSlug, idx) => {
+              const info = resolveOwnerInfo(repoSlug);
+              const isPrimary = idx === 0;
+              return (
+                <span
+                  key={repoSlug.toLowerCase()}
+                  className={`inline-flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 rounded-lg border text-[12px] font-mono transition ${
+                    isPrimary
+                      ? "border-indigo-500/35 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300"
+                      : "border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--text-primary)]"
+                  }`}
+                >
+                  {info ? (
+                    <GithubOwnerAvatar
+                      login={info.login}
+                      type={info.type}
+                      avatarUrl={info.avatar_url}
+                      size="xs"
+                    />
+                  ) : (
+                    <Icon name="github" size={12.5} className="text-[var(--text-muted)]" />
+                  )}
+                  <span className="max-w-[220px] truncate">{repoSlug}</span>
+                  {isPrimary && values.length > 1 && (
+                    <span
+                      title="主仓库（默认展示与兼容旧版客户端）"
+                      className="text-[10px] font-sans font-medium px-1 py-0.2 rounded bg-indigo-600 text-white leading-tight"
+                    >
+                      主
+                    </span>
+                  )}
+                  {!isPrimary && (
+                    <button
+                      type="button"
+                      onClick={() => handleSetPrimaryRepo(repoSlug)}
+                      title="设为主仓库"
+                      aria-label={`将 ${repoSlug} 设为主仓库`}
+                      className="p-0.5 rounded text-[var(--text-muted)] hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/10 cursor-pointer"
+                    >
+                      <Icon name="arrow-up" size={11.5} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveRepo(repoSlug)}
+                    title={`移除 ${repoSlug}`}
+                    aria-label={`移除 ${repoSlug}`}
+                    className="p-0.5 rounded text-[var(--text-muted)] hover:text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+                  >
+                    <Icon name="x" size={12} />
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Manual Repo Add Input */}
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1 min-w-0">
+            <div className="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none flex items-center justify-center w-5 h-5">
+              {inputMatchedOwner?.avatar_url ? (
+                <GithubOwnerAvatar
+                  login={inputMatchedOwner.login}
+                  type={inputMatchedOwner.type}
+                  avatarUrl={inputMatchedOwner.avatar_url}
+                  size="sm"
+                />
+              ) : (
+                <Icon
+                  name="github"
+                  size={15}
+                  className="text-[var(--text-muted)]"
+                />
+              )}
+            </div>
+            <input
+              id={repoInputId}
+              type="text"
+              maxLength={200}
+              value={manualInput}
+              onChange={(e) => {
+                setManualInput(e.target.value);
+                if (manualError) setManualError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && manualInput.trim()) {
+                  e.preventDefault();
+                  handleAddManualRepo();
+                }
+              }}
+              placeholder={
+                values.length === 0
+                  ? "输入 owner/repository 或 GitHub 地址，回车添加"
+                  : "继续输入 owner/repository 添加更多仓库…"
+              }
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full h-9.5 pl-9 pr-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+            />
+            {manualInput && (
+              <button
+                type="button"
+                onClick={() => {
+                  setManualInput("");
+                  setManualError("");
+                }}
+                aria-label="清空输入"
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] cursor-pointer"
+              >
+                <Icon name="x" size={14} />
+              </button>
             )}
           </div>
-          <input
-            id={repoInputId}
-            type="text"
-            required={required}
-            maxLength={200}
-            value={value}
-            onChange={(e) => onChange(e.target.value, { pickedFromGithub: false })}
-            placeholder="owner/repository 或粘贴完整 GitHub 地址"
-            autoComplete="off"
-            spellCheck={false}
-            className="w-full h-9.5 pl-9 pr-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
-          />
-          {value && (
-            <button
-              type="button"
-              onClick={() => onChange("", { pickedFromGithub: false })}
-              aria-label="清空仓库"
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] cursor-pointer"
-            >
-              <Icon name="x" size={14} />
-            </button>
-          )}
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            icon="plus"
+            onClick={handleAddManualRepo}
+            disabled={!manualInput.trim() || values.length >= maxRepos}
+          >
+            添加
+          </Button>
         </div>
 
-        {normalizedPreview && (
+        {manualError && (
+          <p className="text-[11.5px] text-rose-600 dark:text-rose-400">
+            {manualError}
+          </p>
+        )}
+
+        {normalizedPreview && !manualError && (
           <div className="flex items-center gap-1.5 text-[11.5px] text-emerald-600 dark:text-emerald-400">
             <Icon name="check-circle-2" size={13} />
             <span>
-              将规范化绑定为{" "}
+              按回车或点击「添加」将绑定{" "}
               <code className="font-mono font-medium">{normalizedPreview}</code>
             </span>
           </div>
@@ -710,7 +932,7 @@ export function GithubRepoPicker({
                   e.preventDefault();
                   const target = filteredItems[highlightIndex];
                   if (target) {
-                    handlePickRepo(target);
+                    handleToggleRepo(target);
                   } else if (candidateOrgFromQuery) {
                     handleLoadCustomOrg(candidateOrgFromQuery);
                   }
@@ -768,6 +990,7 @@ export function GithubRepoPicker({
           <div
             ref={listRef}
             role="listbox"
+            aria-multiselectable="true"
             aria-label="GitHub 仓库列表"
             className="max-h-[244px] overflow-y-auto rd-scroll divide-y divide-[var(--border-subtle)]/60"
           >
@@ -850,8 +1073,7 @@ export function GithubRepoPicker({
               </div>
             ) : (
               filteredItems.map((item, idx) => {
-                const isSelected =
-                  selectedLower === item.full_name.toLowerCase();
+                const isSelected = selectedSet.has(item.full_name.toLowerCase());
                 const isHighlighted = idx === highlightIndex;
                 const avatarUrl =
                   item.owner_avatar ??
@@ -864,16 +1086,25 @@ export function GithubRepoPicker({
                     aria-selected={isSelected}
                     data-repo-index={idx}
                     onMouseEnter={() => setHighlightIndex(idx)}
-                    onClick={() => handlePickRepo(item)}
+                    onClick={() => handleToggleRepo(item)}
                     className={`w-full text-left px-3 py-2.5 flex items-center justify-between gap-3 transition cursor-pointer ${
                       isSelected
-                        ? "bg-indigo-500/12"
+                        ? "bg-indigo-500/10"
                         : isHighlighted
                           ? "bg-[var(--surface-hover)]"
                           : "hover:bg-[var(--surface-hover)]"
                     }`}
                   >
                     <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                      <span
+                        className={`w-4 h-4 rounded-[5px] border inline-flex items-center justify-center shrink-0 transition ${
+                          isSelected
+                            ? "border-indigo-600 bg-indigo-600 text-white"
+                            : "border-[var(--border-strong)] bg-[var(--surface-elevated)]"
+                        }`}
+                      >
+                        {isSelected && <Icon name="check" size={11} />}
+                      </span>
                       <GithubOwnerAvatar
                         login={item.owner}
                         type={item.owner_type}
@@ -922,11 +1153,6 @@ export function GithubRepoPicker({
                       {item.updated_at && (
                         <span className="text-[11px] text-[var(--text-muted)] tabular-nums">
                           {formatRelativeTime(item.updated_at)}
-                        </span>
-                      )}
-                      {isSelected && (
-                        <span className="w-4.5 h-4.5 rounded-full bg-indigo-600 text-white inline-flex items-center justify-center">
-                          <Icon name="check" size={11} />
                         </span>
                       )}
                     </div>

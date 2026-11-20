@@ -871,4 +871,350 @@ describe("GitHub Personal & Organization Repository Listing", () => {
     expect(zeroConn.owners).toEqual([]);
     expect(zeroConn.repo_count).toBe(0);
   });
+
+  it("supports inspecting a token and manually locking a GitHub Key to a chosen organization or account", async () => {
+    const requested: string[] = [];
+    const mockGh = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const auth = req.headers.authorization ?? "";
+      const tag = auth.includes("roxy_org") ? "org" : "personal";
+      requested.push(`${tag}:${url.pathname}`);
+      res.setHeader("Content-Type", "application/json");
+
+      if (url.pathname === "/user") {
+        res.end(
+          JSON.stringify({
+            login: "AceXiamo",
+            type: "User",
+            avatar_url: "https://avatars.githubusercontent.com/u/1001?v=4",
+          }),
+        );
+        return;
+      }
+
+      if (url.pathname === "/user/orgs") {
+        res.end(
+          JSON.stringify([
+            {
+              login: "NexionDev",
+              type: "Organization",
+              avatar_url: "https://avatars.githubusercontent.com/u/2001?v=4",
+            },
+            {
+              login: "roxy-org",
+              type: "Organization",
+              avatar_url: "https://avatars.githubusercontent.com/u/2002?v=4",
+            },
+          ]),
+        );
+        return;
+      }
+
+      if (url.pathname === "/orgs/roxy-org") {
+        res.end(
+          JSON.stringify({
+            login: "roxy-org",
+            type: "Organization",
+            avatar_url: "https://avatars.githubusercontent.com/u/2002?v=4",
+          }),
+        );
+        return;
+      }
+
+      if (url.pathname === "/orgs/roxy-org/repos") {
+        res.end(
+          JSON.stringify([
+            {
+              full_name: "roxy-org/roxy-web",
+              name: "roxy-web",
+              private: true,
+              archived: false,
+              description: "Roxy web app",
+              pushed_at: "2026-11-20T19:00:00Z",
+              owner: {
+                login: "roxy-org",
+                type: "Organization",
+                avatar_url: "https://avatars.githubusercontent.com/u/2002?v=4",
+              },
+            },
+            {
+              full_name: "roxy-org/roxy-api",
+              name: "roxy-api",
+              private: true,
+              archived: false,
+              description: "Roxy backend API",
+              pushed_at: "2026-11-20T18:00:00Z",
+              owner: {
+                login: "roxy-org",
+                type: "Organization",
+                avatar_url: "https://avatars.githubusercontent.com/u/2002?v=4",
+              },
+            },
+          ]),
+        );
+        return;
+      }
+
+      // Simulate /user/repos being flooded with personal & unrelated org public repos
+      if (url.pathname === "/user/repos") {
+        const affiliation = url.searchParams.get("affiliation") ?? "";
+        if (affiliation === "owner") {
+          res.end(
+            JSON.stringify([
+              {
+                full_name: "AceXiamo/relaydesk",
+                name: "relaydesk",
+                private: false,
+                archived: false,
+                description: "Personal repo",
+                pushed_at: "2026-11-20T17:00:00Z",
+                owner: {
+                  login: "AceXiamo",
+                  type: "User",
+                  avatar_url: "https://avatars.githubusercontent.com/u/1001?v=4",
+                },
+              },
+            ]),
+          );
+          return;
+        }
+        res.end(
+          JSON.stringify([
+            {
+              full_name: "AceXiamo/relaydesk",
+              name: "relaydesk",
+              private: false,
+              archived: false,
+              description: "Personal repo",
+              pushed_at: "2026-11-20T17:00:00Z",
+              owner: {
+                login: "AceXiamo",
+                type: "User",
+                avatar_url: "https://avatars.githubusercontent.com/u/1001?v=4",
+              },
+            },
+            {
+              full_name: "NexionDev/public-noise",
+              name: "public-noise",
+              private: false,
+              archived: false,
+              description: "Unrelated org public repo",
+              pushed_at: "2026-11-20T16:00:00Z",
+              owner: {
+                login: "NexionDev",
+                type: "Organization",
+                avatar_url: "https://avatars.githubusercontent.com/u/2001?v=4",
+              },
+            },
+          ]),
+        );
+        return;
+      }
+
+      res.statusCode = 404;
+      res.end(JSON.stringify({ message: "Not Found" }));
+    });
+
+    await new Promise<void>((r) => mockGh.listen(0, "127.0.0.1", r));
+    cleanups.push(() => new Promise<void>((r) => mockGh.close(() => r())));
+    const ghPort = (mockGh.address() as { port: number }).port;
+
+    const prevBase = process.env.RELAYDESK_GITHUB_API_BASE;
+    process.env.RELAYDESK_GITHUB_API_BASE = `http://127.0.0.1:${ghPort}`;
+    cleanups.push(() => {
+      if (prevBase === undefined) delete process.env.RELAYDESK_GITHUB_API_BASE;
+      else process.env.RELAYDESK_GITHUB_API_BASE = prevBase;
+    });
+
+    const srv = await startApiServer();
+
+    // 1. Inspect Fine-grained PAT to discover candidate orgs/accounts
+    const inspectRes = await jsonReq(`${srv.url}/api/github/inspect`, "POST", {
+      token: "github_pat_roxy_org_key_9999",
+    });
+    expect(inspectRes.status).toBe(200);
+    expect(inspectRes.json.token_type).toBe("fine_grained");
+    expect(
+      (inspectRes.json.candidates as Array<{ login: string; type: string }>).map(
+        (c) => `${c.type}:${c.login}`,
+      ),
+    ).toEqual(["User:AceXiamo", "Organization:NexionDev", "Organization:roxy-org"]);
+
+    // 2. Connect personal key locked to AceXiamo
+    const c1 = await jsonReq(`${srv.url}/api/github/connect`, "POST", {
+      token: "ghp_personal_key_1111",
+      scope_owner: { login: "AceXiamo", type: "User" },
+    });
+    expect(c1.status).toBe(200);
+    const conn1 = c1.json.connection as {
+      id: string;
+      scope_owner: { login: string; type: string } | null;
+      owners: Array<{ login: string }>;
+    };
+    expect(conn1.scope_owner?.login).toBe("AceXiamo");
+    expect(conn1.owners.map((o) => o.login)).toEqual(["AceXiamo"]);
+
+    // 3. Connect org Fine-grained PAT initially without scope, then update its scope_owner by id WITHOUT re-sending token
+    const c2Initial = await jsonReq(`${srv.url}/api/github/connect`, "POST", {
+      token: "github_pat_roxy_org_key_9999",
+      label: "roxy",
+    });
+    expect(c2Initial.status).toBe(200);
+    const conn2Id = (c2Initial.json.connection as { id: string }).id;
+
+    // Inspect existing saved connection by id
+    const inspectById = await jsonReq(`${srv.url}/api/github/inspect`, "POST", {
+      id: conn2Id,
+    });
+    expect(inspectById.status).toBe(200);
+    expect((inspectById.json.candidates as Array<{ login: string }>).map((c) => c.login)).toContain(
+      "roxy-org",
+    );
+
+    // Lock existing connection to roxy-org without re-pasting token
+    const c2Updated = await jsonReq(`${srv.url}/api/github/connect`, "POST", {
+      id: conn2Id,
+      scope_owner: { login: "roxy-org", type: "Organization" },
+    });
+    expect(c2Updated.status).toBe(200);
+    const conn2 = c2Updated.json.connection as {
+      id: string;
+      label: string;
+      scope_owner: { login: string; type: string; avatar_url?: string } | null;
+      owners: Array<{ login: string; type: string }>;
+      repo_count: number;
+    };
+    expect(conn2.scope_owner?.login).toBe("roxy-org");
+    expect(conn2.scope_owner?.type).toBe("Organization");
+    expect(conn2.owners.map((o) => `${o.type}:${o.login}`)).toEqual(["Organization:roxy-org"]);
+    expect(conn2.repo_count).toBe(2);
+
+    // 4. Aggregated "all" returns both AceXiamo and roxy-org repos cleanly (no NexionDev leak!)
+    requested.length = 0;
+    const allRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "all",
+    });
+    expect(allRes.status).toBe(200);
+    expect(allRes.json.repos).toEqual([
+      "roxy-org/roxy-web",
+      "roxy-org/roxy-api",
+      "AceXiamo/relaydesk",
+    ]);
+    expect(
+      (allRes.json.owners as Array<{ login: string }>).map((o) => o.login),
+    ).toEqual(["AceXiamo", "roxy-org"]);
+
+    // 5. Filtering by roxy-org only queries the roxy-org key
+    requested.length = 0;
+    const roxyRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "roxy-org",
+      owner_type: "Organization",
+    });
+    expect(roxyRes.status).toBe(200);
+    expect(roxyRes.json.repos).toEqual(["roxy-org/roxy-web", "roxy-org/roxy-api"]);
+    expect(requested.every((r) => r.startsWith("org:"))).toBe(true);
+  });
+
+  it("supports binding multiple GitHub repositories to a single project", async () => {
+    const srv = await startApiServer();
+
+    // 1. Create project with multiple repos (deduped & normalized)
+    const created = await jsonReq(`${srv.url}/api/projects`, "POST", {
+      name: "Multi Repo Product",
+      repos: [
+        "https://github.com/acme-org/web.git",
+        "acme-org/api",
+        "git@github.com:acme-org/web.git",
+      ],
+    });
+    expect(created.status).toBe(200);
+    const project = created.json.project as {
+      id: string;
+      repo: string;
+      repos: string[];
+      agent_key: string;
+    };
+    expect(project.repo).toBe("acme-org/web");
+    expect(project.repos).toEqual(["acme-org/web", "acme-org/api"]);
+
+    // 2. List projects & agent project endpoint expose both repo and repos
+    const listed = await jsonReq(`${srv.url}/api/projects`);
+    expect(listed.status).toBe(200);
+    const summary = (listed.json.projects as Array<{ repo: string; repos: string[] }>)[0];
+    expect(summary.repo).toBe("acme-org/web");
+    expect(summary.repos).toEqual(["acme-org/web", "acme-org/api"]);
+
+    const agentProj = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/project`,
+      "GET",
+      undefined,
+      { Authorization: `Bearer ${project.agent_key}` },
+    );
+    expect(agentProj.status).toBe(200);
+    expect((agentProj.json.project as { repos: string[] }).repos).toEqual([
+      "acme-org/web",
+      "acme-org/api",
+    ]);
+
+    // 3. Create & claim a task with an agent lease
+    const taskRes = await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+      title: "Fix header",
+      body: "Header overflows on mobile",
+      priority: "high",
+    });
+    const task = taskRes.json.task as { id: string; version: number };
+    await jsonReq(`${srv.url}/api/tasks/${task.id}/action`, "POST", {
+      action: "status",
+      status: "ready",
+      version: task.version,
+    });
+    const claimRes = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/claim`,
+      "POST",
+      {},
+      { Authorization: `Bearer ${project.agent_key}` },
+    );
+    expect(claimRes.status).toBe(200);
+
+    // 4. Adding a new repo during active agent handoff is allowed
+    const addRepoRes = await jsonReq(`${srv.url}/api/projects/${project.id}`, "PATCH", {
+      repos: ["acme-org/web", "acme-org/api", "acme-org/mobile"],
+    });
+    expect(addRepoRes.status).toBe(200);
+    expect((addRepoRes.json.project as { repos: string[] }).repos).toEqual([
+      "acme-org/web",
+      "acme-org/api",
+      "acme-org/mobile",
+    ]);
+
+    // 5. Removing an existing bound repo during active agent handoff is rejected (409)
+    const removeRepoRes = await jsonReq(`${srv.url}/api/projects/${project.id}`, "PATCH", {
+      repos: ["acme-org/web"],
+    });
+    expect(removeRepoRes.status).toBe(409);
+
+    // 6. After finishing the handoff, rebinding & changing primary repo succeeds
+    const claimedTask = claimRes.json.task as { id: string; version: number };
+    const lease = claimRes.json.lease as string;
+    const finishRes = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${claimedTask.id}/finish`,
+      "POST",
+      { lease, version: claimedTask.version, body: "Done" },
+      { Authorization: `Bearer ${project.agent_key}` },
+    );
+    expect(finishRes.status).toBe(200);
+    const rebindRes = await jsonReq(`${srv.url}/api/projects/${project.id}`, "PATCH", {
+      repos: ["acme-org/api", "acme-org/mobile"],
+    });
+    expect(rebindRes.status).toBe(200);
+    expect((rebindRes.json.project as { repo: string; repos: string[] }).repo).toBe(
+      "acme-org/api",
+    );
+    expect((rebindRes.json.project as { repos: string[] }).repos).toEqual([
+      "acme-org/api",
+      "acme-org/mobile",
+    ]);
+  });
 });

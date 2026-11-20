@@ -3,6 +3,7 @@ import type {
   AiTestResult,
   AuthStatusPayload,
   GithubConnectionSummary,
+  GithubInspectPayload,
   GithubOwnerInfo,
   GithubReposPayload,
   GithubStatusPayload,
@@ -71,7 +72,7 @@ export const api = {
   logout: () => request<{ ok: boolean }>("/api/auth/logout", "POST", {}),
 
   listProjects: () => request<{ projects: ProjectSummary[] }>("/api/projects"),
-  createProject: (payload: { name: string; repo: string }) =>
+  createProject: (payload: { name: string; repo?: string; repos?: string[] }) =>
     request<{ project: ProjectDetail }>("/api/projects", "POST", payload),
   getProject: (id: string) =>
     request<{ project: ProjectDetail }>(`/api/projects/${encodeURIComponent(id)}`),
@@ -80,6 +81,7 @@ export const api = {
     payload: {
       name?: string;
       repo?: string;
+      repos?: string[];
       agent_instructions?: string;
       allowed_origins?: string[];
     },
@@ -143,8 +145,17 @@ export const api = {
     ),
 
   getGithubStatus: () => request<GithubStatusPayload>("/api/github"),
+  inspectGithub: (payload: { token?: string; id?: string }) =>
+    request<GithubInspectPayload>("/api/github/inspect", "POST", payload),
   connectGithub: (
-    tokenOrPayload: string | { token: string; label?: string; id?: string },
+    tokenOrPayload:
+      | string
+      | {
+          token?: string;
+          label?: string;
+          id?: string;
+          scope_owner?: { login: string; type: "User" | "Organization" } | null;
+        },
   ) =>
     request<{
       configured: boolean;

@@ -79,7 +79,14 @@ def github_slug(remote):
 
 def check_binding(repo, project):
     actual = github_slug(git(repo, "remote", "get-url", "origin"))
-    if actual != project["repo"].casefold():
+    allowed = {
+        r.casefold()
+        for r in (project.get("repos") or [])
+        if isinstance(r, str) and r.strip()
+    }
+    if project.get("repo"):
+        allowed.add(project["repo"].casefold())
+    if actual not in allowed:
         raise ValueError("The checkout's origin differs from the project's repository")
 
 

@@ -107,3 +107,14 @@ class RunnerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.runner.cycle()
         self.assertEqual(self.queue.events, [])
+
+    def test_multi_repo_project_accepts_secondary_bound_repo(self):
+        self.queue.project = {
+            "name": "multi",
+            "repo": "example/web",
+            "repos": ["example/web", "example/test"],
+            "id": "prj",
+        }
+        self.runner.cycle()
+        self.assertEqual(self.queue.events, ["claim", "finish"])
+

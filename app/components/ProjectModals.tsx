@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon.tsx";
-import { GithubRepoPicker } from "./GithubRepoPicker.tsx";
+import { GithubRepoPicker, parseManualRepoInput } from "./GithubRepoPicker.tsx";
 import { Button, Kbd, Modal, PriorityBadge, StatusBadge, useToast } from "./ui.tsx";
 import { api } from "~/lib/api.ts";
 import { PRIORITY_LABELS, PRIORITY_ORDER, taskCode } from "~/lib/format.ts";
@@ -35,24 +35,36 @@ export function CreateProjectModal({
   const toast = useToast();
   const [name, setName] = useState("");
   const [nameAutoFilled, setNameAutoFilled] = useState(false);
-  const [repo, setRepo] = useState("");
+  const [repos, setRepos] = useState<string[]>([]);
+  const [repoDraft, setRepoDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (open) {
       setName("");
       setNameAutoFilled(false);
-      setRepo("");
+      setRepos([]);
+      setRepoDraft("");
     }
   }, [open]);
 
-  const handleRepoChange = (
-    nextRepo: string,
-    meta?: { pickedFromGithub?: boolean },
+  const effectiveRepos = useMemo(() => {
+    const draftParsed = parseManualRepoInput(repoDraft);
+    if (!draftParsed) return repos;
+    if (repos.some((r) => r.toLowerCase() === draftParsed.toLowerCase())) {
+      return repos;
+    }
+    return [...repos, draftParsed];
+  }, [repoDraft, repos]);
+
+  const handleReposChange = (
+    nextRepos: string[],
+    meta?: { pickedFromGithub?: boolean; latestRepo?: string },
   ) => {
-    setRepo(nextRepo);
-    if (meta?.pickedFromGithub) {
-      const shortName = nextRepo.split("/").pop()?.trim() ?? "";
+    setRepos(nextRepos);
+    if (meta?.pickedFromGithub && nextRepos.length > 0) {
+      const target = nextRepos[0];
+      const shortName = target.split("/").pop()?.trim() ?? "";
       if (shortName && (!name.trim() || nameAutoFilled)) {
         setName(shortName);
         setNameAutoFilled(true);
@@ -62,14 +74,15 @@ export function CreateProjectModal({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !repo.trim()) return;
+    if (!name.trim() || effectiveRepos.length === 0) return;
     setSubmitting(true);
     try {
       const { project } = await api.createProject({
         name: name.trim(),
-        repo: repo.trim(),
+        repo: effectiveRepos[0],
+        repos: effectiveRepos,
       });
-      toast.success(`项目「${project.name}」已创建`);
+      toast.success(`项目「${project.name}」已创建（绑定 ${project.repos.length} 个仓库）`);
       onCreated(project);
       onClose();
     } catch (err) {
@@ -84,7 +97,7 @@ export function CreateProjectModal({
       open={open}
       onClose={onClose}
       title="新建项目"
-      subtitle="每个项目绑定一个 GitHub 仓库（支持个人与组织），并拥有独立的反馈队列与密钥。"
+      subtitle="每个项目支持绑定一个或多个 GitHub 仓库（支持个人与组织），并拥有独立的反馈队列与密钥。"
       maxWidth="lg"
       footer={
         <>
@@ -98,7 +111,7 @@ export function CreateProjectModal({
             size="sm"
             icon="plus"
             loading={submitting}
-            disabled={!name.trim() || !repo.trim()}
+            disabled={!name.trim() || effectiveRepos.length === 0}
           >
             创建项目
           </Button>
@@ -111,8 +124,10 @@ export function CreateProjectModal({
         className="space-y-4"
       >
         <GithubRepoPicker
-          value={repo}
-          onChange={handleRepoChange}
+          values={repos}
+          onChange={handleReposChange}
+          draftValue={repoDraft}
+          onDraftChange={setRepoDraft}
           githubConfigured={githubConfigured}
           githubConnections={githubConnections}
           defaultExpanded={githubConfigured}
@@ -385,7 +400,7 @@ export function CommandPaletteModal({
   const matchedProjects = useMemo(() => {
     if (!q) return projects;
     return projects.filter((p) =>
-      `${p.name} ${p.repo}`.toLowerCase().includes(q),
+      `${p.name} ${p.repo} ${(p.repos ?? []).join(" ")}`.toLowerCase().includes(q),
     );
   }, [projects, q]);
 
@@ -490,8 +505,9 @@ export function CommandPaletteModal({
                     <Icon name="folder-git-2" size={14} className="text-[var(--text-muted)]" />
                     <span className="truncate">{p.name}</span>
                   </span>
-                  <span className="text-[11.5px] font-mono text-[var(--text-muted)]">
+                  <span className="text-[11.5px] font-mono text-[var(--text-muted)] shrink-0">
                     {p.repo}
+                    {(p.repos?.length ?? 1) > 1 ? ` +${p.repos.length - 1}` : ""}
                   </span>
                 </button>
               ))}

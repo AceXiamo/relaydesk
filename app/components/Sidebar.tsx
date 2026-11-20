@@ -176,8 +176,24 @@ export function Sidebar({
                 <div className="text-[13px] font-medium text-[var(--text-primary)] truncate leading-tight">
                   {currentProject ? currentProject.name : "选择或创建项目"}
                 </div>
-                <div className="text-[11px] font-mono text-[var(--text-muted)] truncate leading-tight mt-0.5">
-                  {currentProject ? currentProject.repo : "尚无项目"}
+                <div
+                  className="text-[11px] font-mono text-[var(--text-muted)] truncate leading-tight mt-0.5"
+                  title={
+                    currentProject
+                      ? (currentProject.repos?.length
+                          ? currentProject.repos
+                          : [currentProject.repo]
+                        ).join(", ")
+                      : undefined
+                  }
+                >
+                  {currentProject
+                    ? `${currentProject.repo}${
+                        (currentProject.repos?.length ?? 1) > 1
+                          ? ` +${currentProject.repos.length - 1}`
+                          : ""
+                      }`
+                    : "尚无项目"}
                 </div>
               </div>
             </div>
@@ -218,8 +234,12 @@ export function Sidebar({
                       >
                         <div className="min-w-0">
                           <div className="text-[13px] font-medium truncate">{p.name}</div>
-                          <div className="text-[11px] font-mono text-[var(--text-muted)] truncate">
+                          <div
+                            className="text-[11px] font-mono text-[var(--text-muted)] truncate"
+                            title={(p.repos?.length ? p.repos : [p.repo]).join(", ")}
+                          >
                             {p.repo}
+                            {(p.repos?.length ?? 1) > 1 ? ` +${p.repos.length - 1}` : ""}
                           </div>
                         </div>
                         {active && <Icon name="check" size={14} className="shrink-0" />}

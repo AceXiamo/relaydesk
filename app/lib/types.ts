@@ -26,6 +26,7 @@ export interface ProjectSummary {
   id: string;
   name: string;
   repo: string;
+  repos: string[];
   created_at: string;
 }
 
@@ -41,6 +42,7 @@ export interface AgentProjectInfo {
   id: string;
   name: string;
   repo: string;
+  repos: string[];
   agent_instructions: string;
 }
 
@@ -121,9 +123,17 @@ export interface GithubConnectionSummary {
   token_type: GithubTokenType;
   viewer: GithubOwnerInfo | null;
   owners: GithubOwnerInfo[];
+  scope_owner?: GithubOwnerInfo | null;
   repo_count: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface GithubInspectPayload {
+  token_type: GithubTokenType;
+  viewer: GithubOwnerInfo | null;
+  candidates: GithubOwnerInfo[];
+  suggested_scope: GithubOwnerInfo | null;
 }
 
 export interface GithubStatusPayload {

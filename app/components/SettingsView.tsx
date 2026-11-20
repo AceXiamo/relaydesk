@@ -1,12 +1,18 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon.tsx";
-import { GithubOwnerAvatar, GithubRepoPicker } from "./GithubRepoPicker.tsx";
+import {
+  GithubOwnerAvatar,
+  GithubRepoPicker,
+  parseManualRepoInput,
+} from "./GithubRepoPicker.tsx";
 import { Button, CopyButton, EmptyState, Switch, useToast } from "./ui.tsx";
 import { api } from "~/lib/api.ts";
 import type {
   AiConfigStatus,
   AiTestResult,
   GithubConnectionSummary,
+  GithubInspectPayload,
+  GithubOwnerInfo,
   ProjectDetail,
 } from "~/lib/types.ts";
 
@@ -52,10 +58,13 @@ const LLM_PRESETS = [
   },
 ];
 
-function buildSnippets(project: ProjectDetail) {
+const VALID_OWNER_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+function buildSnippets(project: ProjectDetail, activeRepo?: string) {
   const origin =
     typeof window !== "undefined" ? window.location.origin : "https://your-relaydesk.example";
-  const repoDir = project.repo.split("/").pop() || "repo";
+  const targetRepo = activeRepo || project.repo;
+  const repoDir = targetRepo.split("/").pop() || "repo";
   return {
     widget: `<script defer src="${origin}/widget.js" data-project="${project.id}" data-key="${project.intake_key}"></script>`,
     agent: [
@@ -107,19 +116,34 @@ export function SettingsView({
   // GitHub multi-PAT state
   const [ghToken, setGhToken] = useState("");
   const [ghLabel, setGhLabel] = useState("");
+  const [ghLabelAutoFilled, setGhLabelAutoFilled] = useState(false);
+  const [ghScope, setGhScope] = useState<GithubOwnerInfo | null>(null);
+  const [ghInspecting, setGhInspecting] = useState(false);
+  const [ghInspectResult, setGhInspectResult] = useState<GithubInspectPayload | null>(null);
+  const [ghInspectError, setGhInspectError] = useState("");
+  const [ghCustomOrgOpen, setGhCustomOrgOpen] = useState(false);
+  const [ghCustomOrgInput, setGhCustomOrgInput] = useState("");
   const [editingGhId, setEditingGhId] = useState<string | null>(null);
   const [addingGhKey, setAddingGhKey] = useState(false);
   const [showGhToken, setShowGhToken] = useState(false);
   const [savingGh, setSavingGh] = useState(false);
   const [busyGhId, setBusyGhId] = useState<string | null>(null);
+  const inspectSeqRef = useRef(0);
+  const lastAutoInspectedTokenRef = useRef("");
 
   // Project settings form
+  const projectReposList = useMemo(
+    () => (project ? (project.repos?.length ? project.repos : [project.repo]) : []),
+    [project],
+  );
   const [projName, setProjName] = useState(project?.name ?? "");
-  const [projRepo, setProjRepo] = useState(project?.repo ?? "");
+  const [projRepos, setProjRepos] = useState<string[]>(projectReposList);
+  const [projRepoDraft, setProjRepoDraft] = useState("");
   const [projInstructions, setProjInstructions] = useState(
     project?.agent_instructions ?? "",
   );
   const [savingProject, setSavingProject] = useState(false);
+  const [snippetRepo, setSnippetRepo] = useState(project?.repo ?? "");
 
   // Origins form (sources view)
   const [originsList, setOriginsList] = useState<string[]>(
@@ -138,12 +162,22 @@ export function SettingsView({
 
   useEffect(() => {
     if (project) {
+      const nextRepos = project.repos?.length ? project.repos : [project.repo];
       setProjName(project.name);
-      setProjRepo(project.repo);
+      setProjRepos(nextRepos);
+      setProjRepoDraft("");
       setProjInstructions(project.agent_instructions);
       setOriginsList(project.allowed_origins);
+      setSnippetRepo(nextRepos[0] ?? project.repo);
     }
-  }, [project?.id, project?.name, project?.repo, project?.agent_instructions, project?.allowed_origins]);
+  }, [
+    project?.id,
+    project?.name,
+    project?.repo,
+    project?.repos,
+    project?.agent_instructions,
+    project?.allowed_origins,
+  ]);
 
   const handleSaveAi = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -226,18 +260,144 @@ export function SettingsView({
     }
   };
 
+  const handleSelectScopeOwner = useCallback(
+    (nextScope: GithubOwnerInfo | null) => {
+      setGhScope(nextScope);
+      if (nextScope) {
+        const autoName =
+          nextScope.type === "Organization"
+            ? nextScope.login
+            : `@${nextScope.login}`;
+        if (!ghLabel.trim() || ghLabelAutoFilled) {
+          setGhLabel(autoName);
+          setGhLabelAutoFilled(true);
+        }
+      } else if (ghLabelAutoFilled) {
+        setGhLabel("");
+        setGhLabelAutoFilled(false);
+      }
+    },
+    [ghLabel, ghLabelAutoFilled],
+  );
+
+  const runInspectGithub = useCallback(
+    async (
+      opts: { token?: string; id?: string },
+      options?: { autoApplySuggestion?: boolean; silent?: boolean },
+    ) => {
+      const seq = ++inspectSeqRef.current;
+      setGhInspecting(true);
+      setGhInspectError("");
+      try {
+        const res = await api.inspectGithub(opts);
+        if (seq !== inspectSeqRef.current) return;
+        setGhInspectResult(res);
+        if (options?.autoApplySuggestion && res.suggested_scope) {
+          setGhScope((prev) => {
+            if (prev) return prev;
+            const suggested = res.suggested_scope;
+            if (suggested) {
+              const autoName =
+                suggested.type === "Organization"
+                  ? suggested.login
+                  : `@${suggested.login}`;
+              setGhLabel((cur) => {
+                if (!cur.trim()) {
+                  setGhLabelAutoFilled(true);
+                  return autoName;
+                }
+                return cur;
+              });
+            }
+            return suggested;
+          });
+        }
+      } catch (err) {
+        if (seq !== inspectSeqRef.current) return;
+        const msg = err instanceof Error ? err.message : "检测 Token 可用组织失败";
+        setGhInspectError(msg);
+        if (!options?.silent) {
+          toast.error(msg);
+        }
+      } finally {
+        if (seq === inspectSeqRef.current) {
+          setGhInspecting(false);
+        }
+      }
+    },
+    [toast],
+  );
+
+  // Auto-inspect when user pastes a full GitHub token in the form
+  useEffect(() => {
+    const trimmed = ghToken.trim();
+    if (
+      !trimmed ||
+      trimmed === lastAutoInspectedTokenRef.current ||
+      trimmed.length < 24 ||
+      !/^(?:github_pat_|ghp_|gho_)[A-Za-z0-9_]+$/.test(trimmed)
+    ) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      lastAutoInspectedTokenRef.current = trimmed;
+      void runInspectGithub(
+        { token: trimmed },
+        { autoApplySuggestion: !editingGhId, silent: true },
+      );
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [editingGhId, ghToken, runInspectGithub]);
+
+  const handleApplyCustomScopeOrg = () => {
+    const cleaned = ghCustomOrgInput.trim().replace(/^@/, "").split("/")[0] ?? "";
+    if (!VALID_OWNER_LOGIN_RE.test(cleaned)) {
+      toast.error("组织名格式不正确，仅支持字母、数字与连字符。");
+      return;
+    }
+    handleSelectScopeOwner({ login: cleaned, type: "Organization" });
+    setGhCustomOrgInput("");
+    setGhCustomOrgOpen(false);
+  };
+
+  const ghScopeCandidates = useMemo(() => {
+    const map = new Map<string, GithubOwnerInfo>();
+    for (const c of ghInspectResult?.candidates ?? []) {
+      map.set(`${c.type}:${c.login.toLowerCase()}`, c);
+    }
+    if (ghScope) {
+      const key = `${ghScope.type}:${ghScope.login.toLowerCase()}`;
+      if (!map.has(key)) {
+        map.set(key, ghScope);
+      }
+    }
+    return Array.from(map.values());
+  }, [ghInspectResult, ghScope]);
+
   const handleConnectGithub = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!ghToken.trim()) return;
+    const trimmedToken = ghToken.trim();
+    if (!editingGhId && !trimmedToken) return;
     setSavingGh(true);
     try {
       const res = await api.connectGithub({
-        token: ghToken.trim(),
+        ...(trimmedToken ? { token: trimmedToken } : {}),
         label: ghLabel.trim() || undefined,
         id: editingGhId ?? undefined,
+        scope_owner: ghScope
+          ? { login: ghScope.login, type: ghScope.type }
+          : null,
       });
+      const wasEditing = Boolean(editingGhId);
       setGhToken("");
       setGhLabel("");
+      setGhLabelAutoFilled(false);
+      setGhScope(null);
+      setGhInspectResult(null);
+      setGhInspectError("");
+      setGhCustomOrgOpen(false);
+      setGhCustomOrgInput("");
+      lastAutoInspectedTokenRef.current = "";
       setEditingGhId(null);
       setAddingGhKey(false);
       setShowGhToken(false);
@@ -253,7 +413,7 @@ export function SettingsView({
       }
       toast.success(
         summaryParts.length > 0
-          ? `${editingGhId ? "GitHub Key 已更新" : "GitHub Key 已添加"}（${summaryParts.join(" · ")}）`
+          ? `${wasEditing ? "GitHub Key 已更新" : "GitHub Key 已添加"}（${summaryParts.join(" · ")}）`
           : "GitHub Key 已保存",
       );
     } catch (err) {
@@ -285,7 +445,11 @@ export function SettingsView({
       if (editingGhId === conn.id) {
         setEditingGhId(null);
         setGhLabel("");
+        setGhLabelAutoFilled(false);
         setGhToken("");
+        setGhScope(null);
+        setGhInspectResult(null);
+        setGhInspectError("");
       }
       onGithubConnectionsUpdated(res.connections ?? []);
       toast.info(`已移除 GitHub Key「${conn.label}」`);
@@ -299,31 +463,66 @@ export function SettingsView({
   const startEditGithubKey = (conn: GithubConnectionSummary) => {
     setEditingGhId(conn.id);
     setGhLabel(conn.id === "legacy" ? "" : conn.label);
+    setGhLabelAutoFilled(false);
     setGhToken("");
+    setGhScope(conn.scope_owner ?? null);
+    setGhInspectResult(null);
+    setGhInspectError("");
+    setGhCustomOrgOpen(false);
+    setGhCustomOrgInput("");
+    lastAutoInspectedTokenRef.current = "";
     setAddingGhKey(true);
     setShowGhToken(false);
+    void runInspectGithub(
+      { id: conn.id },
+      { autoApplySuggestion: false, silent: true },
+    );
   };
 
   const cancelGithubForm = () => {
+    inspectSeqRef.current += 1;
     setEditingGhId(null);
     setAddingGhKey(false);
     setGhLabel("");
+    setGhLabelAutoFilled(false);
     setGhToken("");
+    setGhScope(null);
+    setGhInspectResult(null);
+    setGhInspectError("");
+    setGhInspecting(false);
+    setGhCustomOrgOpen(false);
+    setGhCustomOrgInput("");
+    lastAutoInspectedTokenRef.current = "";
     setShowGhToken(false);
   };
+
+  const effectiveProjRepos = useMemo(() => {
+    const draftParsed = parseManualRepoInput(projRepoDraft);
+    if (!draftParsed) return projRepos;
+    if (projRepos.some((r) => r.toLowerCase() === draftParsed.toLowerCase())) {
+      return projRepos;
+    }
+    return [...projRepos, draftParsed];
+  }, [projRepoDraft, projRepos]);
 
   const handleSaveProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!project) return;
+    if (effectiveProjRepos.length === 0) {
+      toast.error("请至少绑定一个 GitHub 仓库");
+      return;
+    }
     setSavingProject(true);
     try {
       const { project: updated } = await api.updateProject(project.id, {
         name: projName.trim(),
-        repo: projRepo.trim(),
+        repo: effectiveProjRepos[0],
+        repos: effectiveProjRepos,
         agent_instructions: projInstructions,
       });
+      setProjRepoDraft("");
       onProjectUpdated(updated);
-      toast.success("项目配置已保存");
+      toast.success(`项目配置已保存（已绑定 ${updated.repos.length} 个仓库）`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "保存项目配置失败");
     } finally {
@@ -374,7 +573,7 @@ export function SettingsView({
     }
   };
 
-  const snippets = project ? buildSnippets(project) : null;
+  const snippets = project ? buildSnippets(project, snippetRepo) : null;
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -711,6 +910,21 @@ export function SettingsView({
                               <span className="text-[10.5px] font-medium px-1.5 py-0.5 rounded-md bg-[var(--surface-subtle)] text-[var(--text-secondary)] border border-[var(--border-subtle)]">
                                 {tokenTypeLabel}
                               </span>
+                              {conn.scope_owner && (
+                                <span className="inline-flex items-center gap-1 text-[10.5px] font-medium px-1.5 py-0.5 rounded-md bg-indigo-500/12 text-indigo-600 dark:text-indigo-400">
+                                  <Icon
+                                    name={
+                                      conn.scope_owner.type === "Organization"
+                                        ? "building-2"
+                                        : "user"
+                                    }
+                                    size={10.5}
+                                  />
+                                  {conn.scope_owner.type === "Organization"
+                                    ? "锁定组织"
+                                    : "锁定账号"}
+                                </span>
+                              )}
                               <code className="text-[11px] font-mono text-[var(--text-muted)]">
                                 {conn.token_preview}
                               </code>
@@ -776,15 +990,15 @@ export function SettingsView({
                             type="button"
                             onClick={() => startEditGithubKey(conn)}
                             disabled={isBusy || savingGh}
-                            title="替换 Token 或修改备注"
-                            aria-label={`更新 ${conn.label}`}
+                            title="编辑归属组织、备注或替换 Token"
+                            aria-label={`编辑 ${conn.label}`}
                             className={`w-7.5 h-7.5 inline-flex items-center justify-center rounded-lg transition cursor-pointer disabled:opacity-40 ${
                               isEditing
                                 ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-400"
                                 : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]"
                             }`}
                           >
-                            <Icon name="key-round" size={13.5} />
+                            <Icon name="pen-line" size={13.5} />
                           </button>
                           <button
                             type="button"
@@ -813,12 +1027,12 @@ export function SettingsView({
                       : ""
                   }
                 >
-                  <div className="p-5 space-y-3.5">
+                  <div className="p-5 space-y-4">
                     {editingGhId && (
                       <div className="flex items-center justify-between gap-2 text-[12px] font-medium text-indigo-600 dark:text-indigo-400">
                         <span className="inline-flex items-center gap-1.5">
-                          <Icon name="key-round" size={13.5} />
-                          替换已有 GitHub Key 的 Token
+                          <Icon name="pen-line" size={13.5} />
+                          编辑 GitHub Key（可直接调整归属组织或备注，Token 留空则保持不变）
                         </span>
                       </div>
                     )}
@@ -832,52 +1046,216 @@ export function SettingsView({
                         <input
                           type="text"
                           value={ghLabel}
-                          onChange={(e) => setGhLabel(e.target.value)}
+                          onChange={(e) => {
+                            setGhLabel(e.target.value);
+                            setGhLabelAutoFilled(false);
+                          }}
                           maxLength={80}
                           placeholder="留空自动识别账号/组织"
                           className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
                         />
                       </label>
 
-                      <label className="block space-y-1.5 sm:col-span-8">
+                      <div className="block space-y-1.5 sm:col-span-8">
                         <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
-                          Personal Access Token
+                          Personal Access Token{" "}
+                          {editingGhId && (
+                            <span className="text-[var(--text-muted)] font-normal">
+                              (留空保持现有 Token)
+                            </span>
+                          )}
                         </span>
-                        <div className="relative">
-                          <input
-                            type={showGhToken ? "text" : "password"}
-                            value={ghToken}
-                            onChange={(e) => setGhToken(e.target.value)}
-                            required
-                            autoFocus={addingGhKey}
-                            autoComplete="off"
-                            spellCheck={false}
-                            placeholder={
-                              editingGhId
-                                ? "输入新的 Token 以替换该连接"
-                                : "github_pat_... 或 ghp_..."
-                            }
-                            className="w-full h-9.5 pl-3 pr-10 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
-                          />
-                          <button
+                        <div className="flex items-center gap-2">
+                          <div className="relative flex-1 min-w-0">
+                            <input
+                              type={showGhToken ? "text" : "password"}
+                              value={ghToken}
+                              onChange={(e) => setGhToken(e.target.value)}
+                              required={!editingGhId}
+                              autoFocus={addingGhKey && !editingGhId}
+                              autoComplete="off"
+                              spellCheck={false}
+                              placeholder={
+                                editingGhId
+                                  ? "如需替换请粘贴新 Token，否则留空"
+                                  : "github_pat_... 或 ghp_..."
+                              }
+                              className="w-full h-9.5 pl-3 pr-10 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowGhToken((v) => !v)}
+                              aria-label={showGhToken ? "隐藏 Token" : "显示 Token"}
+                              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer p-1"
+                            >
+                              <Icon name={showGhToken ? "eye-off" : "eye"} size={15} />
+                            </button>
+                          </div>
+                          <Button
                             type="button"
-                            onClick={() => setShowGhToken((v) => !v)}
-                            aria-label={showGhToken ? "隐藏 Token" : "显示 Token"}
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer p-1"
+                            variant="secondary"
+                            size="sm"
+                            icon="search"
+                            loading={ghInspecting}
+                            disabled={!ghToken.trim() && !editingGhId}
+                            onClick={() =>
+                              void runInspectGithub(
+                                ghToken.trim()
+                                  ? { token: ghToken.trim() }
+                                  : { id: editingGhId ?? undefined },
+                                { autoApplySuggestion: false },
+                              )
+                            }
                           >
-                            <Icon name={showGhToken ? "eye-off" : "eye"} size={15} />
-                          </button>
+                            读取组织
+                          </Button>
                         </div>
-                      </label>
+                      </div>
                     </div>
 
-                    <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
-                      GitHub Fine-grained PAT 每次只能授权单个个人账号或单个组织（需{" "}
-                      <code className="font-mono">Metadata: Read-only</code>）；可在此分别添加多个
-                      Key，选仓时会自动聚合去重。也支持 Classic PAT（
-                      <code className="font-mono">repo</code> /{" "}
-                      <code className="font-mono">read:org</code>）。
-                    </p>
+                    {/* Manual Organization / Account Scope Selector */}
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/70 p-3.5 space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                            Key 归属范围
+                          </span>
+                          {ghScope ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-md bg-indigo-500/12 text-indigo-600 dark:text-indigo-400">
+                              已锁定：{ghScope.type === "Organization" ? "组织" : "个人"}{" "}
+                              <code className="font-mono">{ghScope.login}</code>
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-[var(--text-muted)]">
+                              自动识别（全部可访问）
+                            </span>
+                          )}
+                        </div>
+                        {ghInspecting && (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+                            <Icon name="loader-2" size={12} className="animate-spin" />
+                            正在读取可用账号与组织…
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleSelectScopeOwner(null)}
+                          className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-[12px] font-medium border transition cursor-pointer ${
+                            ghScope === null
+                              ? "border-indigo-500 bg-indigo-600 text-white shadow-2xs"
+                              : "border-[var(--border-subtle)] bg-[var(--surface-card)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]"
+                          }`}
+                        >
+                          <Icon name="layers" size={12.5} />
+                          <span>全部可访问（自动）</span>
+                        </button>
+
+                        {ghScopeCandidates.map((cand) => {
+                          const isSelected =
+                            ghScope?.type === cand.type &&
+                            ghScope?.login.toLowerCase() === cand.login.toLowerCase();
+                          const isOrg = cand.type === "Organization";
+                          return (
+                            <button
+                              key={`${cand.type}:${cand.login}`}
+                              type="button"
+                              onClick={() => handleSelectScopeOwner(cand)}
+                              className={`inline-flex items-center gap-1.5 h-8 pl-1.5 pr-2.5 rounded-lg text-[12px] font-medium border transition cursor-pointer ${
+                                isSelected
+                                  ? "border-indigo-500 bg-indigo-600 text-white shadow-2xs"
+                                  : "border-[var(--border-subtle)] bg-[var(--surface-card)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]"
+                              }`}
+                            >
+                              <GithubOwnerAvatar
+                                login={cand.login}
+                                type={cand.type}
+                                avatarUrl={cand.avatar_url}
+                                size="xs"
+                                onActivePill={isSelected}
+                              />
+                              <span className="font-mono">{cand.login}</span>
+                              <span
+                                className={`text-[10px] px-1 rounded ${
+                                  isSelected
+                                    ? "bg-white/20 text-white"
+                                    : isOrg
+                                      ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-400"
+                                      : "bg-[var(--surface-subtle)] text-[var(--text-muted)]"
+                                }`}
+                              >
+                                {isOrg ? "组织" : "个人"}
+                              </span>
+                            </button>
+                          );
+                        })}
+
+                        {ghCustomOrgOpen ? (
+                          <div className="inline-flex items-center gap-1 h-8 pl-2 pr-1 rounded-lg border border-indigo-500 bg-[var(--surface-card)]">
+                            <Icon name="building-2" size={12.5} className="text-indigo-500" />
+                            <input
+                              type="text"
+                              autoFocus
+                              value={ghCustomOrgInput}
+                              onChange={(e) => setGhCustomOrgInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  handleApplyCustomScopeOrg();
+                                } else if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  setGhCustomOrgOpen(false);
+                                  setGhCustomOrgInput("");
+                                }
+                              }}
+                              placeholder="输入组织名"
+                              className="w-28 bg-transparent text-[12px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+                            />
+                            <button
+                              type="button"
+                              onClick={handleApplyCustomScopeOrg}
+                              disabled={!ghCustomOrgInput.trim()}
+                              aria-label="确认组织名"
+                              className="p-1 rounded text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/15 disabled:opacity-40 cursor-pointer"
+                            >
+                              <Icon name="check" size={12.5} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setGhCustomOrgOpen(false);
+                                setGhCustomOrgInput("");
+                              }}
+                              aria-label="取消"
+                              className="p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                            >
+                              <Icon name="x" size={12.5} />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setGhCustomOrgOpen(true)}
+                            className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg text-[12px] font-medium border border-dashed border-[var(--border-strong)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+                          >
+                            <Icon name="plus" size={12.5} />
+                            <span>手动输入组织名</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {ghInspectError && (
+                        <p className="text-[11.5px] text-rose-600 dark:text-rose-400">
+                          {ghInspectError}
+                        </p>
+                      )}
+
+                      <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+                        添加组织 Fine-grained PAT 时，强烈建议直接点击对应组织（或手动输入组织名）锁定归属，这样会直接拉取该组织的私有与公开仓库，不会被个人公开仓库干扰。
+                      </p>
+                    </div>
                   </div>
 
                   <div className="px-5 py-3 bg-[var(--surface-subtle)] border-t border-[var(--border-subtle)] flex items-center justify-end gap-2">
@@ -898,9 +1276,9 @@ export function SettingsView({
                       size="sm"
                       icon={editingGhId ? "check" : "plus"}
                       loading={savingGh}
-                      disabled={!ghToken.trim()}
+                      disabled={!editingGhId && !ghToken.trim()}
                     >
-                      {editingGhId ? "验证并更新 Key" : "验证并添加 Key"}
+                      {editingGhId ? "验证并保存修改" : "验证并添加 Key"}
                     </Button>
                   </div>
                 </form>
@@ -917,7 +1295,14 @@ export function SettingsView({
                     onClick={() => {
                       setEditingGhId(null);
                       setGhLabel("");
+                      setGhLabelAutoFilled(false);
                       setGhToken("");
+                      setGhScope(null);
+                      setGhInspectResult(null);
+                      setGhInspectError("");
+                      setGhCustomOrgOpen(false);
+                      setGhCustomOrgInput("");
+                      lastAutoInspectedTokenRef.current = "";
                       setAddingGhKey(true);
                     }}
                   >
@@ -989,8 +1374,10 @@ export function SettingsView({
                 </label>
 
                 <GithubRepoPicker
-                  value={projRepo}
-                  onChange={(next) => setProjRepo(next)}
+                  values={projRepos}
+                  onChange={setProjRepos}
+                  draftValue={projRepoDraft}
+                  onDraftChange={setProjRepoDraft}
                   githubConfigured={githubConfigured}
                   githubConnections={githubConnections}
                   defaultExpanded={false}
@@ -1043,6 +1430,30 @@ export function SettingsView({
                   </div>
                 </div>
                 <div className="p-5 space-y-3">
+                  {projectReposList.length > 1 && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11.5px] text-[var(--text-muted)] mr-1">
+                        选择本地仓库：
+                      </span>
+                      {projectReposList.map((r) => {
+                        const active = r === snippetRepo;
+                        return (
+                          <button
+                            key={r}
+                            type="button"
+                            onClick={() => setSnippetRepo(r)}
+                            className={`px-2 py-1 rounded-lg text-[11.5px] font-mono border transition cursor-pointer ${
+                              active
+                                ? "border-indigo-500 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
+                                : "border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                            }`}
+                          >
+                            {r}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                   <pre className="p-3.5 rounded-xl bg-zinc-950 text-zinc-100 text-[12px] font-mono leading-relaxed overflow-x-auto border border-zinc-800">
                     {snippets.agent}
                   </pre>
