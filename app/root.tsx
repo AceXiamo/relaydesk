@@ -7,10 +7,9 @@ import {
   isRouteErrorResponse,
 } from "react-router";
 import type { LinksFunction } from "react-router";
-import stylesheet from "./app.css?url";
+import "./app.css";
 
 export const links: LinksFunction = () => [
-  { rel: "stylesheet", href: stylesheet },
   {
     rel: "preload",
     href: "/fonts/geist.woff2",
