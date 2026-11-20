@@ -600,28 +600,6 @@
           text-overflow: ellipsis;
         }
 
-        .cap-pill {
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
-          padding: 1.5px 7px;
-          border-radius: 999px;
-          font-size: 10px;
-          font-weight: 600;
-          letter-spacing: 0.01em;
-          background: var(--rd-accent-soft);
-          border: 1px solid var(--rd-accent-border);
-          color: var(--rd-accent-text);
-          white-space: nowrap;
-        }
-
-        .cap-dot {
-          width: 5px;
-          height: 5px;
-          border-radius: 999px;
-          background: var(--rd-accent);
-        }
-
         .header-sub {
           font-size: 11px;
           color: var(--rd-text-muted);
@@ -1051,7 +1029,6 @@
 
         /* Inline Ticket Confirmation Card */
         .ticket-card {
-          position: relative;
           width: 100%;
           border-radius: 16px;
           border: 1px solid var(--rd-border-strong);
@@ -1061,17 +1038,6 @@
           flex-direction: column;
           gap: 9px;
           box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.14);
-          overflow: hidden;
-        }
-        .ticket-card::before {
-          content: "";
-          position: absolute;
-          top: 0;
-          left: 0;
-          right: 0;
-          height: 2.5px;
-          background: linear-gradient(90deg, var(--rd-accent), var(--rd-accent-2));
-          opacity: 0.9;
         }
 
         .ticket-head {
@@ -1712,10 +1678,6 @@
               <div class="header-titles">
                 <div class="header-title-row">
                   <h2 data-role="title">反馈与助手</h2>
-                  <span class="cap-pill" data-role="cap-pill" hidden>
-                    <span class="cap-dot"></span>
-                    <span data-role="cap-text">AI 助手</span>
-                  </span>
                 </div>
                 <div class="header-sub" data-role="subtitle">在线解答功能疑问，或截屏一键提单</div>
               </div>
@@ -1818,8 +1780,6 @@
     const toggleIcon = q('[data-role="toggle-icon"]');
     const titleEl = q('[data-role="title"]');
     const subtitleEl = q('[data-role="subtitle"]');
-    const capPill = q('[data-role="cap-pill"]');
-    const capText = q('[data-role="cap-text"]');
     const resetBtn = q('[data-action="reset"]');
     const bodyEl = q('[data-role="body"]');
     const noticeEl = q('[data-role="notice"]');
@@ -1991,12 +1951,9 @@
     function renderBody() {
       resetBtn.hidden = state.items.length === 0;
       if (state.items.length === 0) {
-        const capHint = state.config.code_context_enabled
-          ? "已接入项目代码上下文，实时解答使用疑问、框选截屏排查，或一键提单。"
-          : "随时向 AI 助手提问、框选网页截屏，或点击右上角直接填写反馈单。";
-        const eyebrow = state.config.code_context_enabled
-          ? "AI · 代码感知支持"
-          : "AI 在线支持";
+        const capHint = state.config.ai_enabled
+          ? "随时向助手提问怎么用、框选网页截屏排查问题，或一键提交反馈建议。"
+          : "支持框选网页截屏标注问题，点击右上角即可快速填写反馈单。";
         bodyEl.innerHTML = `
           <div class="welcome">
             <div class="welcome-hero">
@@ -2004,13 +1961,11 @@
               <img class="welcome-hero-art hero-art-light" src="${escapeHtml(ASSETS.heroLight)}" alt="" />
               <div class="welcome-hero-scrim" aria-hidden="true"></div>
               <div class="welcome-hero-copy">
-                <span class="welcome-eyebrow"><span class="welcome-eyebrow-dot"></span>${escapeHtml(eyebrow)}</span>
                 <p class="welcome-title">你好，有什么可以帮到你？</p>
                 <p class="welcome-desc">${escapeHtml(capHint)}</p>
               </div>
               <div class="welcome-caps">
                 <span class="welcome-cap-tag">${ICONS.crop}<span>框选截屏</span></span>
-                ${state.config.code_context_enabled ? `<span class="welcome-cap-tag">${ICONS.check}<span>代码感知</span></span>` : ""}
                 <span class="welcome-cap-tag">${ICONS.ticket}<span>一键提单</span></span>
               </div>
             </div>
@@ -2147,16 +2102,9 @@
         if (state.config.project_name) {
           titleEl.textContent = state.config.project_name;
         }
-        if (state.config.code_context_enabled) {
-          capText.textContent = "AI · 代码感知";
-          capPill.hidden = false;
-          subtitleEl.textContent = "已连接项目代码上下文，支持问答与截屏提单";
-        } else if (state.config.ai_enabled) {
-          capText.textContent = "AI 助手";
-          capPill.hidden = false;
-          subtitleEl.textContent = "在线排查问题、网页截屏或一键提单";
+        if (state.config.ai_enabled) {
+          subtitleEl.textContent = "在线解答功能疑问，或截屏一键提单";
         } else {
-          capPill.hidden = true;
           subtitleEl.textContent = "网页截屏反馈 · 直达处理队列";
         }
         if (!state.config.upload_enabled) {
