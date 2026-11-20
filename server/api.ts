@@ -63,6 +63,7 @@ import {
 import { getProjectReposStatus, syncProjectRepos } from "./repo-workspace.ts";
 import {
   runWidgetAgentStream,
+  widgetStreamErrorLabel,
   type WidgetChatMessage,
   type WidgetPageContext,
   type WidgetStreamEvent,
@@ -1038,7 +1039,7 @@ export class ApiRouter {
     this.assistantInFlight += 1;
 
     const abortController = new AbortController();
-    req.on("close", () => {
+    res.on("close", () => {
       if (!res.writableEnded) {
         abortController.abort();
       }
@@ -1074,10 +1075,10 @@ export class ApiRouter {
         onEvent: writeEvent,
       });
     } catch (err) {
-      writeEvent({
-        type: "error",
-        error: err instanceof Error ? err.message.slice(0, 200) : "对话处理异常",
-      });
+      if (!abortController.signal.aborted) {
+        console.error("[widget-chat] unhandled stream error", { projectId, error: widgetStreamErrorLabel(err) });
+        writeEvent({ type: "error", error: "对话处理异常，请重试或直接提单。" });
+      }
     } finally {
       this.assistantInFlight = Math.max(0, this.assistantInFlight - 1);
       if (!res.writableEnded) {

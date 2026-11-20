@@ -464,7 +464,9 @@ function resolveSafeInsideRepo(root: ReadyRepoRoot, relInput: string): {
   absPath: string;
   relPath: string;
 } | null {
-  const cleaned = relInput.replace(/\\/g, "/").replace(/^\/+/, "");
+  let cleaned = relInput.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  while (cleaned.startsWith("./")) cleaned = cleaned.slice(2);
+  if (cleaned === ".") cleaned = "";
   if (cleaned && isSensitivePath(cleaned)) return null;
   const candidate = resolve(root.realDir, cleaned || ".");
   if (candidate !== root.realDir && !candidate.startsWith(root.realDir + sep)) {
@@ -480,6 +482,7 @@ function resolveSafeInsideRepo(root: ReadyRepoRoot, relInput: string): {
   if (realTarget !== root.realDir && !realTarget.startsWith(root.realDir + sep)) {
     return null;
   }
+  if (realTarget !== candidate) return null; // Do not follow symlinks, even inside the repo.
   const relPath = relative(root.realDir, realTarget).replace(/\\/g, "/");
   if (relPath && isSensitivePath(relPath)) return null;
   return { absPath: realTarget, relPath };
@@ -716,7 +719,7 @@ export function readRepoFile(
       error: "File path is required",
     };
   }
-  if (isSensitivePath(rawPath) || isBinaryFilename(basename(rawPath))) {
+  if (isBinaryFilename(basename(rawPath))) {
     return {
       repo: targets[0]?.repo ?? "",
       path: rawPath,

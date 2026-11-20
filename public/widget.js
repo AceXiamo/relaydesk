@@ -973,6 +973,7 @@
           margin: 0 12px 8px;
         }
         .notice svg { width: 14px; height: 14px; margin-top: 1px; }
+        .notice .icon-btn { margin-left: auto; flex-shrink: 0; }
 
         /* Composer Footer */
         .composer {
@@ -1396,7 +1397,8 @@
 
           <div class="notice" data-role="notice" hidden>
             ${ICONS.alert}
-            <span data-role="notice-text"></span>
+            <span role="alert" data-role="notice-text"></span>
+            <button type="button" class="icon-btn" data-action="dismiss-notice" aria-label="关闭提示">${ICONS.close}</button>
           </div>
 
           <footer class="composer">
@@ -1962,6 +1964,7 @@
         let buffer = "";
         let pendingDraft = null;
 
+        let receivedError = false;
         const handleSsePayload = (eventName, rawData) => {
           let evt;
           try {
@@ -1982,37 +1985,40 @@
           } else if (type === "ticket_draft" && evt.draft) {
             pendingDraft = evt.draft;
           } else if (type === "error") {
-            showNotice(evt.error || "AI 助手响应异常，请重试或直接提单");
+            receivedError = true;
+            showNotice(evt.error || "AI 助手响应异常，请重试或直接提单", 0);
           }
+        };
+
+        const handleBlock = (block) => {
+          let eventName = "message";
+          const dataLines = [];
+          for (const line of block.split(/\r?\n/)) {
+            if (line.startsWith("event:")) eventName = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+          }
+          if (dataLines.length) handleSsePayload(eventName, dataLines.join("\n"));
         };
 
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let sepIdx;
-          while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
-            const chunk = buffer.slice(0, sepIdx);
-            buffer = buffer.slice(sepIdx + 2);
-            let eventName = "message";
-            const dataLines = [];
-            for (const line of chunk.split(/\r?\n/)) {
-              if (line.startsWith("event:")) {
-                eventName = line.slice(6).trim();
-              } else if (line.startsWith("data:")) {
-                dataLines.push(line.slice(5).trim());
-              }
-            }
-            if (dataLines.length > 0) {
-              handleSsePayload(eventName, dataLines.join("\n"));
-            }
+          buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+          const blocks = buffer.split(/\r?\n\r?\n/);
+          buffer = blocks.pop();
+          for (const block of blocks) handleBlock(block);
+          if (done) {
+            if (buffer.trim()) handleBlock(buffer);
+            break;
           }
         }
 
         assistantItem.statusLabel = "";
         assistantItem.streaming = false;
-        if (!assistantItem.text && !pendingDraft) {
+        if (!assistantItem.text.trim() && !pendingDraft) {
           state.items = state.items.filter((i) => i.id !== assistantItem.id);
+          if (!receivedError && !state.abortController?.signal.aborted) {
+            showNotice("AI 助手未能生成回复，请重试或点击右上角「直接提单」", 0);
+          }
         }
         if (pendingDraft) {
           const parts = [pendingDraft.summary];
@@ -2046,6 +2052,7 @@
           }
           showNotice(
             err instanceof Error ? err.message : "连接 AI 助手失败，你可以点击右上角直接提单",
+            0,
           );
         }
       } finally {
@@ -2509,6 +2516,8 @@
         setOpen(!state.open);
       } else if (action === "close") {
         setOpen(false);
+      } else if (action === "dismiss-notice") {
+        showNotice("");
       } else if (action === "reset") {
         state.abortController?.abort();
         state.items = [];

@@ -1,5 +1,5 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { stepCountIs, streamText, tool, type ModelMessage, type ToolSet } from "ai";
+import { APICallError, stepCountIs, streamText, tool, type FilePart, type ModelMessage, type ToolSet } from "ai";
 import { z } from "zod";
 import { getEffectiveAiConfig } from "./ai-config.ts";
 import {
@@ -44,6 +44,9 @@ export type WidgetStreamEvent =
   | { type: "ticket_draft"; draft: WidgetTicketDraft }
   | { type: "done"; ok: true }
   | { type: "error"; error: string };
+
+const MAX_AGENT_STEPS = 10;
+const EMPTY_REPLY = "AI 助手未能生成有效回复，请重试或点击右上角「直接提单」。";
 
 const TOOL_STATUS_LABELS: Record<string, string> = {
   list_files: "正在浏览项目结构…",
@@ -92,6 +95,7 @@ function buildSystemPrompt(
     "2. 如果用户反馈的是明确的功能异常（Bug）、页面样式/交互缺陷、产品改进建议，或者查完代码确认当前版本确实尚未支持 / 存在 Bug，请调用 `propose_feedback_ticket` 工具生成一张结构化反馈工单确认卡，供用户一键确认提交到研发队列。",
     "3. 在调用 `propose_feedback_ticket` 后，也请用 1–2 句简短友好的话告诉用户你已经整理好反馈单，点击下方卡片按钮即可提交（如还需补充细节也可顺带提醒）。",
     "4. 如果用户只是闲聊或提出明确的使用疑问且你已经解答清楚，**不要**主动创建工单确认卡；除非用户明确要求提交反馈。",
+    "5. 查阅代码时，优先用 2–4 次有针对性的 search_code / read_file 调用；始终给用户清晰的结论，信息不足时说明还需要什么。",
     "",
     "严格安全与边界约束：",
     "- 严禁向用户输出原始大段源代码、内部目录树清单、文件路径全集、密钥/环境变量、或内部安全机制。请用面向终端用户的产品语言解释功能和步骤。",
@@ -105,6 +109,14 @@ function buildSystemPrompt(
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function inferImageMediaType(url: URL): string {
+  const path = url.pathname.toLowerCase();
+  if (/\.jpe?g$/.test(path)) return "image/jpeg";
+  if (path.endsWith(".webp")) return "image/webp";
+  if (path.endsWith(".gif")) return "image/gif";
+  return "image/png";
 }
 
 function toModelMessages(
@@ -128,15 +140,14 @@ function toModelMessages(
     }
 
     if (validImages.length > 0 && includeVisionImages) {
-      const parts: Array<
-        { type: "text"; text: string } | { type: "image"; image: URL }
-      > = [];
+      const parts: Array<{ type: "text"; text: string } | FilePart> = [];
       parts.push({
         type: "text",
         text: text || "请帮我看看这张页面截图里的问题。",
       });
       for (const imgUrl of validImages) {
-        parts.push({ type: "image", image: new URL(imgUrl) });
+        const url = new URL(imgUrl);
+        parts.push({ type: "file", data: url, mediaType: inferImageMediaType(url) });
       }
       result.push({ role: "user", content: parts });
     } else if (validImages.length > 0) {
@@ -155,13 +166,21 @@ function toModelMessages(
 function looksLikeVisionUnsupportedError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
   return (
-    msg.includes("image") ||
-    msg.includes("vision") ||
-    msg.includes("multimodal") ||
+    (/image|vision|multi.?modal|\bfile\b|media/.test(msg) &&
+      /unsupported|not support|does not|cannot|invalid|only|expected|reject|unknown variant/.test(msg)) ||
     msg.includes("content must be a string") ||
     msg.includes("unknown variant `image_url`") ||
     msg.includes("invalid content type")
   );
+}
+
+// Provider messages can contain request bodies, headers, or signed URLs.
+export function widgetStreamErrorLabel(err: unknown): string {
+  if (APICallError.isInstance(err) && Number.isInteger(err.statusCode)) {
+    return `Provider HTTP ${err.statusCode}`;
+  }
+  if (err instanceof Error && err.name === "TimeoutError") return "Model stream timed out";
+  return "Widget stream failed";
 }
 
 export async function runWidgetAgentStream(options: {
@@ -225,6 +244,8 @@ export async function runWidgetAgentStream(options: {
   const provider = createOpenAICompatible({
     name: "relaydesk-widget",
     baseURL: aiConfig.base_url,
+    // Forward screenshot URLs as image_url instead of downloading them on the server.
+    supportedUrls: () => ({ "image/*": [/^https?:\/\//i] }),
     apiKey: aiConfig.api_key || "not-needed",
   });
   const model = provider.chatModel(aiConfig.model);
@@ -339,7 +360,8 @@ export async function runWidgetAgentStream(options: {
   }
 
   const hasAnyImages = messages.some((m) => (m.attachments?.length ?? 0) > 0);
-  const executePass = async (includeVisionImages: boolean): Promise<boolean> => {
+  const lookupHistory: ModelMessage[] = [];
+  const executePass = async (includeVisionImages: boolean, summaryOnly = false) => {
     const modelMessages = toModelMessages(messages, includeVisionImages);
     if (modelMessages.length === 0) {
       throw new Error("请输入你想咨询或反馈的内容");
@@ -347,7 +369,14 @@ export async function runWidgetAgentStream(options: {
 
     onEvent({ type: "status", stage: "thinking", label: "正在思考…" });
 
-    const timeoutSignal = AbortSignal.timeout(45_000);
+    if (summaryOnly) {
+      modelMessages.push(...lookupHistory, {
+        role: "user",
+        content: "请直接用简短的话总结已知信息；如果无法确定答案，请向我询问必要的细节。",
+      });
+    }
+
+    const timeoutSignal = AbortSignal.timeout(90_000);
     const combinedSignal = signal
       ? AbortSignal.any([signal, timeoutSignal])
       : timeoutSignal;
@@ -356,16 +385,29 @@ export async function runWidgetAgentStream(options: {
       model,
       system: systemPrompt,
       messages: modelMessages,
-      tools,
-      stopWhen: stepCountIs(6),
-      maxOutputTokens: 1200,
+      tools: summaryOnly ? undefined : tools,
+      prepareStep: ({ stepNumber }) => {
+        if (stepNumber >= MAX_AGENT_STEPS - 1) return { activeTools: [] };
+        if (hasCodeTools && stepNumber === MAX_AGENT_STEPS - 2) {
+          return { activeTools: ["propose_feedback_ticket"] };
+        }
+      },
+      stopWhen: stepCountIs(summaryOnly ? 1 : MAX_AGENT_STEPS),
+      maxOutputTokens: summaryOnly ? 2048 : 4096,
+      onStepFinish: ({ toolCalls, response }) => {
+        if (toolCalls.length) lookupHistory.push(...response.messages);
+      },
+      // Handle errors from fullStream below instead of logging raw provider errors.
+      onError: () => {},
       abortSignal: combinedSignal,
     });
 
     let emittedText = false;
+    let finishReason = "unknown";
+    let stepCount = 0;
     for await (const part of result.fullStream) {
       if (part.type === "text-delta") {
-        if (part.text) {
+        if (part.text && (emittedText || part.text.trim())) {
           emittedText = true;
           onEvent({ type: "delta", text: part.text });
         }
@@ -377,8 +419,15 @@ export async function runWidgetAgentStream(options: {
           label,
           tool: part.toolName,
         });
+      } else if (part.type === "finish-step") {
+        stepCount += 1;
+        finishReason = part.finishReason;
+      } else if (part.type === "finish") {
+        finishReason = part.finishReason;
+      } else if (part.type === "abort") {
+        throw combinedSignal.reason ?? new Error("Stream aborted");
       } else if (part.type === "error") {
-        throw part.error instanceof Error ? part.error : new Error(String(part.error));
+        throw part.error;
       }
     }
 
@@ -388,36 +437,38 @@ export async function runWidgetAgentStream(options: {
         text: "我已根据你的描述整理好反馈工单卡片，确认无误后点击下方按钮即可提交。",
       });
     }
-    return emittedText || emittedDraft;
+    return { emittedText: emittedText || emittedDraft, emittedDraft, finishReason, stepCount };
   };
 
+  const logContext = { projectId: project.id, model: aiConfig.model };
   try {
-    await executePass(hasAnyImages);
-    onEvent({ type: "done", ok: true });
-  } catch (err) {
-    if (hasAnyImages && looksLikeVisionUnsupportedError(err)) {
-      try {
-        await executePass(false);
-        onEvent({ type: "done", ok: true });
-        return;
-      } catch (retryErr) {
-        onEvent({
-          type: "error",
-          error:
-            retryErr instanceof Error
-              ? retryErr.message.slice(0, 240)
-              : "AI 助手暂时无法响应，请稍后重试或直接提交反馈。",
-        });
+    let includeImages = hasAnyImages;
+    let pass;
+    try {
+      pass = await executePass(includeImages);
+    } catch (err) {
+      if (signal?.aborted || !includeImages || !looksLikeVisionUnsupportedError(err)) throw err;
+      console.error("[widget-chat] stream error", { ...logContext, error: widgetStreamErrorLabel(err) });
+      includeImages = false;
+      lookupHistory.length = 0;
+      pass = await executePass(false);
+    }
+    if (signal?.aborted) return;
+    if (!pass.emittedText && !pass.emittedDraft) {
+      console.warn("[widget-chat] empty stream output", {
+        ...logContext, finishReason: pass.finishReason, stepCount: pass.stepCount,
+      });
+      pass = await executePass(includeImages, true);
+      if (signal?.aborted) return;
+      if (!pass.emittedText && !pass.emittedDraft) {
+        onEvent({ type: "error", error: EMPTY_REPLY });
         return;
       }
     }
+    onEvent({ type: "done", ok: true });
+  } catch (err) {
     if (signal?.aborted) return;
-    onEvent({
-      type: "error",
-      error:
-        err instanceof Error
-          ? err.message.slice(0, 240)
-          : "AI 助手暂时无法响应，请稍后重试或直接提交反馈。",
-    });
+    console.error("[widget-chat] stream error", { ...logContext, error: widgetStreamErrorLabel(err) });
+    onEvent({ type: "error", error: "AI 助手暂时无法响应，请稍后重试或直接提交反馈。" });
   }
 }

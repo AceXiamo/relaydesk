@@ -2,7 +2,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { saveStoredAiConfig } from "../server/ai-config.ts";
+import { runWidgetAgentStream, type WidgetChatMessage, type WidgetStreamEvent } from "../server/widget-agent.ts";
 import { startRelaydeskServer, type RunningRelaydeskServer } from "../server.ts";
 import {
   isSensitivePath,
@@ -57,7 +59,10 @@ async function startMockHttpServer(
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();
   const port = typeof addr === "object" && addr ? addr.port : 0;
-  const close = () => new Promise<void>((resolve) => server.close(() => resolve()));
+  const close = () => new Promise<void>((resolve) => {
+    server.close(() => resolve());
+    server.closeAllConnections();
+  });
   cleanups.push(close);
   return { url: `http://127.0.0.1:${port}`, close };
 }
@@ -220,6 +225,11 @@ describe("Repo workspace read-only sandbox", () => {
     expect(isSensitivePath(".git/config")).toBe(true);
     expect(isSensitivePath("config/secrets.json")).toBe(true);
     expect(isSensitivePath("docs/guide.md")).toBe(false);
+    expect(isSensitivePath(".")).toBe(true);
+    expect(isSensitivePath("./docs")).toBe(true);
+    for (const dir of [".", "./", "./docs", " ././docs/ "]) {
+      expect(listRepoFiles(roots, { dir }).entries).toContain("docs/guide.md");
+    }
 
     const listed = listRepoFiles(roots, { max_depth: 3 });
     expect(listed.entries).toContain("docs/guide.md");
@@ -238,14 +248,158 @@ describe("Repo workspace read-only sandbox", () => {
     expect(safeRead.error).toBeUndefined();
     expect(safeRead.content).toContain("导出 CSV");
 
-    const blockedEnv = readRepoFile(roots, { path: ".env" });
-    expect(blockedEnv.error).toBeTruthy();
+    expect(readRepoFile(roots, { path: "./docs/guide.md" }).content).toBe(safeRead.content);
+    symlinkSync(join(repoDir, "docs"), join(repoDir, "alias"));
+    for (const path of [".env", "./.env", "../host-secret.txt", ".git/config", "docs/../.env", "docs/leak.txt", "alias/guide.md"]) {
+      expect(readRepoFile(roots, { path })).toMatchObject({ content: "", error: expect.any(String) });
+    }
+    expect(listRepoFiles(roots, { dir: "alias" }).entries).toEqual([]);
+  });
+});
 
-    const blockedTraversal = readRepoFile(roots, { path: "../host-secret.txt" });
-    expect(blockedTraversal.error).toBeTruthy();
+interface MockChatRequest {
+  tools?: Array<{ function: { name: string } }>;
+  messages: Array<{ role: string; content: unknown }>;
+  max_tokens: number;
+}
 
-    const blockedSymlink = readRepoFile(roots, { path: "docs/leak.txt" });
-    expect(blockedSymlink.error).toBeTruthy();
+async function mockWidgetAgent(
+  respond: (body: MockChatRequest, index: number, res: ServerResponse) => void,
+  { withRepo = false, messages = [{ role: "user", text: "How do I export a report?" }] as WidgetChatMessage[] } = {},
+) {
+  const requests: MockChatRequest[] = [];
+  const mock = await startMockHttpServer((_req, res, raw) => {
+    const body = JSON.parse(raw.toString()) as MockChatRequest;
+    requests.push(body);
+    respond(body, requests.length - 1, res);
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relaydesk-mock-agent-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "test.sqlite3");
+  saveStoredAiConfig(dbPath, { base_url: mock.url, api_key: "", model: "local-mock", intake_enabled: true });
+  const repo = "fixture/demo";
+  if (withRepo) {
+    const projectDir = join(dir, "repos", "demo");
+    const repoDir = join(projectDir, "fixture__demo");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "guide.md"), "Use Export in Reports.");
+    writeFileSync(join(projectDir, ".sync-meta.json"), JSON.stringify({ synced_at: new Date().toISOString() }));
+  }
+  const events: WidgetStreamEvent[] = [];
+  await runWidgetAgentStream({
+    dbPath,
+    project: {
+      id: "demo", name: "Demo", repo, repos: withRepo ? [repo] : [], widget_code_context: withRepo,
+      agent_instructions: "", delivery_mode: "review_only", automation_paused: true,
+    },
+    messages,
+    onEvent: (event) => events.push(event),
+  });
+  return { requests, events };
+}
+
+function sendCompletion(res: ServerResponse, delta: object, finishReason: string) {
+  res.writeHead(200, { "Content-Type": "text/event-stream" });
+  for (const choice of [{ delta, finish_reason: null }, { delta: {}, finish_reason: finishReason }]) {
+    res.write(`data: ${JSON.stringify({ choices: [{ index: 0, ...choice }] })}\n\n`);
+  }
+  res.end("data: [DONE]\n\n");
+}
+
+describe("Widget agent with a local streaming model", () => {
+  it("reserves the last step for a user-facing answer after repeated tool calls", async () => {
+    const reply = "Use Export in Reports.";
+    const { requests, events } = await mockWidgetAgent((body, i, res) => {
+      const names = body.tools?.map((t) => t.function.name) ?? [];
+      if (!names.length) return sendCompletion(res, { content: reply }, "stop");
+      const name = names.includes("list_files") ? "list_files" : "propose_feedback_ticket";
+      const args = name === "list_files" ? { dir: "." } : { title: "Export issue", summary: "Export failed", kind: "功能异常" };
+      sendCompletion(res, { tool_calls: [{ index: 0, id: `call_${i}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, "tool_calls");
+    }, { withRepo: true });
+    expect(requests).toHaveLength(10);
+    expect(requests.slice(0, 8).every((r) => r.tools?.some((t) => t.function.name === "list_files"))).toBe(true);
+    expect(requests[8].tools?.map((t) => t.function.name)).toEqual(["propose_feedback_ticket"]);
+    expect(requests[9].tools ?? []).toEqual([]);
+    expect(requests.every((r) => r.max_tokens === 4096)).toBe(true);
+    expect(events.slice(-2)).toEqual([{ type: "delta", text: reply }, { type: "done", ok: true }]);
+  });
+
+  it.each([true, false])("retries an empty length completion once (summary has text: %s)", async (hasText) => {
+    const reply = "Which report are you exporting?";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { requests, events } = await mockWidgetAgent((_body, i, res) => {
+        if (i === 1 && hasText) sendCompletion(res, { content: reply }, "stop");
+        else sendCompletion(res, {}, "length");
+      });
+      expect(warn).toHaveBeenCalledWith("[widget-chat] empty stream output", {
+        projectId: "demo", model: "local-mock", finishReason: "length", stepCount: 1,
+      });
+      expect(requests.map((r) => r.max_tokens)).toEqual([4096, 2048]);
+      expect(requests[1].tools).toBeUndefined();
+      expect(events.filter((event) => event.type !== "status")).toEqual(hasText
+        ? [{ type: "delta", text: reply }, { type: "done", ok: true }]
+        : [{ type: "error", error: "AI 助手未能生成有效回复，请重试或点击右上角「直接提单」。" }]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("preserves lookup results for the no-tools summary", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { requests, events } = await mockWidgetAgent((_body, i, res) => {
+        if (i === 0) {
+          sendCompletion(res, { tool_calls: [{ index: 0, id: "lookup", type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: "guide.md" }) } }] }, "tool_calls");
+        } else if (i === 1) sendCompletion(res, {}, "length");
+        else sendCompletion(res, { content: "Use Export in Reports." }, "stop");
+      }, { withRepo: true });
+      expect(requests).toHaveLength(3);
+      expect(requests[2].tools).toBeUndefined();
+      const toolResult = requests[2].messages.find((m) => m.role === "tool");
+      expect(toolResult?.content).toContain("Use Export in Reports.");
+      expect(events.at(-1)).toEqual({ type: "done", ok: true });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("retries a rejected file as text without exposing the provider error", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const url = "https://images.example.test/screenshot.png";
+      const { requests, events } = await mockWidgetAgent((_body, i, res) => {
+        if (i === 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "Unsupported file media type (private diagnostic)" } }));
+        } else sendCompletion(res, { content: "Please describe the screenshot." }, "stop");
+      }, { messages: [{ role: "user", text: "What happened?", attachments: [{ url }] }] });
+      expect(requests).toHaveLength(2);
+      expect(requests[1].messages.at(-1)?.content).toContain(url);
+      expect(events.slice(-2)).toEqual([{ type: "delta", text: "Please describe the screenshot." }, { type: "done", ok: true }]);
+      expect(errorLog.mock.calls).toEqual([["[widget-chat] stream error", {
+        projectId: "demo", model: "local-mock", error: "Provider HTTP 400",
+      }]]);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("sends an image URL without the deprecated image content part", async () => {
+    const url = "https://images.example.test/screenshot.WebP?width=400";
+    const emitWarning = vi.spyOn(process, "emitWarning");
+    try {
+      const { requests, events } = await mockWidgetAgent((_body, _i, res) => {
+        sendCompletion(res, { content: "I see the screenshot." }, "stop");
+      }, { messages: [{ role: "user", text: "What happened?", attachments: [{ url }] }] });
+      expect(requests).toHaveLength(1);
+      expect(requests[0].messages.at(-1)?.content).toContainEqual({ type: "image_url", image_url: { url } });
+      expect(JSON.stringify(emitWarning.mock.calls)).not.toContain("AISDK_DEP_IMAGE_CONTENT_PART");
+      expect(events.at(-1)).toEqual({ type: "done", ok: true });
+    } finally {
+      emitWarning.mockRestore();
+    }
   });
 });
 
@@ -282,6 +436,39 @@ describe("Widget streaming chat endpoint", () => {
     expect(sseText).toContain("event: ticket_draft");
     expect(sseText).toContain("功能异常");
     expect(sseText).toContain("event: done");
+  });
+
+  it("cancels the upstream model stream when the widget disconnects", async () => {
+    let upstream: ServerResponse | undefined;
+    const mock = await startMockHttpServer((_req, res) => {
+      upstream = res;
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.flushHeaders();
+    });
+    const { srv, dir } = await startTempRelaydesk();
+    saveStoredAiConfig(join(dir, "relaydesk.sqlite3"), {
+      base_url: mock.url, api_key: "", model: "local-mock", intake_enabled: true,
+    });
+    const createRes = await fetch(`${srv.url}/api/projects`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Disconnect test", repos: ["fixture/demo"], widget_code_context: false }),
+    });
+    const { project } = await createRes.json() as { project: { id: string; intake_key: string } };
+    const controller = new AbortController();
+    try {
+      const chat = await fetch(`${srv.url}/api/projects/${project.id}/chat`, {
+        method: "POST", signal: controller.signal,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${project.intake_key}` },
+        body: JSON.stringify({ messages: [{ role: "user", text: "How do I export?" }] }),
+      });
+      expect(chat.status).toBe(200);
+      await vi.waitFor(() => expect(upstream).toBeDefined());
+      controller.abort();
+      await vi.waitFor(() => expect(upstream?.destroyed).toBe(true));
+    } finally {
+      controller.abort();
+      upstream?.end();
+    }
   });
 
   it("toggles widget_code_context via PATCH /api/projects/:id", async () => {
