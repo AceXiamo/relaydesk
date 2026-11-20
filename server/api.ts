@@ -424,9 +424,14 @@ export class ApiRouter {
         if (!/^[A-Za-z0-9_]+$/.test(token)) {
           throw new ApiError(400, "请输入有效的 GitHub token");
         }
-        await fetchGithubRepositories(token, 1);
+        const catalog = await fetchGithubRepositories(token, { page: 1 });
         saveGithubToken(this.store.dbPath, token);
-        return { configured: true };
+        return {
+          configured: true,
+          viewer: catalog.viewer,
+          org_count: catalog.owners.filter((o) => o.type === "Organization").length,
+          repo_count: catalog.items.length,
+        };
       }
       if (subparts.length === 1 && subparts[0] === "disconnect") {
         deleteGithubToken(this.store.dbPath);
@@ -437,11 +442,23 @@ export class ApiRouter {
         if (typeof page !== "number" || !Number.isInteger(page) || page < 1 || page > 100000) {
           throw new ApiError(400, "Invalid page");
         }
+        let owner = "all";
+        if (typeof data.owner === "string" && data.owner.trim()) {
+          const cleaned = data.owner.trim();
+          if (cleaned !== "all" && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(cleaned)) {
+            throw new ApiError(400, "无效的 GitHub 组织或用户名");
+          }
+          owner = cleaned;
+        }
+        let ownerType: "User" | "Organization" | undefined;
+        if (data.owner_type === "User" || data.owner_type === "Organization") {
+          ownerType = data.owner_type;
+        }
         const token = readGithubToken(this.store.dbPath);
         if (!token) {
           throw new ApiError(409, "请先在项目设置中连接 GitHub。");
         }
-        return await fetchGithubRepositories(token, page);
+        return await fetchGithubRepositories(token, { page, owner, ownerType });
       }
     } catch (err) {
       if (err instanceof GithubError) {

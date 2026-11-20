@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon.tsx";
+import { GithubRepoPicker } from "./GithubRepoPicker.tsx";
 import { Button, Kbd, Modal, PriorityBadge, StatusBadge, useToast } from "./ui.tsx";
 import { api } from "~/lib/api.ts";
 import { PRIORITY_LABELS, PRIORITY_ORDER, taskCode } from "~/lib/format.ts";
@@ -18,6 +19,7 @@ interface CreateProjectModalProps {
   githubConfigured: boolean;
   onClose: () => void;
   onCreated: (project: ProjectDetail) => void;
+  onOpenGithubSettings?: () => void;
 }
 
 export function CreateProjectModal({
@@ -25,36 +27,39 @@ export function CreateProjectModal({
   githubConfigured,
   onClose,
   onCreated,
+  onOpenGithubSettings,
 }: CreateProjectModalProps) {
   const toast = useToast();
   const [name, setName] = useState("");
+  const [nameAutoFilled, setNameAutoFilled] = useState(false);
   const [repo, setRepo] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [repos, setRepos] = useState<string[]>([]);
-  const [loadingRepos, setLoadingRepos] = useState(false);
 
   useEffect(() => {
     if (open) {
       setName("");
+      setNameAutoFilled(false);
       setRepo("");
     }
   }, [open]);
 
-  const loadRepos = async () => {
-    setLoadingRepos(true);
-    try {
-      const res = await api.listGithubRepos(1);
-      setRepos(res.repos);
-      if (res.repos.length === 0) toast.info("未读取到可访问仓库");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "读取仓库失败");
-    } finally {
-      setLoadingRepos(false);
+  const handleRepoChange = (
+    nextRepo: string,
+    meta?: { pickedFromGithub?: boolean },
+  ) => {
+    setRepo(nextRepo);
+    if (meta?.pickedFromGithub) {
+      const shortName = nextRepo.split("/").pop()?.trim() ?? "";
+      if (shortName && (!name.trim() || nameAutoFilled)) {
+        setName(shortName);
+        setNameAutoFilled(true);
+      }
     }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!name.trim() || !repo.trim()) return;
     setSubmitting(true);
     try {
       const { project } = await api.createProject({
@@ -76,88 +81,72 @@ export function CreateProjectModal({
       open={open}
       onClose={onClose}
       title="新建项目"
-      subtitle="每个项目绑定一个 GitHub 仓库，并拥有独立的反馈队列与密钥。"
-      maxWidth="md"
+      subtitle="每个项目绑定一个 GitHub 仓库（支持个人与组织），并拥有独立的反馈队列与密钥。"
+      maxWidth="lg"
+      footer={
+        <>
+          <Button type="button" variant="ghost" size="sm" onClick={onClose}>
+            取消
+          </Button>
+          <Button
+            type="submit"
+            form="rd-create-project-form"
+            variant="primary"
+            size="sm"
+            icon="plus"
+            loading={submitting}
+            disabled={!name.trim() || !repo.trim()}
+          >
+            创建项目
+          </Button>
+        </>
+      }
     >
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form
+        id="rd-create-project-form"
+        onSubmit={handleSubmit}
+        className="space-y-4"
+      >
+        <GithubRepoPicker
+          value={repo}
+          onChange={handleRepoChange}
+          githubConfigured={githubConfigured}
+          defaultExpanded={githubConfigured}
+          onOpenGithubSettings={
+            onOpenGithubSettings
+              ? () => {
+                  onClose();
+                  onOpenGithubSettings();
+                }
+              : undefined
+          }
+        />
+
         <label className="block space-y-1.5">
-          <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
-            项目名称
+          <span className="flex items-center justify-between gap-2">
+            <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+              项目名称
+            </span>
+            {nameAutoFilled && (
+              <span className="text-[11px] text-indigo-600 dark:text-indigo-400">
+                已按仓库名自动填充，可修改
+              </span>
+            )}
           </span>
           <input
             type="text"
             required
-            autoFocus
+            autoFocus={!githubConfigured}
             maxLength={100}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value);
+              setNameAutoFilled(false);
+            }}
             placeholder="例如：Relaydesk Web Console"
-            className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] text-[var(--text-primary)] focus:outline-none focus:border-indigo-500"
+            className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
           />
         </label>
-
-        <div className="space-y-2">
-          <label className="block space-y-1.5">
-            <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
-              GitHub 仓库
-            </span>
-            <input
-              type="text"
-              required
-              maxLength={200}
-              value={repo}
-              onChange={(e) => setRepo(e.target.value)}
-              placeholder="owner/repository 或完整 GitHub 地址"
-              className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] focus:outline-none focus:border-indigo-500"
-            />
-          </label>
-
-          {githubConfigured && (
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                variant="secondary"
-                size="xs"
-                icon="github"
-                loading={loadingRepos}
-                onClick={() => void loadRepos()}
-              >
-                从 GitHub 选择仓库
-              </Button>
-              {repos.length > 0 && (
-                <select
-                  aria-label="选择已授权仓库"
-                  value={repos.includes(repo) ? repo : ""}
-                  onChange={(e) => {
-                    if (e.target.value) {
-                      setRepo(e.target.value);
-                      if (!name.trim()) {
-                        setName(e.target.value.split("/").pop() ?? "");
-                      }
-                    }
-                  }}
-                  className="h-8 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[12.5px] font-mono text-[var(--text-primary)]"
-                >
-                  <option value="">选择仓库…</option>
-                  {repos.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="flex justify-end gap-2 pt-2">
-          <Button type="button" variant="ghost" size="sm" onClick={onClose}>
-            取消
-          </Button>
-          <Button type="submit" variant="primary" size="sm" loading={submitting}>
-            创建项目
-          </Button>
-        </div>
       </form>
     </Modal>
   );

@@ -105,3 +105,31 @@ export interface AiTestResult {
   model: string;
   reply_preview: string;
 }
+
+export interface GithubOwnerInfo {
+  login: string;
+  type: "User" | "Organization";
+  avatar_url?: string;
+}
+
+export interface GithubRepoItem {
+  full_name: string;
+  name: string;
+  owner: string;
+  owner_type: "User" | "Organization";
+  owner_avatar?: string;
+  private: boolean;
+  archived: boolean;
+  description: string;
+  updated_at: string;
+}
+
+export interface GithubReposPayload {
+  repos: string[];
+  items: GithubRepoItem[];
+  viewer: GithubOwnerInfo | null;
+  owners: GithubOwnerInfo[];
+  owner: string;
+  page: number;
+  more: boolean;
+}

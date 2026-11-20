@@ -537,6 +537,7 @@ function ConsoleWorkspace() {
         open={projectModalOpen}
         githubConfigured={githubConfigured}
         onClose={() => setProjectModalOpen(false)}
+        onOpenGithubSettings={() => changeView("settings")}
         onCreated={(proj) => {
           setProjects((prev) => [
             ...prev,

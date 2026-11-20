@@ -12,6 +12,7 @@ const require = createRequire(import.meta.url);
 const LUCIDE_ICONS = [
   "alert-circle",
   "alert-triangle",
+  "archive",
   "arrow-down",
   "arrow-left",
   "arrow-right",
@@ -19,6 +20,7 @@ const LUCIDE_ICONS = [
   "arrow-up-down",
   "arrow-up-right",
   "bot",
+  "building-2",
   "check",
   "check-check",
   "check-circle-2",

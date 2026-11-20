@@ -326,3 +326,178 @@ describe("Ethereum Wallet SIWE Authentication (viem)", () => {
     expect(wallet.authenticated(session!)).toBe(false);
   });
 });
+
+describe("GitHub Personal & Organization Repository Listing", () => {
+  it("lists personal + org repos, filters by org, and handles Fine-grained PAT fallback", async () => {
+    const mockGh = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      res.setHeader("Content-Type", "application/json");
+      if (url.pathname === "/user") {
+        res.end(
+          JSON.stringify({
+            login: "AceXiamo",
+            type: "User",
+            avatar_url: "https://avatars.githubusercontent.com/u/1001?v=4",
+          }),
+        );
+        return;
+      }
+      if (url.pathname === "/user/orgs") {
+        res.end(
+          JSON.stringify([
+            {
+              login: "acme-org",
+              type: "Organization",
+              avatar_url: "https://avatars.githubusercontent.com/u/2001?v=4",
+            },
+            {
+              login: "scoped-org",
+              type: "Organization",
+              avatar_url: "https://avatars.githubusercontent.com/u/2002?v=4",
+            },
+          ]),
+        );
+        return;
+      }
+      if (url.pathname === "/user/repos") {
+        const affiliation = url.searchParams.get("affiliation") ?? "";
+        const personalRepo = {
+          full_name: "AceXiamo/relaydesk",
+          name: "relaydesk",
+          private: false,
+          archived: false,
+          description: "Personal feedback queue",
+          pushed_at: "2026-11-20T12:00:00Z",
+          owner: {
+            login: "AceXiamo",
+            type: "User",
+            avatar_url: "https://avatars.githubusercontent.com/u/1001?v=4",
+          },
+        };
+        const scopedOrgRepo = {
+          full_name: "scoped-org/console-ui",
+          name: "console-ui",
+          private: true,
+          archived: false,
+          description: "Org repo accessible via /user/repos",
+          pushed_at: "2026-11-20T11:00:00Z",
+          owner: {
+            login: "scoped-org",
+            type: "Organization",
+            avatar_url: "https://avatars.githubusercontent.com/u/2002?v=4",
+          },
+        };
+        const rows =
+          affiliation === "owner" ? [personalRepo] : [personalRepo, scopedOrgRepo];
+        res.end(JSON.stringify(rows));
+        return;
+      }
+      if (url.pathname === "/orgs/acme-org/repos") {
+        res.end(
+          JSON.stringify([
+            {
+              full_name: "acme-org/core-api",
+              name: "core-api",
+              private: true,
+              archived: false,
+              description: "Acme organization backend",
+              pushed_at: "2026-11-20T13:00:00Z",
+              owner: {
+                login: "acme-org",
+                type: "Organization",
+                avatar_url: "https://avatars.githubusercontent.com/u/2001?v=4",
+              },
+            },
+          ]),
+        );
+        return;
+      }
+      if (url.pathname === "/orgs/scoped-org/repos") {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ message: "Resource not accessible by PAT" }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ message: "Not Found" }));
+    });
+
+    await new Promise<void>((r) => mockGh.listen(0, "127.0.0.1", r));
+    cleanups.push(() => new Promise<void>((r) => mockGh.close(() => r())));
+    const ghPort = (mockGh.address() as { port: number }).port;
+    const prevBase = process.env.RELAYDESK_GITHUB_API_BASE;
+    process.env.RELAYDESK_GITHUB_API_BASE = `http://127.0.0.1:${ghPort}`;
+    cleanups.push(() => {
+      if (prevBase === undefined) delete process.env.RELAYDESK_GITHUB_API_BASE;
+      else process.env.RELAYDESK_GITHUB_API_BASE = prevBase;
+    });
+
+    const srv = await startApiServer();
+
+    const connectRes = await jsonReq(`${srv.url}/api/github/connect`, "POST", {
+      token: "ghp_testorgtoken123456",
+    });
+    expect(connectRes.status).toBe(200);
+    expect(connectRes.json.configured).toBe(true);
+    expect(connectRes.json.org_count).toBe(2);
+    expect(connectRes.json.repo_count).toBe(3);
+
+    // All repos merges personal + org repos
+    const allRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "all",
+    });
+    expect(allRes.status).toBe(200);
+    expect(allRes.json.repos).toEqual([
+      "acme-org/core-api",
+      "AceXiamo/relaydesk",
+      "scoped-org/console-ui",
+    ]);
+    const owners = allRes.json.owners as Array<{
+      login: string;
+      type: string;
+      avatar_url?: string;
+    }>;
+    expect(owners.map((o) => `${o.type}:${o.login}`)).toEqual([
+      "User:AceXiamo",
+      "Organization:acme-org",
+      "Organization:scoped-org",
+    ]);
+    expect(owners[0].avatar_url).toBe(
+      "https://avatars.githubusercontent.com/u/1001?v=4&s=64",
+    );
+    const items = allRes.json.items as Array<{
+      full_name: string;
+      owner_avatar?: string;
+    }>;
+    expect(items[0].owner_avatar).toBe(
+      "https://avatars.githubusercontent.com/u/2001?v=4&s=64",
+    );
+
+    // Specific org query uses /orgs/{org}/repos
+    const acmeRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "acme-org",
+      owner_type: "Organization",
+    });
+    expect(acmeRes.status).toBe(200);
+    expect(acmeRes.json.repos).toEqual(["acme-org/core-api"]);
+
+    // Org returning 403 on /orgs/{org}/repos gracefully falls back to /user/repos
+    const scopedRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "scoped-org",
+      owner_type: "Organization",
+    });
+    expect(scopedRes.status).toBe(200);
+    expect(scopedRes.json.repos).toEqual(["scoped-org/console-ui"]);
+
+    // Personal owner filter returns only user repos
+    const userRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "AceXiamo",
+      owner_type: "User",
+    });
+    expect(userRes.status).toBe(200);
+    expect(userRes.json.repos).toEqual(["AceXiamo/relaydesk"]);
+  });
+});

@@ -2,6 +2,8 @@ import type {
   AiConfigStatus,
   AiTestResult,
   AuthStatusPayload,
+  GithubOwnerInfo,
+  GithubReposPayload,
   ProjectDetail,
   ProjectSummary,
   TaskDetailPayload,
@@ -140,11 +142,24 @@ export const api = {
 
   getGithubStatus: () => request<{ configured: boolean }>("/api/github"),
   connectGithub: (token: string) =>
-    request<{ configured: boolean }>("/api/github/connect", "POST", { token }),
+    request<{
+      configured: boolean;
+      viewer?: GithubOwnerInfo | null;
+      org_count?: number;
+      repo_count?: number;
+    }>("/api/github/connect", "POST", { token }),
   disconnectGithub: () =>
     request<{ configured: boolean }>("/api/github/disconnect", "POST", {}),
-  listGithubRepos: (page = 1) =>
-    request<{ repos: string[]; more: boolean }>("/api/github/repos", "POST", { page }),
+  listGithubRepos: (
+    params:
+      | number
+      | { page?: number; owner?: string; owner_type?: "User" | "Organization" } = 1,
+  ) =>
+    request<GithubReposPayload>(
+      "/api/github/repos",
+      "POST",
+      typeof params === "number" ? { page: params } : params,
+    ),
 
   getAiConfig: () => request<AiConfigStatus>("/api/ai"),
   saveAiConfig: (payload: {

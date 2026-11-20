@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Icon } from "./Icon.tsx";
+import { GithubRepoPicker } from "./GithubRepoPicker.tsx";
 import { Button, CopyButton, EmptyState, Switch, useToast } from "./ui.tsx";
 import { api } from "~/lib/api.ts";
 import type { AiConfigStatus, AiTestResult, ProjectDetail } from "~/lib/types.ts";
@@ -109,10 +110,6 @@ export function SettingsView({
     project?.agent_instructions ?? "",
   );
   const [savingProject, setSavingProject] = useState(false);
-  const [ghRepos, setGhRepos] = useState<string[]>([]);
-  const [ghPage, setGhPage] = useState(1);
-  const [ghMore, setGhMore] = useState(false);
-  const [loadingRepos, setLoadingRepos] = useState(false);
 
   // Origins form (sources view)
   const [originsList, setOriginsList] = useState<string[]>(
@@ -224,10 +221,22 @@ export function SettingsView({
     if (!ghToken.trim()) return;
     setSavingGh(true);
     try {
-      await api.connectGithub(ghToken.trim());
+      const res = await api.connectGithub(ghToken.trim());
       setGhToken("");
       onGithubStatusUpdated(true);
-      toast.success("GitHub 连接已保存");
+      const summaryParts: string[] = [];
+      if (res.viewer?.login) summaryParts.push(`@${res.viewer.login}`);
+      if (typeof res.org_count === "number" && res.org_count > 0) {
+        summaryParts.push(`${res.org_count} 个组织`);
+      }
+      if (typeof res.repo_count === "number") {
+        summaryParts.push(`${res.repo_count} 个仓库`);
+      }
+      toast.success(
+        summaryParts.length > 0
+          ? `GitHub 已连接（${summaryParts.join(" · ")}）`
+          : "GitHub 连接已保存",
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "GitHub 连接失败");
     } finally {
@@ -239,30 +248,12 @@ export function SettingsView({
     setSavingGh(true);
     try {
       await api.disconnectGithub();
-      setGhRepos([]);
       onGithubStatusUpdated(false);
       toast.info("已断开 GitHub 连接");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "断开失败");
     } finally {
       setSavingGh(false);
-    }
-  };
-
-  const handleLoadRepos = async (page = 1) => {
-    setLoadingRepos(true);
-    try {
-      const res = await api.listGithubRepos(page);
-      setGhRepos((prev) => (page === 1 ? res.repos : [...prev, ...res.repos]));
-      setGhPage(page);
-      setGhMore(res.more);
-      if (res.repos.length === 0 && page === 1) {
-        toast.info("该 Token 下没有可读取的仓库");
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "读取仓库列表失败");
-    } finally {
-      setLoadingRepos(false);
     }
   };
 
@@ -624,7 +615,7 @@ export function SettingsView({
               <div className="p-5 space-y-3">
                 <label className="block space-y-1.5">
                   <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
-                    Fine-grained Personal Access Token
+                    Personal Access Token（支持个人与组织仓库）
                   </span>
                   <div className="relative">
                     <input
@@ -637,7 +628,7 @@ export function SettingsView({
                       placeholder={
                         githubConfigured
                           ? "输入新的 Token 以替换当前连接"
-                          : "github_pat_...（仅需 Metadata Read-only 权限）"
+                          : "github_pat_... 或 ghp_...（含组织权限可自动拉取组织仓库）"
                       }
                       className="w-full h-9.5 pl-3 pr-10 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
                     />
@@ -650,6 +641,11 @@ export function SettingsView({
                       <Icon name={showGhToken ? "eye-off" : "eye"} size={15} />
                     </button>
                   </div>
+                  <span className="block text-[11.5px] text-[var(--text-muted)]">
+                    支持 Classic PAT（<code className="font-mono">repo</code> /{" "}
+                    <code className="font-mono">read:org</code>）与 Fine-grained PAT（个人或组织{" "}
+                    <code className="font-mono">Metadata: Read-only</code>）。
+                  </span>
                 </label>
               </div>
 
@@ -727,79 +723,26 @@ export function SettingsView({
               </div>
 
               <div className="p-5 space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                  <label className="block space-y-1.5">
-                    <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
-                      项目名称
-                    </span>
-                    <input
-                      type="text"
-                      required
-                      maxLength={100}
-                      value={projName}
-                      onChange={(e) => setProjName(e.target.value)}
-                      className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] text-[var(--text-primary)] focus:outline-none focus:border-indigo-500"
-                    />
-                  </label>
+                <label className="block space-y-1.5">
+                  <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                    项目名称
+                  </span>
+                  <input
+                    type="text"
+                    required
+                    maxLength={100}
+                    value={projName}
+                    onChange={(e) => setProjName(e.target.value)}
+                    className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                  />
+                </label>
 
-                  <label className="block space-y-1.5">
-                    <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
-                      GitHub 仓库
-                    </span>
-                    <input
-                      type="text"
-                      required
-                      maxLength={200}
-                      value={projRepo}
-                      onChange={(e) => setProjRepo(e.target.value)}
-                      placeholder="owner/repository"
-                      className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] focus:outline-none focus:border-indigo-500"
-                    />
-                  </label>
-                </div>
-
-                {githubConfigured && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="xs"
-                      icon="github"
-                      loading={loadingRepos}
-                      onClick={() => void handleLoadRepos(1)}
-                    >
-                      从 GitHub 选择仓库
-                    </Button>
-                    {ghRepos.length > 0 && (
-                      <select
-                        aria-label="已授权仓库"
-                        value={ghRepos.includes(projRepo) ? projRepo : ""}
-                        onChange={(e) => {
-                          if (e.target.value) setProjRepo(e.target.value);
-                        }}
-                        className="h-8 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[12.5px] font-mono text-[var(--text-primary)]"
-                      >
-                        <option value="">选择仓库…</option>
-                        {ghRepos.map((r) => (
-                          <option key={r} value={r}>
-                            {r}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    {ghMore && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="xs"
-                        loading={loadingRepos}
-                        onClick={() => void handleLoadRepos(ghPage + 1)}
-                      >
-                        加载更多
-                      </Button>
-                    )}
-                  </div>
-                )}
+                <GithubRepoPicker
+                  value={projRepo}
+                  onChange={(next) => setProjRepo(next)}
+                  githubConfigured={githubConfigured}
+                  defaultExpanded={false}
+                />
 
                 <label className="block space-y-1.5">
                   <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
