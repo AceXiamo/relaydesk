@@ -15,11 +15,13 @@ import {
 } from "./wallet.ts";
 import {
   GithubError,
-  deleteGithubToken,
   fetchGithubRepositories,
-  hasGithubToken,
-  readGithubToken,
-  saveGithubToken,
+  fetchGithubRepositoriesAcrossConnections,
+  listGithubConnectionSummaries,
+  readGithubConnections,
+  removeGithubConnection,
+  toGithubConnectionSummary,
+  upsertGithubConnection,
 } from "./github.ts";
 import {
   deleteStoredAiConfig,
@@ -412,7 +414,11 @@ export class ApiRouter {
   ): Promise<unknown> {
     this.checkOperator(req, meta);
     if (subparts.length === 0 && method === "GET") {
-      return { configured: hasGithubToken(this.store.dbPath) };
+      const connections = listGithubConnectionSummaries(this.store.dbPath);
+      return {
+        configured: connections.length > 0,
+        connections,
+      };
     }
     if (method !== "POST") {
       throw new ApiError(405, "Method not allowed");
@@ -424,18 +430,94 @@ export class ApiRouter {
         if (!/^[A-Za-z0-9_]+$/.test(token)) {
           throw new ApiError(400, "请输入有效的 GitHub token");
         }
+        const label =
+          typeof data.label === "string" ? data.label.trim().slice(0, 80) : "";
+        const id =
+          typeof data.id === "string" && data.id.trim()
+            ? data.id.trim().slice(0, 64)
+            : undefined;
         const catalog = await fetchGithubRepositories(token, { page: 1 });
-        saveGithubToken(this.store.dbPath, token);
+        const saved = upsertGithubConnection(this.store.dbPath, {
+          id,
+          label: label || undefined,
+          token,
+          viewer: catalog.viewer,
+          owners: catalog.owners,
+          repo_count: catalog.items.length,
+        });
+        const summaries = saved.connections.map(toGithubConnectionSummary);
         return {
-          configured: true,
+          configured: summaries.length > 0,
+          connection: toGithubConnectionSummary(saved.connection),
+          connections: summaries,
           viewer: catalog.viewer,
           org_count: catalog.owners.filter((o) => o.type === "Organization").length,
           repo_count: catalog.items.length,
         };
       }
       if (subparts.length === 1 && subparts[0] === "disconnect") {
-        deleteGithubToken(this.store.dbPath);
-        return { configured: false };
+        const id =
+          typeof data.id === "string" && data.id.trim()
+            ? data.id.trim().slice(0, 64)
+            : undefined;
+        const remaining = removeGithubConnection(this.store.dbPath, id);
+        const summaries = remaining.map(toGithubConnectionSummary);
+        return {
+          configured: summaries.length > 0,
+          connections: summaries,
+        };
+      }
+      if (subparts.length === 1 && subparts[0] === "refresh") {
+        const id =
+          typeof data.id === "string" && data.id.trim()
+            ? data.id.trim().slice(0, 64)
+            : undefined;
+        const existing = readGithubConnections(this.store.dbPath);
+        if (existing.length === 0) {
+          throw new ApiError(409, "尚未配置 GitHub Key。");
+        }
+        if (id) {
+          const target = existing.find((c) => c.id === id);
+          if (!target) {
+            throw new ApiError(404, "未找到对应的 GitHub Key。");
+          }
+          const catalog = await fetchGithubRepositories(target.token, { page: 1 });
+          const saved = upsertGithubConnection(this.store.dbPath, {
+            id: target.id,
+            label: target.id === "legacy" ? undefined : target.label,
+            token: target.token,
+            viewer: catalog.viewer,
+            owners: catalog.owners,
+            repo_count: catalog.items.length,
+          });
+          const summaries = saved.connections.map(toGithubConnectionSummary);
+          return {
+            configured: summaries.length > 0,
+            connection: toGithubConnectionSummary(saved.connection),
+            connections: summaries,
+            viewer: catalog.viewer,
+            org_count: catalog.owners.filter((o) => o.type === "Organization").length,
+            repo_count: catalog.items.length,
+          };
+        }
+        let latest = existing;
+        for (const conn of existing) {
+          const catalog = await fetchGithubRepositories(conn.token, { page: 1 });
+          const saved = upsertGithubConnection(this.store.dbPath, {
+            id: conn.id,
+            label: conn.id === "legacy" ? undefined : conn.label,
+            token: conn.token,
+            viewer: catalog.viewer,
+            owners: catalog.owners,
+            repo_count: catalog.items.length,
+          });
+          latest = saved.connections;
+        }
+        const summaries = latest.map(toGithubConnectionSummary);
+        return {
+          configured: summaries.length > 0,
+          connections: summaries,
+        };
       }
       if (subparts.length === 1 && subparts[0] === "repos") {
         const page = data.page ?? 1;
@@ -454,11 +536,20 @@ export class ApiRouter {
         if (data.owner_type === "User" || data.owner_type === "Organization") {
           ownerType = data.owner_type;
         }
-        const token = readGithubToken(this.store.dbPath);
-        if (!token) {
-          throw new ApiError(409, "请先在项目设置中连接 GitHub。");
+        const connectionId =
+          typeof data.connection_id === "string" && data.connection_id.trim()
+            ? data.connection_id.trim().slice(0, 64)
+            : undefined;
+        const connections = readGithubConnections(this.store.dbPath);
+        if (connections.length === 0) {
+          throw new ApiError(409, "请先在设置中连接至少一个 GitHub Key。");
         }
-        return await fetchGithubRepositories(token, { page, owner, ownerType });
+        return await fetchGithubRepositoriesAcrossConnections(connections, {
+          page,
+          owner,
+          ownerType,
+          connectionId,
+        });
       }
     } catch (err) {
       if (err instanceof GithubError) {

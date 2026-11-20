@@ -119,9 +119,11 @@ export function Sidebar({
       {/* Brand header */}
       <div className="flex items-center justify-between px-3.5 h-13 border-b border-[var(--border-subtle)]">
         <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-7 h-7 rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-950 flex items-center justify-center shadow-xs shrink-0">
-            <Icon name="radio" size={15} />
-          </div>
+          <img
+            src="/logo.png"
+            alt="Relaydesk"
+            className="w-7 h-7 rounded-lg shadow-xs ring-1 ring-black/10 dark:ring-white/15 shrink-0 object-cover"
+          />
           <div className="min-w-0">
             <div className="text-[13.5px] font-semibold tracking-tight text-[var(--text-primary)] leading-none">
               Relaydesk

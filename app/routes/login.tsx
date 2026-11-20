@@ -473,9 +473,11 @@ export default function LoginRoute() {
             <header className="space-y-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
-                  <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-zinc-900 text-white shadow-xs dark:bg-zinc-100 dark:text-zinc-950">
-                    <Icon name="lucide:layers" size={16} />
-                  </span>
+                  <img
+                    src="/logo.png"
+                    alt="Relaydesk"
+                    className="h-8 w-8 rounded-lg shadow-xs ring-1 ring-black/10 dark:ring-white/15 object-cover"
+                  />
                   <span className="text-[15px] font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
                     Relaydesk
                   </span>

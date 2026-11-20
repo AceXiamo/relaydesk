@@ -2,8 +2,10 @@ import type {
   AiConfigStatus,
   AiTestResult,
   AuthStatusPayload,
+  GithubConnectionSummary,
   GithubOwnerInfo,
   GithubReposPayload,
+  GithubStatusPayload,
   ProjectDetail,
   ProjectSummary,
   TaskDetailPayload,
@@ -140,20 +142,48 @@ export const api = {
       payload,
     ),
 
-  getGithubStatus: () => request<{ configured: boolean }>("/api/github"),
-  connectGithub: (token: string) =>
+  getGithubStatus: () => request<GithubStatusPayload>("/api/github"),
+  connectGithub: (
+    tokenOrPayload: string | { token: string; label?: string; id?: string },
+  ) =>
     request<{
       configured: boolean;
+      connection: GithubConnectionSummary;
+      connections: GithubConnectionSummary[];
       viewer?: GithubOwnerInfo | null;
       org_count?: number;
       repo_count?: number;
-    }>("/api/github/connect", "POST", { token }),
-  disconnectGithub: () =>
-    request<{ configured: boolean }>("/api/github/disconnect", "POST", {}),
+    }>(
+      "/api/github/connect",
+      "POST",
+      typeof tokenOrPayload === "string"
+        ? { token: tokenOrPayload }
+        : tokenOrPayload,
+    ),
+  disconnectGithub: (id?: string) =>
+    request<GithubStatusPayload>(
+      "/api/github/disconnect",
+      "POST",
+      id ? { id } : {},
+    ),
+  refreshGithubConnection: (id?: string) =>
+    request<{
+      configured: boolean;
+      connection?: GithubConnectionSummary;
+      connections: GithubConnectionSummary[];
+      viewer?: GithubOwnerInfo | null;
+      org_count?: number;
+      repo_count?: number;
+    }>("/api/github/refresh", "POST", id ? { id } : {}),
   listGithubRepos: (
     params:
       | number
-      | { page?: number; owner?: string; owner_type?: "User" | "Organization" } = 1,
+      | {
+          page?: number;
+          owner?: string;
+          owner_type?: "User" | "Organization";
+          connection_id?: string;
+        } = 1,
   ) =>
     request<GithubReposPayload>(
       "/api/github/repos",

@@ -106,10 +106,29 @@ export interface AiTestResult {
   reply_preview: string;
 }
 
+export type GithubTokenType = "fine_grained" | "classic" | "other";
+
 export interface GithubOwnerInfo {
   login: string;
   type: "User" | "Organization";
   avatar_url?: string;
+}
+
+export interface GithubConnectionSummary {
+  id: string;
+  label: string;
+  token_preview: string;
+  token_type: GithubTokenType;
+  viewer: GithubOwnerInfo | null;
+  owners: GithubOwnerInfo[];
+  repo_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GithubStatusPayload {
+  configured: boolean;
+  connections: GithubConnectionSummary[];
 }
 
 export interface GithubRepoItem {
@@ -122,6 +141,14 @@ export interface GithubRepoItem {
   archived: boolean;
   description: string;
   updated_at: string;
+  connection_id?: string;
+  connection_label?: string;
+}
+
+export interface GithubRepoWarning {
+  connection_id: string;
+  label: string;
+  error: string;
 }
 
 export interface GithubReposPayload {
@@ -132,4 +159,5 @@ export interface GithubReposPayload {
   owner: string;
   page: number;
   more: boolean;
+  warnings?: GithubRepoWarning[];
 }

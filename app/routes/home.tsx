@@ -19,6 +19,7 @@ import { api } from "~/lib/api.ts";
 import type {
   AiConfigStatus,
   AuthStatusPayload,
+  GithubConnectionSummary,
   ProjectDetail,
   ProjectSummary,
   TaskDetailPayload,
@@ -59,7 +60,8 @@ function ConsoleWorkspace() {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [view, setView] = useState<WorkspaceView>("queue");
   const [aiConfig, setAiConfig] = useState<AiConfigStatus | null>(null);
-  const [githubConfigured, setGithubConfigured] = useState(false);
+  const [githubConnections, setGithubConnections] = useState<GithubConnectionSummary[]>([]);
+  const githubConfigured = githubConnections.length > 0;
   const [authStatus, setAuthStatus] = useState<AuthStatusPayload | null>(null);
   const [online, setOnline] = useState(true);
   const [bootError, setBootError] = useState<string | null>(null);
@@ -141,12 +143,14 @@ function ConsoleWorkspace() {
           api.getAuthStatus(),
           api.listProjects(),
           api.getAiConfig().catch(() => null),
-          api.getGithubStatus().catch(() => ({ configured: false })),
+          api
+            .getGithubStatus()
+            .catch(() => ({ configured: false, connections: [] as GithubConnectionSummary[] })),
         ]);
         setAuthStatus(auth);
         setProjects(projRes.projects);
         setAiConfig(aiRes);
-        setGithubConfigured(ghRes.configured);
+        setGithubConnections(ghRes.connections ?? []);
         setOnline(true);
 
         const savedId =
@@ -459,9 +463,9 @@ function ConsoleWorkspace() {
             mode={view}
             project={currentProject}
             aiConfig={aiConfig}
-            githubConfigured={githubConfigured}
+            githubConnections={githubConnections}
             onAiConfigUpdated={setAiConfig}
-            onGithubStatusUpdated={setGithubConfigured}
+            onGithubConnectionsUpdated={setGithubConnections}
             onProjectUpdated={(updated) => {
               setCurrentProject(updated);
               setProjects((prev) =>
@@ -536,6 +540,7 @@ function ConsoleWorkspace() {
       <CreateProjectModal
         open={projectModalOpen}
         githubConfigured={githubConfigured}
+        githubConnections={githubConnections}
         onClose={() => setProjectModalOpen(false)}
         onOpenGithubSettings={() => changeView("settings")}
         onCreated={(proj) => {

@@ -3,7 +3,12 @@ import { Icon } from "./Icon.tsx";
 import { Button, Kbd } from "./ui.tsx";
 import { api } from "~/lib/api.ts";
 import { formatRelativeTime } from "~/lib/format.ts";
-import type { GithubOwnerInfo, GithubRepoItem } from "~/lib/types.ts";
+import type {
+  GithubConnectionSummary,
+  GithubOwnerInfo,
+  GithubRepoItem,
+  GithubRepoWarning,
+} from "~/lib/types.ts";
 
 interface GithubRepoPickerProps {
   value: string;
@@ -12,6 +17,7 @@ interface GithubRepoPickerProps {
     meta?: { pickedFromGithub?: boolean; repoItem?: GithubRepoItem },
   ) => void;
   githubConfigured: boolean;
+  githubConnections?: GithubConnectionSummary[];
   /** Auto-open & fetch repositories immediately (used in CreateProjectModal) */
   defaultExpanded?: boolean;
   /** Jump to Settings to connect GitHub when not configured */
@@ -90,7 +96,7 @@ function mergeRepoItems(
   );
 }
 
-interface GithubOwnerAvatarProps {
+export interface GithubOwnerAvatarProps {
   login: string;
   type: "User" | "Organization";
   avatarUrl?: string;
@@ -100,7 +106,7 @@ interface GithubOwnerAvatarProps {
   className?: string;
 }
 
-function GithubOwnerAvatar({
+export function GithubOwnerAvatar({
   login,
   type,
   avatarUrl,
@@ -174,21 +180,53 @@ export function GithubRepoPicker({
   value,
   onChange,
   githubConfigured,
+  githubConnections = [],
   defaultExpanded = false,
   onOpenGithubSettings,
   required = true,
 }: GithubRepoPickerProps) {
   const repoInputId = useId();
+  const seededOwners = useMemo(() => {
+    const all: GithubOwnerInfo[] = [];
+    for (const conn of githubConnections) {
+      for (const o of conn.owners) all.push(o);
+    }
+    const primaryViewer = githubConnections.find((c) => c.viewer)?.viewer?.login;
+    return mergeOwnerList([], all, primaryViewer);
+  }, [githubConnections]);
+
+  const connectionsSignature = useMemo(
+    () => githubConnections.map((c) => `${c.id}:${c.updated_at}`).join("|"),
+    [githubConnections],
+  );
+  const prevSigRef = useRef(connectionsSignature);
+
   const [expanded, setExpanded] = useState(defaultExpanded && githubConfigured);
   const [activeOwner, setActiveOwner] = useState<string>("all");
-  const [owners, setOwners] = useState<GithubOwnerInfo[]>([]);
-  const [viewer, setViewer] = useState<GithubOwnerInfo | null>(null);
+  const [owners, setOwners] = useState<GithubOwnerInfo[]>(seededOwners);
+  const [viewer, setViewer] = useState<GithubOwnerInfo | null>(
+    githubConnections.find((c) => c.viewer)?.viewer ?? null,
+  );
   const [cache, setCache] = useState<Record<string, ScopeCache>>({});
+  const [warnings, setWarnings] = useState<GithubRepoWarning[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [highlightIndex, setHighlightIndex] = useState(0);
+
+  // Invalidate cached scopes whenever configured GitHub keys change
+  useEffect(() => {
+    if (prevSigRef.current === connectionsSignature) return;
+    prevSigRef.current = connectionsSignature;
+    requestSeqRef.current += 1;
+    setCache({});
+    setWarnings([]);
+    setError("");
+    setActiveOwner("all");
+    setOwners(seededOwners);
+    setViewer(githubConnections.find((c) => c.viewer)?.viewer ?? null);
+  }, [connectionsSignature, githubConnections, seededOwners]);
 
   // Custom org inline input (for orgs not returned by /user/orgs, e.g. Fine-grained PAT)
   const [customOrgOpen, setCustomOrgOpen] = useState(false);
@@ -237,6 +275,9 @@ export function GithubRepoPicker({
         setOwners((prev) =>
           mergeOwnerList(prev, res.owners ?? [], nextViewer?.login),
         );
+        if (page === 1) {
+          setWarnings(res.warnings ?? []);
+        }
         setCache((prev) => {
           const prevItems = page === 1 ? [] : prev[key]?.items ?? [];
           return {
@@ -702,6 +743,27 @@ export function GithubRepoPicker({
             )}
           </div>
 
+          {/* Partial-key Warning Banner */}
+          {warnings.length > 0 && (
+            <div className="px-3 py-2 border-b border-amber-500/25 bg-amber-500/8 flex items-center justify-between gap-2 text-[11.5px] text-amber-700 dark:text-amber-300">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Icon name="alert-triangle" size={13} className="shrink-0" />
+                <span className="truncate" title={warnings.map((w) => `${w.label}: ${w.error}`).join("；")}>
+                  部分 GitHub Key 读取失败：{warnings.map((w) => w.label).join("、")}
+                </span>
+              </div>
+              {onOpenGithubSettings && (
+                <button
+                  type="button"
+                  onClick={onOpenGithubSettings}
+                  className="shrink-0 font-medium underline underline-offset-2 hover:opacity-80 cursor-pointer"
+                >
+                  检查 Key
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Repository List */}
           <div
             ref={listRef}
@@ -881,7 +943,11 @@ export function GithubRepoPicker({
                 ? "正在同步 GitHub 仓库…"
                 : query.trim()
                   ? `匹配 ${filteredItems.length} / ${currentItems.length} 个仓库`
-                  : `已加载 ${currentItems.length} 个仓库${
+                  : `${
+                      githubConnections.length > 1
+                        ? `已聚合 ${githubConnections.length} 个 Key · `
+                        : ""
+                    }已加载 ${currentItems.length} 个仓库${
                       orgOwners.length > 0 ? ` · ${orgOwners.length} 个组织` : ""
                     }`}
             </span>

@@ -10,9 +10,12 @@ import {
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type {
+  GithubConnectionSummary,
   GithubOwnerInfo,
   GithubRepoItem,
+  GithubRepoWarning,
   GithubReposPayload,
+  GithubTokenType,
 } from "../app/lib/types.ts";
 
 export class GithubError extends Error {
@@ -22,27 +25,177 @@ export class GithubError extends Error {
   }
 }
 
+export interface StoredGithubConnection {
+  id: string;
+  label: string;
+  token: string;
+  token_type: GithubTokenType;
+  viewer: GithubOwnerInfo | null;
+  owners: GithubOwnerInfo[];
+  repo_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface StoredGithubFile {
+  version: 1;
+  connections: StoredGithubConnection[];
+}
+
+export const MAX_GITHUB_CONNECTIONS = 20;
+
 export function githubTokenPath(dbPath: string): string {
   return join(dirname(dbPath), ".github-token");
 }
 
-export function hasGithubToken(dbPath: string): boolean {
-  return existsSync(githubTokenPath(dbPath));
+export function githubTokensPath(dbPath: string): string {
+  return join(dirname(dbPath), ".github-tokens.json");
 }
 
-export function readGithubToken(dbPath: string): string | null {
-  const path = githubTokenPath(dbPath);
-  if (!existsSync(path)) return null;
-  return readFileSync(path, "utf8").trim() || null;
+export function detectGithubTokenType(token: string): GithubTokenType {
+  if (token.startsWith("github_pat_")) return "fine_grained";
+  if (token.startsWith("ghp_") || token.startsWith("gho_")) return "classic";
+  return "other";
 }
 
-export function saveGithubToken(dbPath: string, token: string): void {
-  const path = githubTokenPath(dbPath);
+export function maskGithubToken(token: string): string {
+  const trimmed = token.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("github_pat_") && trimmed.length > 16) {
+    return `github_pat_••••${trimmed.slice(-4)}`;
+  }
+  if ((trimmed.startsWith("ghp_") || trimmed.startsWith("gho_")) && trimmed.length > 10) {
+    return `${trimmed.slice(0, 4)}••••${trimmed.slice(-4)}`;
+  }
+  if (trimmed.length <= 8) return "••••••••";
+  return `${trimmed.slice(0, 4)}••••${trimmed.slice(-4)}`;
+}
+
+export function toGithubConnectionSummary(
+  conn: StoredGithubConnection,
+): GithubConnectionSummary {
+  return {
+    id: conn.id,
+    label: conn.label,
+    token_preview: maskGithubToken(conn.token),
+    token_type: conn.token_type,
+    viewer: conn.viewer,
+    owners: conn.owners,
+    repo_count: conn.repo_count,
+    created_at: conn.created_at,
+    updated_at: conn.updated_at,
+  };
+}
+
+function normalizeStoredOwner(raw: unknown): GithubOwnerInfo | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.login !== "string" || !obj.login.trim()) return null;
+  const avatarUrl = normalizeAvatarUrl(obj.avatar_url);
+  return {
+    login: obj.login.trim(),
+    type: obj.type === "Organization" ? "Organization" : "User",
+    ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+  };
+}
+
+function normalizeStoredConnection(raw: unknown): StoredGithubConnection | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const token = typeof obj.token === "string" ? obj.token.trim() : "";
+  if (!token) return null;
+  const id =
+    typeof obj.id === "string" && obj.id.trim()
+      ? obj.id.trim()
+      : `gh_${randomBytes(6).toString("hex")}`;
+  const tokenType: GithubTokenType =
+    obj.token_type === "fine_grained" ||
+    obj.token_type === "classic" ||
+    obj.token_type === "other"
+      ? obj.token_type
+      : detectGithubTokenType(token);
+  const viewer = normalizeStoredOwner(obj.viewer);
+  const owners = Array.isArray(obj.owners)
+    ? obj.owners
+        .map((item) => normalizeStoredOwner(item))
+        .filter((item): item is GithubOwnerInfo => item !== null)
+    : [];
+  const label =
+    typeof obj.label === "string" && obj.label.trim()
+      ? obj.label.trim().slice(0, 80)
+      : inferConnectionLabel(viewer, owners);
+  const now = new Date().toISOString();
+  return {
+    id,
+    label,
+    token,
+    token_type: tokenType,
+    viewer,
+    owners,
+    repo_count:
+      typeof obj.repo_count === "number" && Number.isFinite(obj.repo_count) && obj.repo_count >= 0
+        ? Math.floor(obj.repo_count)
+        : 0,
+    created_at:
+      typeof obj.created_at === "string" && obj.created_at ? obj.created_at : now,
+    updated_at:
+      typeof obj.updated_at === "string" && obj.updated_at ? obj.updated_at : now,
+  };
+}
+
+export function inferConnectionLabel(
+  viewer: GithubOwnerInfo | null,
+  owners: GithubOwnerInfo[],
+): string {
+  const orgs = owners.filter((o) => o.type === "Organization");
+  const users = owners.filter((o) => o.type === "User");
+
+  if (orgs.length === 1 && users.length === 0) {
+    return orgs[0].login;
+  }
+  if (orgs.length > 1 && users.length === 0) {
+    return `${orgs[0].login} 等 ${orgs.length} 个组织`;
+  }
+  if (users.length > 0) {
+    return `@${users[0].login}`;
+  }
+  if (viewer?.login) {
+    return `@${viewer.login}`;
+  }
+  return "GitHub Key";
+}
+
+function writeConnectionsFile(
+  dbPath: string,
+  connections: StoredGithubConnection[],
+): void {
+  const path = githubTokensPath(dbPath);
+  const legacyPath = githubTokenPath(dbPath);
+  if (connections.length === 0) {
+    try {
+      unlinkSync(path);
+    } catch {
+      // ignore if absent
+    }
+    try {
+      unlinkSync(legacyPath);
+    } catch {
+      // ignore if absent
+    }
+    return;
+  }
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true });
-  const tmp = join(dir, `.github-token.${randomBytes(8).toString("hex")}.tmp`);
+  const tmp = join(dir, `.github-tokens.${randomBytes(8).toString("hex")}.tmp`);
+  const payload: StoredGithubFile = {
+    version: 1,
+    connections,
+  };
   try {
-    writeFileSync(tmp, token, { mode: 0o600, encoding: "utf8" });
+    writeFileSync(tmp, JSON.stringify(payload, null, 2), {
+      mode: 0o600,
+      encoding: "utf8",
+    });
     chmodSync(tmp, 0o600);
     renameSync(tmp, path);
   } catch (err) {
@@ -53,15 +206,159 @@ export function saveGithubToken(dbPath: string, token: string): void {
     }
     throw err;
   }
-}
-
-export function deleteGithubToken(dbPath: string): void {
-  const path = githubTokenPath(dbPath);
+  // Remove legacy single-token file once migrated to .github-tokens.json
   try {
-    unlinkSync(path);
+    unlinkSync(legacyPath);
   } catch {
     // ignore if absent
   }
+}
+
+export function readGithubConnections(dbPath: string): StoredGithubConnection[] {
+  if (dbPath === ":memory:") return [];
+  const multiPath = githubTokensPath(dbPath);
+  if (existsSync(multiPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(multiPath, "utf8")) as Partial<StoredGithubFile>;
+      if (raw && Array.isArray(raw.connections)) {
+        return raw.connections
+          .map((item) => normalizeStoredConnection(item))
+          .filter((item): item is StoredGithubConnection => item !== null);
+      }
+    } catch {
+      return [];
+    }
+  }
+  const legacyPath = githubTokenPath(dbPath);
+  if (existsSync(legacyPath)) {
+    const legacyToken = readFileSync(legacyPath, "utf8").trim();
+    if (legacyToken) {
+      const now = new Date().toISOString();
+      return [
+        {
+          id: "legacy",
+          label: "默认连接",
+          token: legacyToken,
+          token_type: detectGithubTokenType(legacyToken),
+          viewer: null,
+          owners: [],
+          repo_count: 0,
+          created_at: now,
+          updated_at: now,
+        },
+      ];
+    }
+  }
+  return [];
+}
+
+export function listGithubConnectionSummaries(
+  dbPath: string,
+): GithubConnectionSummary[] {
+  return readGithubConnections(dbPath).map(toGithubConnectionSummary);
+}
+
+export function hasGithubToken(dbPath: string): boolean {
+  return readGithubConnections(dbPath).length > 0;
+}
+
+export function readGithubToken(dbPath: string): string | null {
+  return readGithubConnections(dbPath)[0]?.token ?? null;
+}
+
+export function upsertGithubConnection(
+  dbPath: string,
+  input: {
+    id?: string;
+    label?: string;
+    token: string;
+    viewer: GithubOwnerInfo | null;
+    owners: GithubOwnerInfo[];
+    repo_count: number;
+  },
+): { connection: StoredGithubConnection; connections: StoredGithubConnection[] } {
+  const existing = readGithubConnections(dbPath);
+  const now = new Date().toISOString();
+  const token = input.token.trim();
+  const tokenType = detectGithubTokenType(token);
+
+  let targetIdx = -1;
+  if (input.id) {
+    targetIdx = existing.findIndex((c) => c.id === input.id);
+  }
+  if (targetIdx === -1) {
+    targetIdx = existing.findIndex((c) => c.token === token);
+  }
+
+  const resolvedLabel =
+    (input.label ?? "").trim().slice(0, 80) ||
+    inferConnectionLabel(input.viewer, input.owners);
+
+  let saved: StoredGithubConnection;
+  let next: StoredGithubConnection[];
+
+  if (targetIdx >= 0) {
+    const prev = existing[targetIdx];
+    const nextId = prev.id === "legacy" ? `gh_${randomBytes(6).toString("hex")}` : prev.id;
+    saved = {
+      id: nextId,
+      label: (input.label ?? "").trim().slice(0, 80) || (prev.id === "legacy" ? resolvedLabel : prev.label || resolvedLabel),
+      token,
+      token_type: tokenType,
+      viewer: input.viewer,
+      owners: input.owners,
+      repo_count: input.repo_count,
+      created_at: prev.created_at,
+      updated_at: now,
+    };
+    next = existing.map((item, idx) => (idx === targetIdx ? saved : item));
+  } else {
+    if (existing.length >= MAX_GITHUB_CONNECTIONS) {
+      throw new GithubError(`最多支持配置 ${MAX_GITHUB_CONNECTIONS} 个 GitHub Key。`);
+    }
+    saved = {
+      id: `gh_${randomBytes(6).toString("hex")}`,
+      label: resolvedLabel,
+      token,
+      token_type: tokenType,
+      viewer: input.viewer,
+      owners: input.owners,
+      repo_count: input.repo_count,
+      created_at: now,
+      updated_at: now,
+    };
+    next = [...existing, saved];
+  }
+
+  writeConnectionsFile(dbPath, next);
+  return { connection: saved, connections: next };
+}
+
+export function removeGithubConnection(
+  dbPath: string,
+  id?: string,
+): StoredGithubConnection[] {
+  if (!id) {
+    writeConnectionsFile(dbPath, []);
+    return [];
+  }
+  const existing = readGithubConnections(dbPath);
+  const next = existing.filter((c) => c.id !== id);
+  writeConnectionsFile(dbPath, next);
+  return next;
+}
+
+export function saveGithubToken(dbPath: string, token: string): void {
+  upsertGithubConnection(dbPath, {
+    token,
+    viewer: null,
+    owners: [],
+    repo_count: 0,
+  });
+}
+
+export function deleteGithubToken(dbPath: string): void {
+  removeGithubConnection(dbPath);
 }
 
 interface RawGithubUser {
@@ -202,6 +499,7 @@ function mergeOwners(
   viewer: GithubOwnerInfo | null,
   orgList: GithubOwnerInfo[],
   repos: GithubRepoItem[],
+  options: { includeViewerOnlyIfPresent?: boolean } = {},
 ): GithubOwnerInfo[] {
   const map = new Map<string, GithubOwnerInfo>();
 
@@ -222,7 +520,26 @@ function mergeOwners(
     }
   };
 
-  if (viewer) upsert(viewer);
+  const viewerKey = viewer?.login.toLowerCase();
+  const hasViewerRepo = Boolean(
+    viewerKey && repos.some((r) => r.owner.toLowerCase() === viewerKey),
+  );
+  const hasOrgScopedReposOrOrgs =
+    repos.some((r) => r.owner_type === "Organization") || orgList.length > 0;
+
+  if (viewer) {
+    // For Fine-grained PATs scoped exclusively to an organization, /user still returns
+    // the creator's personal account even though the token has zero access to personal repos.
+    // Only include viewer as an accessible owner if they own at least one returned repo,
+    // or if no org scope was detected.
+    const shouldIncludeViewer =
+      !options.includeViewerOnlyIfPresent ||
+      hasViewerRepo ||
+      !hasOrgScopedReposOrOrgs;
+    if (shouldIncludeViewer) {
+      upsert(viewer);
+    }
+  }
   for (const org of orgList) upsert(org);
   for (const repo of repos) {
     upsert({
@@ -232,7 +549,6 @@ function mergeOwners(
     });
   }
 
-  const viewerKey = viewer?.login.toLowerCase();
   return Array.from(map.values()).sort((a, b) => {
     if (viewerKey && a.login.toLowerCase() === viewerKey) return -1;
     if (viewerKey && b.login.toLowerCase() === viewerKey) return 1;
@@ -289,6 +605,7 @@ export async function fetchGithubRepositories(
   const requestedOwner = (opts.owner ?? "all").trim();
   const owner = requestedOwner || "all";
   const apiBase = getGithubApiBase(opts.apiBase);
+  const isFineGrained = detectGithubTokenType(token) === "fine_grained";
 
   // Best-effort fetch of viewer & org list on page 1 so the UI always knows available orgs
   const metaPromise =
@@ -319,6 +636,7 @@ export async function fetchGithubRepositories(
         meta.viewer,
         [...meta.orgs, { login: owner, type: "Organization" }],
         items,
+        { includeViewerOnlyIfPresent: isFineGrained },
       );
       return {
         repos: items.map((r) => r.full_name),
@@ -352,6 +670,7 @@ export async function fetchGithubRepositories(
             meta.viewer,
             [...meta.orgs, { login: owner, type: "Organization" }],
             filtered,
+            { includeViewerOnlyIfPresent: isFineGrained },
           );
           return {
             repos: filtered.map((r) => r.full_name),
@@ -443,7 +762,9 @@ export async function fetchGithubRepositories(
   }
 
   items = dedupeAndSortRepos(items);
-  const owners = mergeOwners(meta.viewer, meta.orgs, items);
+  const owners = mergeOwners(meta.viewer, meta.orgs, items, {
+    includeViewerOnlyIfPresent: isFineGrained,
+  });
 
   return {
     repos: items.map((r) => r.full_name),
@@ -453,5 +774,166 @@ export async function fetchGithubRepositories(
     owner,
     page,
     more,
+  };
+}
+
+function collectCachedOwners(
+  connections: StoredGithubConnection[],
+): GithubOwnerInfo[] {
+  const list: GithubOwnerInfo[] = [];
+  for (const conn of connections) {
+    for (const owner of conn.owners) {
+      list.push(owner);
+    }
+  }
+  return list;
+}
+
+function annotateItems(
+  items: GithubRepoItem[],
+  conn: StoredGithubConnection,
+): GithubRepoItem[] {
+  return items.map((item) => ({
+    ...item,
+    connection_id: conn.id,
+    connection_label: conn.label,
+  }));
+}
+
+export async function fetchGithubRepositoriesAcrossConnections(
+  connections: StoredGithubConnection[],
+  opts: FetchGithubReposOptions & { connectionId?: string } = {},
+): Promise<GithubReposPayload> {
+  const page = opts.page ?? 1;
+  const owner = (opts.owner ?? "all").trim() || "all";
+
+  if (connections.length === 0) {
+    throw new GithubError("请先在设置中添加至少一个 GitHub Key。");
+  }
+
+  const allCachedOwners = collectCachedOwners(connections);
+  const primaryViewer = connections.find((c) => c.viewer)?.viewer ?? null;
+
+  // Target a single explicit connection
+  if (opts.connectionId) {
+    const target = connections.find((c) => c.id === opts.connectionId);
+    if (!target) {
+      throw new GithubError("未找到指定的 GitHub Key 配置。");
+    }
+    const res = await fetchGithubRepositories(target.token, opts);
+    const items = annotateItems(res.items, target);
+    return {
+      ...res,
+      items,
+      repos: items.map((r) => r.full_name),
+    };
+  }
+
+  // Single-connection fast path
+  if (connections.length === 1) {
+    const only = connections[0];
+    const res = await fetchGithubRepositories(only.token, opts);
+    const items = annotateItems(res.items, only);
+    const owners = mergeOwners(res.viewer ?? only.viewer, [...allCachedOwners, ...res.owners], items, {
+      includeViewerOnlyIfPresent: only.token_type === "fine_grained",
+    });
+    return {
+      ...res,
+      items,
+      repos: items.map((r) => r.full_name),
+      owners,
+    };
+  }
+
+  // Multiple connections: choose candidate connections when filtering by a specific owner
+  let candidates = connections;
+  let remaining: StoredGithubConnection[] = [];
+  if (owner !== "all") {
+    const ownerLower = owner.toLowerCase();
+    const matched = connections.filter((c) =>
+      c.owners.some((o) => o.login.toLowerCase() === ownerLower),
+    );
+    if (matched.length > 0) {
+      candidates = matched;
+      const matchedIds = new Set(matched.map((c) => c.id));
+      remaining = connections.filter((c) => !matchedIds.has(c.id));
+    }
+  }
+
+  const queryBatch = async (batch: StoredGithubConnection[]) => {
+    const settled = await Promise.allSettled(
+      batch.map(async (conn) => ({
+        conn,
+        payload: await fetchGithubRepositories(conn.token, opts),
+      })),
+    );
+    const ok: Array<{ conn: StoredGithubConnection; payload: GithubReposPayload }> = [];
+    const warnings: GithubRepoWarning[] = [];
+    for (let i = 0; i < settled.length; i += 1) {
+      const outcome = settled[i];
+      const conn = batch[i];
+      if (outcome.status === "fulfilled") {
+        ok.push(outcome.value);
+      } else {
+        const message =
+          outcome.reason instanceof Error
+            ? outcome.reason.message
+            : "GitHub 请求失败";
+        warnings.push({
+          connection_id: conn.id,
+          label: conn.label,
+          error: message,
+        });
+      }
+    }
+    return { ok, warnings };
+  };
+
+  let { ok, warnings } = await queryBatch(candidates);
+
+  // If targeted connections failed or returned empty for a specific owner, try remaining keys
+  if (
+    owner !== "all" &&
+    remaining.length > 0 &&
+    (ok.length === 0 || ok.every((entry) => entry.payload.items.length === 0))
+  ) {
+    const fallback = await queryBatch(remaining);
+    if (fallback.ok.length > 0) {
+      ok = [...ok, ...fallback.ok];
+      // Clear warnings from the targeted batch only if fallback succeeded and we didn't want spurious errors
+      warnings = [...warnings, ...fallback.warnings];
+    }
+  }
+
+  if (ok.length === 0) {
+    const firstErr = warnings[0]?.error || "所有已配置的 GitHub Key 均无法读取仓库。";
+    throw new GithubError(firstErr);
+  }
+
+  const mergedItems = dedupeAndSortRepos(
+    ok.flatMap((entry) => annotateItems(entry.payload.items, entry.conn)),
+  );
+  const fetchedOwners = ok.flatMap((entry) => entry.payload.owners);
+  const viewer = ok.find((entry) => entry.payload.viewer)?.payload.viewer ?? primaryViewer;
+  const mergedOwners = mergeOwners(viewer, [...allCachedOwners, ...fetchedOwners], mergedItems, {
+    includeViewerOnlyIfPresent: true,
+  });
+  const more = ok.some((entry) => entry.payload.more);
+
+  // When searching a specific owner across multiple keys (e.g. a custom org),
+  // expected 403/404 errors from keys belonging to OTHER owners are not real failures
+  // as long as at least one key returned matching repos.
+  const surfaceWarnings =
+    owner === "all" && warnings.length > 0 ? warnings : undefined;
+
+  return {
+    repos: mergedItems.map((r) => r.full_name),
+    items: mergedItems,
+    viewer,
+    owners: mergedOwners,
+    owner,
+    page,
+    more,
+    ...(surfaceWarnings ? { warnings: surfaceWarnings } : {}),
   };
 }

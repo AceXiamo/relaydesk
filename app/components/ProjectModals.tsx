@@ -5,6 +5,7 @@ import { Button, Kbd, Modal, PriorityBadge, StatusBadge, useToast } from "./ui.t
 import { api } from "~/lib/api.ts";
 import { PRIORITY_LABELS, PRIORITY_ORDER, taskCode } from "~/lib/format.ts";
 import type {
+  GithubConnectionSummary,
   ProjectDetail,
   ProjectSummary,
   TaskPriority,
@@ -17,6 +18,7 @@ import type {
 interface CreateProjectModalProps {
   open: boolean;
   githubConfigured: boolean;
+  githubConnections?: GithubConnectionSummary[];
   onClose: () => void;
   onCreated: (project: ProjectDetail) => void;
   onOpenGithubSettings?: () => void;
@@ -25,6 +27,7 @@ interface CreateProjectModalProps {
 export function CreateProjectModal({
   open,
   githubConfigured,
+  githubConnections = [],
   onClose,
   onCreated,
   onOpenGithubSettings,
@@ -111,6 +114,7 @@ export function CreateProjectModal({
           value={repo}
           onChange={handleRepoChange}
           githubConfigured={githubConfigured}
+          githubConnections={githubConnections}
           defaultExpanded={githubConfigured}
           onOpenGithubSettings={
             onOpenGithubSettings

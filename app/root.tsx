@@ -11,6 +11,15 @@ import "./app.css";
 
 export const links: LinksFunction = () => [
   {
+    rel: "icon",
+    type: "image/png",
+    href: "/favicon.png",
+  },
+  {
+    rel: "apple-touch-icon",
+    href: "/apple-touch-icon.png",
+  },
+  {
     rel: "preload",
     href: "/fonts/geist.woff2",
     as: "font",

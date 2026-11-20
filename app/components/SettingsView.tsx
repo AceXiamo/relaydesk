@@ -1,17 +1,22 @@
 import { useEffect, useState } from "react";
 import { Icon } from "./Icon.tsx";
-import { GithubRepoPicker } from "./GithubRepoPicker.tsx";
+import { GithubOwnerAvatar, GithubRepoPicker } from "./GithubRepoPicker.tsx";
 import { Button, CopyButton, EmptyState, Switch, useToast } from "./ui.tsx";
 import { api } from "~/lib/api.ts";
-import type { AiConfigStatus, AiTestResult, ProjectDetail } from "~/lib/types.ts";
+import type {
+  AiConfigStatus,
+  AiTestResult,
+  GithubConnectionSummary,
+  ProjectDetail,
+} from "~/lib/types.ts";
 
 interface SettingsViewProps {
   mode: "settings" | "sources";
   project: ProjectDetail | null;
   aiConfig: AiConfigStatus | null;
-  githubConfigured: boolean;
+  githubConnections: GithubConnectionSummary[];
   onAiConfigUpdated: (cfg: AiConfigStatus) => void;
-  onGithubStatusUpdated: (configured: boolean) => void;
+  onGithubConnectionsUpdated: (connections: GithubConnectionSummary[]) => void;
   onProjectUpdated: (project: ProjectDetail) => void;
   onNewProject: () => void;
 }
@@ -77,13 +82,14 @@ export function SettingsView({
   mode,
   project,
   aiConfig,
-  githubConfigured,
+  githubConnections,
   onAiConfigUpdated,
-  onGithubStatusUpdated,
+  onGithubConnectionsUpdated,
   onProjectUpdated,
   onNewProject,
 }: SettingsViewProps) {
   const toast = useToast();
+  const githubConfigured = githubConnections.length > 0;
 
   // AI / LLM settings form
   const [aiBaseUrl, setAiBaseUrl] = useState(aiConfig?.base_url ?? "");
@@ -98,10 +104,14 @@ export function SettingsView({
   const [aiTestResult, setAiTestResult] = useState<AiTestResult | null>(null);
   const [aiTestError, setAiTestError] = useState<string>("");
 
-  // GitHub PAT form
+  // GitHub multi-PAT state
   const [ghToken, setGhToken] = useState("");
+  const [ghLabel, setGhLabel] = useState("");
+  const [editingGhId, setEditingGhId] = useState<string | null>(null);
+  const [addingGhKey, setAddingGhKey] = useState(false);
   const [showGhToken, setShowGhToken] = useState(false);
   const [savingGh, setSavingGh] = useState(false);
+  const [busyGhId, setBusyGhId] = useState<string | null>(null);
 
   // Project settings form
   const [projName, setProjName] = useState(project?.name ?? "");
@@ -221,11 +231,20 @@ export function SettingsView({
     if (!ghToken.trim()) return;
     setSavingGh(true);
     try {
-      const res = await api.connectGithub(ghToken.trim());
+      const res = await api.connectGithub({
+        token: ghToken.trim(),
+        label: ghLabel.trim() || undefined,
+        id: editingGhId ?? undefined,
+      });
       setGhToken("");
-      onGithubStatusUpdated(true);
+      setGhLabel("");
+      setEditingGhId(null);
+      setAddingGhKey(false);
+      setShowGhToken(false);
+      onGithubConnectionsUpdated(res.connections ?? []);
       const summaryParts: string[] = [];
-      if (res.viewer?.login) summaryParts.push(`@${res.viewer.login}`);
+      if (res.connection?.label) summaryParts.push(res.connection.label);
+      else if (res.viewer?.login) summaryParts.push(`@${res.viewer.login}`);
       if (typeof res.org_count === "number" && res.org_count > 0) {
         summaryParts.push(`${res.org_count} 个组织`);
       }
@@ -234,27 +253,63 @@ export function SettingsView({
       }
       toast.success(
         summaryParts.length > 0
-          ? `GitHub 已连接（${summaryParts.join(" · ")}）`
-          : "GitHub 连接已保存",
+          ? `${editingGhId ? "GitHub Key 已更新" : "GitHub Key 已添加"}（${summaryParts.join(" · ")}）`
+          : "GitHub Key 已保存",
       );
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "GitHub 连接失败");
+      toast.error(err instanceof Error ? err.message : "GitHub Key 验证失败");
     } finally {
       setSavingGh(false);
     }
   };
 
-  const handleDisconnectGithub = async () => {
-    setSavingGh(true);
+  const handleRefreshGithubKey = async (conn: GithubConnectionSummary) => {
+    setBusyGhId(conn.id);
     try {
-      await api.disconnectGithub();
-      onGithubStatusUpdated(false);
-      toast.info("已断开 GitHub 连接");
+      const res = await api.refreshGithubConnection(conn.id);
+      onGithubConnectionsUpdated(res.connections ?? []);
+      toast.success(
+        `已同步「${res.connection?.label ?? conn.label}」（${res.repo_count ?? res.connection?.repo_count ?? 0} 个仓库）`,
+      );
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "断开失败");
+      toast.error(err instanceof Error ? err.message : "同步 GitHub Key 失败");
     } finally {
-      setSavingGh(false);
+      setBusyGhId(null);
     }
+  };
+
+  const handleRemoveGithubKey = async (conn: GithubConnectionSummary) => {
+    setBusyGhId(conn.id);
+    try {
+      const res = await api.disconnectGithub(conn.id);
+      if (editingGhId === conn.id) {
+        setEditingGhId(null);
+        setGhLabel("");
+        setGhToken("");
+      }
+      onGithubConnectionsUpdated(res.connections ?? []);
+      toast.info(`已移除 GitHub Key「${conn.label}」`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "移除失败");
+    } finally {
+      setBusyGhId(null);
+    }
+  };
+
+  const startEditGithubKey = (conn: GithubConnectionSummary) => {
+    setEditingGhId(conn.id);
+    setGhLabel(conn.id === "legacy" ? "" : conn.label);
+    setGhToken("");
+    setAddingGhKey(true);
+    setShowGhToken(false);
+  };
+
+  const cancelGithubForm = () => {
+    setEditingGhId(null);
+    setAddingGhKey(false);
+    setGhLabel("");
+    setGhToken("");
+    setShowGhToken(false);
   };
 
   const handleSaveProject = async (e: React.FormEvent) => {
@@ -577,12 +632,9 @@ export function SettingsView({
               </div>
             </form>
 
-            {/* 2. GitHub PAT Connection */}
-            <form
-              onSubmit={handleConnectGithub}
-              className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs"
-            >
-              <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex items-center justify-between gap-2">
+            {/* 2. GitHub PAT Connections (Multi-Key) */}
+            <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs">
+              <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2.5">
                   <div className="w-8 h-8 rounded-lg bg-zinc-500/12 text-[var(--text-primary)] flex items-center justify-center">
                     <Icon name="github" size={16} />
@@ -592,7 +644,7 @@ export function SettingsView({
                       GitHub 连接
                     </h2>
                     <p className="text-[12px] text-[var(--text-muted)]">
-                      工作区共用此连接，用于创建或编辑项目时快速选择仓库。
+                      支持配置多个 Personal Access Token（个人账号与不同组织可分别配置），选仓时自动聚合。
                     </p>
                   </div>
                 </div>
@@ -608,73 +660,268 @@ export function SettingsView({
                       githubConfigured ? "bg-emerald-500" : "bg-zinc-400"
                     }`}
                   />
-                  {githubConfigured ? "已连接" : "未连接"}
+                  {githubConfigured
+                    ? `已配置 ${githubConnections.length} 个 Key`
+                    : "未连接"}
                 </span>
               </div>
 
-              <div className="p-5 space-y-3">
-                <label className="block space-y-1.5">
-                  <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
-                    Personal Access Token（支持个人与组织仓库）
-                  </span>
-                  <div className="relative">
-                    <input
-                      type={showGhToken ? "text" : "password"}
-                      value={ghToken}
-                      onChange={(e) => setGhToken(e.target.value)}
-                      required
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder={
-                        githubConfigured
-                          ? "输入新的 Token 以替换当前连接"
-                          : "github_pat_... 或 ghp_...（含组织权限可自动拉取组织仓库）"
-                      }
-                      className="w-full h-9.5 pl-3 pr-10 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowGhToken((v) => !v)}
-                      aria-label={showGhToken ? "隐藏 Token" : "显示 Token"}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer p-1"
-                    >
-                      <Icon name={showGhToken ? "eye-off" : "eye"} size={15} />
-                    </button>
-                  </div>
-                  <span className="block text-[11.5px] text-[var(--text-muted)]">
-                    支持 Classic PAT（<code className="font-mono">repo</code> /{" "}
-                    <code className="font-mono">read:org</code>）与 Fine-grained PAT（个人或组织{" "}
-                    <code className="font-mono">Metadata: Read-only</code>）。
-                  </span>
-                </label>
-              </div>
+              {/* Configured Keys List */}
+              {githubConnections.length > 0 && (
+                <div className="divide-y divide-[var(--border-subtle)]">
+                  {githubConnections.map((conn) => {
+                    const primaryOwner = conn.owners[0] ?? conn.viewer;
+                    const isBusy = busyGhId === conn.id;
+                    const isEditing = editingGhId === conn.id;
+                    const tokenTypeLabel =
+                      conn.token_type === "fine_grained"
+                        ? "Fine-grained"
+                        : conn.token_type === "classic"
+                          ? "Classic"
+                          : "PAT";
 
-              <div className="px-5 py-3.5 bg-[var(--surface-subtle)] border-t border-[var(--border-subtle)] flex items-center justify-between gap-2">
-                <div>
-                  {githubConfigured && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      icon="unlink"
-                      onClick={() => void handleDisconnectGithub()}
-                      disabled={savingGh}
-                    >
-                      断开连接
-                    </Button>
-                  )}
+                    return (
+                      <div
+                        key={conn.id}
+                        className={`px-5 py-3.5 flex items-start justify-between gap-3 transition ${
+                          isEditing ? "bg-indigo-500/[0.04]" : ""
+                        }`}
+                      >
+                        <div className="flex items-start gap-3 min-w-0 flex-1">
+                          <div className="mt-0.5 shrink-0">
+                            {primaryOwner ? (
+                              <GithubOwnerAvatar
+                                login={primaryOwner.login}
+                                type={primaryOwner.type}
+                                avatarUrl={primaryOwner.avatar_url}
+                                size="md"
+                              />
+                            ) : (
+                              <span className="w-7 h-7 rounded-lg bg-[var(--surface-subtle)] text-[var(--text-muted)] inline-flex items-center justify-center">
+                                <Icon name="key-round" size={14} />
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="min-w-0 flex-1 space-y-1.5">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[13px] font-semibold text-[var(--text-primary)] truncate">
+                                {conn.label}
+                              </span>
+                              <span className="text-[10.5px] font-medium px-1.5 py-0.5 rounded-md bg-[var(--surface-subtle)] text-[var(--text-secondary)] border border-[var(--border-subtle)]">
+                                {tokenTypeLabel}
+                              </span>
+                              <code className="text-[11px] font-mono text-[var(--text-muted)]">
+                                {conn.token_preview}
+                              </code>
+                            </div>
+
+                            {/* Accessible Owner Chips + Repo Count */}
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {conn.owners.length > 0 ? (
+                                conn.owners.map((owner) => (
+                                  <span
+                                    key={`${conn.id}:${owner.type}:${owner.login}`}
+                                    className="inline-flex items-center gap-1 pl-1 pr-1.5 py-0.5 rounded-md bg-[var(--surface-subtle)] border border-[var(--border-subtle)] text-[11px] text-[var(--text-secondary)]"
+                                  >
+                                    <GithubOwnerAvatar
+                                      login={owner.login}
+                                      type={owner.type}
+                                      avatarUrl={owner.avatar_url}
+                                      size="xs"
+                                    />
+                                    <span className="font-mono">{owner.login}</span>
+                                    {owner.type === "Organization" && (
+                                      <span className="text-[9.5px] px-1 rounded bg-indigo-500/12 text-indigo-600 dark:text-indigo-400">
+                                        组织
+                                      </span>
+                                    )}
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="text-[11.5px] text-[var(--text-muted)]">
+                                  点击右侧刷新以同步账号与组织信息
+                                </span>
+                              )}
+
+                              {conn.repo_count > 0 && (
+                                <span className="text-[11px] text-[var(--text-muted)] tabular-nums">
+                                  · {conn.repo_count} 个仓库
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => void handleRefreshGithubKey(conn)}
+                            disabled={isBusy || savingGh}
+                            title="重新验证并同步组织与仓库"
+                            aria-label={`同步 ${conn.label}`}
+                            className="w-7.5 h-7.5 inline-flex items-center justify-center rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer disabled:opacity-40"
+                          >
+                            <Icon
+                              name="refresh-cw"
+                              size={13.5}
+                              className={isBusy ? "animate-spin" : ""}
+                            />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => startEditGithubKey(conn)}
+                            disabled={isBusy || savingGh}
+                            title="替换 Token 或修改备注"
+                            aria-label={`更新 ${conn.label}`}
+                            className={`w-7.5 h-7.5 inline-flex items-center justify-center rounded-lg transition cursor-pointer disabled:opacity-40 ${
+                              isEditing
+                                ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-400"
+                                : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]"
+                            }`}
+                          >
+                            <Icon name="key-round" size={13.5} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleRemoveGithubKey(conn)}
+                            disabled={isBusy || savingGh}
+                            title="移除此 Key"
+                            aria-label={`移除 ${conn.label}`}
+                            className="w-7.5 h-7.5 inline-flex items-center justify-center rounded-lg text-[var(--text-muted)] hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/10 transition cursor-pointer disabled:opacity-40"
+                          >
+                            <Icon name="trash-2" size={13.5} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-                <Button
-                  type="submit"
-                  variant="secondary"
-                  size="sm"
-                  loading={savingGh}
-                  disabled={!ghToken.trim()}
+              )}
+
+              {/* Add / Replace Key Form */}
+              {(!githubConfigured || addingGhKey || editingGhId) ? (
+                <form
+                  onSubmit={handleConnectGithub}
+                  className={
+                    githubConfigured
+                      ? "border-t border-[var(--border-subtle)] bg-[var(--surface-subtle)]/35"
+                      : ""
+                  }
                 >
-                  保存连接
-                </Button>
-              </div>
-            </form>
+                  <div className="p-5 space-y-3.5">
+                    {editingGhId && (
+                      <div className="flex items-center justify-between gap-2 text-[12px] font-medium text-indigo-600 dark:text-indigo-400">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Icon name="key-round" size={13.5} />
+                          替换已有 GitHub Key 的 Token
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                      <label className="block space-y-1.5 sm:col-span-4">
+                        <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                          备注名称{" "}
+                          <span className="text-[var(--text-muted)] font-normal">(可选)</span>
+                        </span>
+                        <input
+                          type="text"
+                          value={ghLabel}
+                          onChange={(e) => setGhLabel(e.target.value)}
+                          maxLength={80}
+                          placeholder="留空自动识别账号/组织"
+                          className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                        />
+                      </label>
+
+                      <label className="block space-y-1.5 sm:col-span-8">
+                        <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                          Personal Access Token
+                        </span>
+                        <div className="relative">
+                          <input
+                            type={showGhToken ? "text" : "password"}
+                            value={ghToken}
+                            onChange={(e) => setGhToken(e.target.value)}
+                            required
+                            autoFocus={addingGhKey}
+                            autoComplete="off"
+                            spellCheck={false}
+                            placeholder={
+                              editingGhId
+                                ? "输入新的 Token 以替换该连接"
+                                : "github_pat_... 或 ghp_..."
+                            }
+                            className="w-full h-9.5 pl-3 pr-10 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowGhToken((v) => !v)}
+                            aria-label={showGhToken ? "隐藏 Token" : "显示 Token"}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer p-1"
+                          >
+                            <Icon name={showGhToken ? "eye-off" : "eye"} size={15} />
+                          </button>
+                        </div>
+                      </label>
+                    </div>
+
+                    <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+                      GitHub Fine-grained PAT 每次只能授权单个个人账号或单个组织（需{" "}
+                      <code className="font-mono">Metadata: Read-only</code>）；可在此分别添加多个
+                      Key，选仓时会自动聚合去重。也支持 Classic PAT（
+                      <code className="font-mono">repo</code> /{" "}
+                      <code className="font-mono">read:org</code>）。
+                    </p>
+                  </div>
+
+                  <div className="px-5 py-3 bg-[var(--surface-subtle)] border-t border-[var(--border-subtle)] flex items-center justify-end gap-2">
+                    {githubConfigured && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={cancelGithubForm}
+                        disabled={savingGh}
+                      >
+                        取消
+                      </Button>
+                    )}
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      size="sm"
+                      icon={editingGhId ? "check" : "plus"}
+                      loading={savingGh}
+                      disabled={!ghToken.trim()}
+                    >
+                      {editingGhId ? "验证并更新 Key" : "验证并添加 Key"}
+                    </Button>
+                  </div>
+                </form>
+              ) : (
+                <div className="px-5 py-3 bg-[var(--surface-subtle)] border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11.5px] text-[var(--text-muted)]">
+                    Fine-grained PAT 仅限单个账号或组织？继续添加其它账号/组织的 Key 即可自动合并。
+                  </span>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    icon="plus"
+                    onClick={() => {
+                      setEditingGhId(null);
+                      setGhLabel("");
+                      setGhToken("");
+                      setAddingGhKey(true);
+                    }}
+                  >
+                    添加 GitHub Key
+                  </Button>
+                </div>
+              )}
+            </section>
           </>
         )}
 
@@ -741,6 +988,7 @@ export function SettingsView({
                   value={projRepo}
                   onChange={(next) => setProjRepo(next)}
                   githubConfigured={githubConfigured}
+                  githubConnections={githubConnections}
                   defaultExpanded={false}
                 />
 

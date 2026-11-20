@@ -500,4 +500,206 @@ describe("GitHub Personal & Organization Repository Listing", () => {
     expect(userRes.status).toBe(200);
     expect(userRes.json.repos).toEqual(["AceXiamo/relaydesk"]);
   });
+
+  it("supports multiple GitHub PATs (personal + org-scoped Fine-grained PATs), partial failures, refresh, and per-key disconnect", async () => {
+    let orgTokenExpired = false;
+    const mockGh = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const auth = req.headers.authorization ?? "";
+      res.setHeader("Content-Type", "application/json");
+
+      if (auth === "Bearer github_pat_personal_key_1111") {
+        if (url.pathname === "/user") {
+          res.end(
+            JSON.stringify({
+              login: "AceXiamo",
+              type: "User",
+              avatar_url: "https://avatars.githubusercontent.com/u/1001?v=4",
+            }),
+          );
+          return;
+        }
+        if (url.pathname === "/user/orgs") {
+          res.end(JSON.stringify([]));
+          return;
+        }
+        if (url.pathname === "/user/repos") {
+          res.end(
+            JSON.stringify([
+              {
+                full_name: "AceXiamo/relaydesk",
+                name: "relaydesk",
+                private: false,
+                archived: false,
+                description: "Personal feedback queue",
+                pushed_at: "2026-11-20T12:00:00Z",
+                owner: {
+                  login: "AceXiamo",
+                  type: "User",
+                  avatar_url: "https://avatars.githubusercontent.com/u/1001?v=4",
+                },
+              },
+            ]),
+          );
+          return;
+        }
+        res.statusCode = 403;
+        res.end(JSON.stringify({ message: "Forbidden" }));
+        return;
+      }
+
+      if (auth === "Bearer github_pat_org_acme_key_2222") {
+        if (orgTokenExpired) {
+          res.statusCode = 401;
+          res.end(JSON.stringify({ message: "Bad credentials" }));
+          return;
+        }
+        if (url.pathname === "/user") {
+          // Fine-grained PAT scoped to an org still returns the creator on /user
+          res.end(
+            JSON.stringify({
+              login: "AceXiamo",
+              type: "User",
+              avatar_url: "https://avatars.githubusercontent.com/u/1001?v=4",
+            }),
+          );
+          return;
+        }
+        if (url.pathname === "/user/orgs") {
+          res.end(JSON.stringify([]));
+          return;
+        }
+        if (url.pathname === "/user/repos" || url.pathname === "/orgs/acme-org/repos") {
+          res.end(
+            JSON.stringify([
+              {
+                full_name: "acme-org/core-api",
+                name: "core-api",
+                private: true,
+                archived: false,
+                description: "Acme backend",
+                pushed_at: "2026-11-20T15:00:00Z",
+                owner: {
+                  login: "acme-org",
+                  type: "Organization",
+                  avatar_url: "https://avatars.githubusercontent.com/u/2001?v=4",
+                },
+              },
+            ]),
+          );
+          return;
+        }
+      }
+
+      res.statusCode = 401;
+      res.end(JSON.stringify({ message: "Unauthorized" }));
+    });
+
+    await new Promise<void>((r) => mockGh.listen(0, "127.0.0.1", r));
+    cleanups.push(() => new Promise<void>((r) => mockGh.close(() => r())));
+    const ghPort = (mockGh.address() as { port: number }).port;
+    const prevBase = process.env.RELAYDESK_GITHUB_API_BASE;
+    process.env.RELAYDESK_GITHUB_API_BASE = `http://127.0.0.1:${ghPort}`;
+    cleanups.push(() => {
+      if (prevBase === undefined) delete process.env.RELAYDESK_GITHUB_API_BASE;
+      else process.env.RELAYDESK_GITHUB_API_BASE = prevBase;
+    });
+
+    const srv = await startApiServer();
+
+    // 1. Connect personal Fine-grained PAT
+    const c1 = await jsonReq(`${srv.url}/api/github/connect`, "POST", {
+      token: "github_pat_personal_key_1111",
+    });
+    expect(c1.status).toBe(200);
+    const conn1 = c1.json.connection as {
+      id: string;
+      label: string;
+      token_type: string;
+      token_preview: string;
+      owners: Array<{ login: string; type: string }>;
+    };
+    expect(conn1.label).toBe("@AceXiamo");
+    expect(conn1.token_type).toBe("fine_grained");
+    expect(conn1.token_preview).toBe("github_pat_••••1111");
+    expect(conn1.owners.map((o) => `${o.type}:${o.login}`)).toEqual(["User:AceXiamo"]);
+
+    // 2. Connect org-only Fine-grained PAT (viewer is still AceXiamo, but owners should only be acme-org)
+    const c2 = await jsonReq(`${srv.url}/api/github/connect`, "POST", {
+      token: "github_pat_org_acme_key_2222",
+      label: "Acme 组织 Key",
+    });
+    expect(c2.status).toBe(200);
+    const conn2 = c2.json.connection as {
+      id: string;
+      label: string;
+      owners: Array<{ login: string; type: string }>;
+    };
+    expect(conn2.label).toBe("Acme 组织 Key");
+    expect(conn2.owners.map((o) => `${o.type}:${o.login}`)).toEqual(["Organization:acme-org"]);
+
+    // 3. GET /api/github returns both masked connections without leaking raw tokens
+    const statusRes = await jsonReq(`${srv.url}/api/github`);
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.json.configured).toBe(true);
+    expect((statusRes.json.connections as unknown[]).length).toBe(2);
+    expect(JSON.stringify(statusRes.json)).not.toContain("github_pat_personal_key_1111");
+    expect(JSON.stringify(statusRes.json)).not.toContain("github_pat_org_acme_key_2222");
+
+    // 4. "all" aggregates repos & owners across both keys
+    const allRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "all",
+    });
+    expect(allRes.status).toBe(200);
+    expect(allRes.json.repos).toEqual(["acme-org/core-api", "AceXiamo/relaydesk"]);
+    expect(
+      (allRes.json.owners as Array<{ login: string; type: string }>).map(
+        (o) => `${o.type}:${o.login}`,
+      ),
+    ).toEqual(["User:AceXiamo", "Organization:acme-org"]);
+
+    // 5. Filtering by org routes to the org key and keeps all owner tabs intact
+    const orgRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "acme-org",
+      owner_type: "Organization",
+    });
+    expect(orgRes.status).toBe(200);
+    expect(orgRes.json.repos).toEqual(["acme-org/core-api"]);
+    expect(
+      (orgRes.json.owners as Array<{ login: string; type: string }>).map(
+        (o) => `${o.type}:${o.login}`,
+      ),
+    ).toEqual(["User:AceXiamo", "Organization:acme-org"]);
+
+    // 6. Partial failure: if org key expires, personal repos still load with warning
+    orgTokenExpired = true;
+    const partialRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "all",
+    });
+    expect(partialRes.status).toBe(200);
+    expect(partialRes.json.repos).toEqual(["AceXiamo/relaydesk"]);
+    expect((partialRes.json.warnings as Array<{ connection_id: string }>)[0].connection_id).toBe(
+      conn2.id,
+    );
+
+    // 7. Refresh working key succeeds
+    const refreshRes = await jsonReq(`${srv.url}/api/github/refresh`, "POST", {
+      id: conn1.id,
+    });
+    expect(refreshRes.status).toBe(200);
+    expect(refreshRes.json.repo_count).toBe(1);
+
+    // 8. Disconnect only the expired org key; personal key stays configured
+    const delRes = await jsonReq(`${srv.url}/api/github/disconnect`, "POST", {
+      id: conn2.id,
+    });
+    expect(delRes.status).toBe(200);
+    expect(delRes.json.configured).toBe(true);
+    expect((delRes.json.connections as Array<{ id: string }>).map((c) => c.id)).toEqual([
+      conn1.id,
+    ]);
+  });
 });
