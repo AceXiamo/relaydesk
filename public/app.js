@@ -117,6 +117,13 @@ async function api(path, method = "GET", data) {
   } catch {
     throw Error("无法连接服务，请检查网络后重试。");
   }
+  if (res.headers.get("X-Relaydesk-Auth") === "wallet") {
+    if (res.status === 401) {
+      location.replace("/login.html" + location.hash);
+      throw Error("请重新登录");
+    }
+    document.querySelector("#sign-out").hidden = false;
+  }
   const json = await res.json().catch(() => ({}));
   if (!res.ok)
     throw Error(
@@ -362,7 +369,7 @@ function projectFields(p = {}) {
       p.repo,
       'required maxlength="200" placeholder="owner/repository"',
       "支持 owner/repository 或 GitHub 仓库地址。",
-    )
+    ) + `<div class="field"><button class="btn" type="button" data-repos-page="1">从 GitHub 选择仓库</button><select aria-label="已授权仓库" data-repo-list hidden><option value="">选择仓库…</option></select><small data-repo-status role="status"></small></div>`
   );
 }
 function snippet(type) {
@@ -386,6 +393,13 @@ function renderSettings() {
       ? "管理仓库绑定、项目级指令和 local agent 连接。"
       : "配置应用反馈组件和群聊收集机器人。",
   );
+  if (settings) {
+    main.insertAdjacentHTML("beforeend", `<form class="panel" data-form="github"><div class="panel-body"><h2>GitHub 连接</h2><p data-github-status role="status">正在检查连接…</p><label class="field">Personal access token<input type="password" name="token" required autocomplete="off" spellcheck="false"></label><small>工作空间共用此连接。选择需要的仓库，授予 Metadata 读取权限即可。</small><p class="error-text" role="alert"></p></div><div class="panel-foot"><button class="btn" type="button" data-do="disconnect-github" hidden>断开连接</button><button class="btn" type="submit">保存连接</button></div></form>`);
+    const form = main.querySelector('[data-form="github"]');
+    api("/api/github").then(({ configured }) => {
+      githubStatus(form, configured);
+    }).catch((error) => { form.querySelector("[data-github-status]").textContent = error.message; });
+  }
   if (!p) {
     main.insertAdjacentHTML(
       "beforeend",
@@ -423,6 +437,30 @@ function renderSettings() {
           "Bot",
         ),
     );
+  }
+}
+function githubStatus(form, configured) {
+  form.querySelector("[data-github-status]").textContent = configured ? "已连接，可以在项目中选择仓库。" : "尚未连接";
+  form.querySelector('[data-do="disconnect-github"]').hidden = !configured;
+}
+async function loadRepos(button) {
+  const form = button.closest("form");
+  const select = form.querySelector("[data-repo-list]");
+  const status = form.querySelector("[data-repo-status]");
+  const page = Number(button.dataset.reposPage);
+  button.disabled = true;
+  try {
+    const { repos, more } = await api("/api/github/repos", "POST", { page });
+    for (const name of repos) select.add(new Option(name, name));
+    select.hidden = select.options.length <= 1;
+    status.textContent = select.hidden ? "此 token 下没有可选的仓库。" : "";
+    button.hidden = !more;
+    button.dataset.reposPage = String(page + 1);
+    button.textContent = "加载更多仓库";
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
   }
 }
 function formDialog(kind) {
@@ -561,8 +599,14 @@ async function copyConfig(key) {
   showNotice(key.startsWith("copy-") ? "配置已复制" : "项目密钥已复制");
 }
 let requestAfterCreate = "";
-async function uiAction(key) {
+async function uiAction(key, control) {
   switch (key) {
+    case "disconnect-github": {
+      await api("/api/github/disconnect", "POST", {});
+      githubStatus(control.closest("form"), false);
+      renderSettings();
+      return;
+    }
     case "retry":
       return start();
     case "new-project":
@@ -614,10 +658,18 @@ async function uiAction(key) {
 }
 async function handleForm(form, submitter) {
   const kind = form.dataset.form;
+  if (kind === "github") {
+    const token = form.elements.token;
+    await api("/api/github/connect", "POST", { token: token.value.trim() });
+    token.value = "";
+    githubStatus(form, true);
+    showNotice("GitHub 连接已保存");
+    return;
+  }
   if (kind === "project") {
     const { project } = await api("/api/projects", "POST", {
-      name: val("project-title"),
-      repo: val("project-git"),
+      name: form.querySelector("#project-title").value.trim(),
+      repo: form.querySelector("#project-git").value.trim(),
     });
     const next = requestAfterCreate;
     requestAfterCreate = "";
@@ -643,8 +695,8 @@ async function handleForm(form, submitter) {
     const data =
       kind === "settings"
         ? {
-            name: val("project-title"),
-            repo: val("project-git"),
+            name: form.querySelector("#project-title").value.trim(),
+            repo: form.querySelector("#project-git").value.trim(),
             agent_instructions: val("project-instructions"),
           }
         : {
@@ -687,6 +739,8 @@ async function quickSearch() {
 document.addEventListener("click", async (e) => {
   const target = e.target;
   if (!(target instanceof Element)) return;
+  const picker = target.closest("[data-repos-page]");
+  if (picker) return loadRepos(picker);
   if (target.closest("[data-nav-toggle]")) {
     const on = document.body.classList.toggle("nav-open");
     $("[data-nav-toggle]").setAttribute("aria-expanded", String(on));
@@ -724,7 +778,7 @@ document.addEventListener("click", async (e) => {
   if (!control) return;
   control.disabled = true;
   try {
-    await uiAction(control.dataset.do);
+    await uiAction(control.dataset.do, control);
   } catch (err) {
     const inline = drawer.open ? $("#action-error") : null;
     if (inline) {
@@ -775,6 +829,9 @@ document.addEventListener("input", (e) => {
   }
 });
 document.addEventListener("change", (e) => {
+  if (e.target.matches("[data-repo-list]") && e.target.value) {
+    e.target.closest("form").querySelector("#project-git").value = e.target.value;
+  }
   if (e.target.id === "status-filter" || e.target.id === "source-filter") {
     state.status = val("status-filter");
     state.source = val("source-filter");
@@ -819,6 +876,14 @@ function dialogBackdrop(e) {
 }
 drawer.addEventListener("click", dialogBackdrop);
 modal.addEventListener("click", dialogBackdrop);
+$("#sign-out").addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", "POST", {});
+    location.replace("/login.html");
+  } catch (error) {
+    showNotice(error.message);
+  }
+});
 let polling = false;
 async function poll() {
   if (polling || document.hidden || modal.open || !state.project) return;

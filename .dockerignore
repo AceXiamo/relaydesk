@@ -5,3 +5,7 @@
 !public/**
 !integrations/
 !integrations/telegram.py
+
+!wallet_auth.py
+!requirements.txt
+!github_repos.py

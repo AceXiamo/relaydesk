@@ -291,8 +291,9 @@ def agent_call(conn, project, parts, data):
 class QueueServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, db, admin_token="", public_dir=None):
+    def __init__(self, address, db, admin_token="", public_dir=None, wallet=None):
         self.store = Store(db)
+        self.wallet = wallet
         self.admin_token = admin_token
         self.public_dir = (public_dir or ROOT / "public").resolve()
         self.rate_lock = threading.Lock()
@@ -329,6 +330,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
+        if getattr(self, "session_cookie", None):
+            self.send_header("Set-Cookie", self.session_cookie)
+        if self.server.wallet:
+            self.send_header("X-Relaydesk-Auth", "wallet")
         if getattr(self, "admin_challenge", False):
             self.send_header("WWW-Authenticate", 'Basic realm="Relaydesk"')
         if getattr(self, "cors_origin", None):
@@ -346,6 +351,14 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin and origin not in {"http://" + host, "https://" + host}:
             raise ApiError(403, "Operator actions require a same-origin request")
+        wallet = self.server.wallet
+        if wallet:
+            from wallet_auth import cookie_value
+            if host != wallet.host or (origin and origin != wallet.origin):
+                raise ApiError(403, "Invalid operator origin")
+            if not wallet.authenticated(cookie_value(self.headers.get("Cookie"))):
+                raise ApiError(401, "请使用管理员钱包登录")
+            return
         token = self.server.admin_token
         if token:
             auth = self.headers.get("Authorization", "")
@@ -488,6 +501,63 @@ class Handler(BaseHTTPRequestHandler):
             self.server.assistant_slots.release()
         return {"reply": result}
 
+    def github_request(self, parts):
+        import github_repos
+        self.operator()
+        path = Path(self.server.store.db).parent / ".github-token"
+        if parts == ["github"] and self.command == "GET":
+            return self.reply(200, {"configured": path.is_file()})
+        if self.command != "POST":
+            raise ApiError(405, "Method not allowed")
+        data = self.read_json()
+        try:
+            if parts == ["github", "connect"]:
+                token = field(data, "token", 512)
+                if not re.fullmatch(r"[A-Za-z0-9_]+", token):
+                    raise ApiError(400, "请输入有效的 GitHub token")
+                github_repos.repositories(token)
+                github_repos.save_token(path, token)
+                return self.reply(200, {"configured": True})
+            if parts == ["github", "disconnect"]:
+                path.unlink(missing_ok=True)
+                return self.reply(200, {"configured": False})
+            if parts == ["github", "repos"]:
+                page = data.get("page", 1)
+                if type(page) is not int or not 1 <= page <= 100000:
+                    raise ApiError(400, "Invalid page")
+                try:
+                    token = path.read_text()
+                except FileNotFoundError:
+                    raise ApiError(409, "请先在项目设置中连接 GitHub。")
+                return self.reply(200, github_repos.repositories(token, page))
+        except github_repos.GithubError as exc:
+            raise ApiError(502, str(exc)) from None
+        raise ApiError(404, "Unknown GitHub endpoint")
+
+    def wallet_request(self, endpoint):
+        from wallet_auth import cookie_value, session_cookie
+        wallet = self.server.wallet
+        if self.command != "POST":
+            raise ApiError(405, "Method not allowed")
+        if self.headers.get("Host") != wallet.host or self.headers.get("Origin") != wallet.origin:
+            raise ApiError(403, "Invalid sign-in origin")
+        data = self.read_json()
+        if endpoint == "challenge":
+            return self.reply(200, wallet.challenge(data.get("chain_id")))
+        if endpoint == "verify":
+            nonce = field(data, "nonce", 48)
+            signature = field(data, "signature", 132)
+            token = wallet.verify(nonce, signature)
+            if not token:
+                raise ApiError(401, "签名无效或已过期，请重新登录。")
+            self.session_cookie = session_cookie(token)
+        elif endpoint == "logout":
+            wallet.logout(cookie_value(self.headers.get("Cookie")))
+            self.session_cookie = session_cookie("")
+        else:
+            raise ApiError(404, "Unknown sign-in endpoint")
+        self.reply(200, {"ok": True})
+
     def dispatch(self):
         path = unquote(urlsplit(self.path).path)
         if not path.startswith("/api/"):
@@ -501,6 +571,10 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, requested.read_bytes(), mime)
             return
         parts = path[len("/api/"):].strip("/").split("/")
+        if parts[0] == "github":
+            return self.github_request(parts)
+        if self.server.wallet and len(parts) == 2 and parts[0] == "auth":
+            return self.wallet_request(parts[1])
         public_path = len(parts) == 3 and parts[0] == "projects" and parts[2] in {"intake", "clarify"}
         agent_path = len(parts) >= 4 and parts[0] == "projects" and parts[2] == "agent"
         if self.command == "OPTIONS" and public_path:
@@ -540,7 +614,11 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     args.db.parent.mkdir(parents=True, exist_ok=True)
-    server = QueueServer((args.host, args.port), args.db, os.getenv("RELAYDESK_ADMIN_TOKEN", ""))
+    wallet = None
+    if "RELAYDESK_ADMIN_WALLET" in os.environ:
+        from wallet_auth import WalletAuth
+        wallet = WalletAuth(os.environ["RELAYDESK_ADMIN_WALLET"], os.getenv("RELAYDESK_ORIGIN", ""))
+    server = QueueServer((args.host, args.port), args.db, os.getenv("RELAYDESK_ADMIN_TOKEN", ""), wallet=wallet)
     print(f"Relaydesk listening on http://{args.host}:{server.server_port}", flush=True)
     try:
         server.serve_forever()

@@ -1258,3 +1258,14 @@ dialog::backdrop {
 .panel-title .tile {
   color: #33333a;
 }
+
+.wallet-login {
+  width: min(420px, calc(100% - 32px));
+  margin: 15vh auto;
+}
+.wallet-login .panel { display: grid; gap: 16px; padding: 28px; }
+.wallet-login h1, .wallet-login p { margin: 0; }
+.wallet-login p { overflow-wrap: anywhere; }
+.wallet-login [hidden], #sign-out[hidden] { display: none; }
+
+[data-repos-page][hidden], [data-repo-list][hidden], [data-do="disconnect-github"][hidden] { display: none; }

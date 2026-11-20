@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>管理员登录 · relaydesk</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/login.js"></script>
+  </head>
+  <body>
+    <main class="wallet-login">
+      <section class="panel panel-body">
+        <span class="brand">relaydesk</span>
+        <h1>管理员登录</h1>
+        <p>连接管理员钱包，并签署本次登录消息。</p>
+        <label class="field" id="provider-field" hidden>钱包<select id="provider"></select></label>
+        <button class="btn primary" id="sign-in" type="button">连接钱包并签名</button>
+        <p id="login-status" role="status" aria-live="polite"></p>
+      </section>
+    </main>
+  </body>
+</html>
