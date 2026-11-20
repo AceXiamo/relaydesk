@@ -1,0 +1,7 @@
+[Unit]
+Description=Back up the Relaydesk SQLite database
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /srv/apps/relaydesk/backup.py
+UMask=0077
