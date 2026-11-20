@@ -5,13 +5,18 @@ import { dirname } from "node:path";
 import { ApiError } from "./errors.ts";
 import type {
   AgentProjectInfo,
+  AgentQueueItem,
+  AgentQueuePayload,
+  DeliveryMode,
   ProjectDetail,
   ProjectSummary,
   TaskMessage,
   TaskPriority,
   TaskRecord,
+  TaskResolution,
   TaskStatus,
 } from "../app/lib/types.ts";
+import type { PrescreenResult } from "./assistant.ts";
 
 export const STATUSES = new Set<TaskStatus>([
   "triage",
@@ -29,13 +34,25 @@ export const PRIORITIES = new Set<TaskPriority>([
   "urgent",
 ]);
 
+export const DELIVERY_MODES = new Set<DeliveryMode>([
+  "direct_push",
+  "pr_automerge",
+  "review_only",
+]);
+
+export const MAX_AGENT_ATTEMPTS = 3;
+export const STALE_LEASE_MS = 45 * 60 * 1000;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, repo TEXT NOT NULL,
     repos TEXT NOT NULL DEFAULT '[]',
     intake_key TEXT NOT NULL, bot_key TEXT NOT NULL, agent_key TEXT NOT NULL,
     allowed_origins TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,
-    agent_instructions TEXT NOT NULL DEFAULT ''
+    agent_instructions TEXT NOT NULL DEFAULT '',
+    automation_paused INTEGER NOT NULL DEFAULT 0,
+    delivery_mode TEXT NOT NULL DEFAULT 'direct_push',
+    widget_code_context INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
@@ -43,7 +60,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     requirements TEXT NOT NULL DEFAULT '', source TEXT NOT NULL,
     source_url TEXT NOT NULL DEFAULT '', external_id TEXT,
     priority TEXT NOT NULL, status TEXT NOT NULL, owner TEXT NOT NULL DEFAULT 'none',
-    lease TEXT, version INTEGER NOT NULL DEFAULT 1, merged_into TEXT REFERENCES tasks(id),
+    lease TEXT, version INTEGER NOT NULL DEFAULT 1,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    resolution TEXT,
+    delivery_ref TEXT NOT NULL DEFAULT '',
+    triaged_by TEXT NOT NULL DEFAULT '',
+    merged_into TEXT REFERENCES tasks(id),
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_seen TEXT,
     UNIQUE(project_id, number), UNIQUE(project_id, source, external_id)
 );
@@ -200,6 +222,9 @@ export interface RawProjectRow {
   allowed_origins: string;
   created_at: string;
   agent_instructions: string;
+  automation_paused?: number;
+  delivery_mode?: string;
+  widget_code_context?: number;
 }
 
 export interface RawTaskRow {
@@ -217,12 +242,50 @@ export interface RawTaskRow {
   owner: string;
   lease: string | null;
   version: number;
+  attempts?: number;
+  resolution?: string | null;
+  delivery_ref?: string;
+  triaged_by?: string;
   merged_into: string | null;
   created_at: string;
   updated_at: string;
   last_seen: string | null;
   message_count?: number;
   merged_count?: number;
+}
+
+function normalizeDeliveryMode(value: unknown): DeliveryMode {
+  if (typeof value === "string" && DELIVERY_MODES.has(value as DeliveryMode)) {
+    return value as DeliveryMode;
+  }
+  return "direct_push";
+}
+
+function parseDeliveryMode(value: unknown): DeliveryMode {
+  if (typeof value !== "string" || !DELIVERY_MODES.has(value as DeliveryMode)) {
+    throw new ApiError(400, "Invalid delivery_mode");
+  }
+  return value as DeliveryMode;
+}
+
+function normalizeResolution(value: unknown): TaskResolution {
+  if (value === "shipped" || value === "dismissed" || value === "merged") {
+    return value;
+  }
+  return null;
+}
+
+function toAgentQueueItem(row: RawTaskRow): AgentQueueItem {
+  return {
+    id: row.id,
+    number: row.number,
+    title: row.title,
+    priority: row.priority as TaskPriority,
+    status: row.status as TaskStatus,
+    owner: row.owner as TaskRecord["owner"],
+    attempts: typeof row.attempts === "number" ? row.attempts : 0,
+    updated_at: row.updated_at,
+  };
 }
 
 export function toProjectView(row: RawProjectRow): ProjectDetail {
@@ -232,6 +295,9 @@ export function toProjectView(row: RawProjectRow): ProjectDetail {
     name: row.name,
     repo: repos[0] ?? row.repo,
     repos,
+    automation_paused: Boolean(row.automation_paused),
+    delivery_mode: normalizeDeliveryMode(row.delivery_mode),
+    widget_code_context: row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
     intake_key: row.intake_key,
     bot_key: row.bot_key,
     agent_key: row.agent_key,
@@ -248,6 +314,9 @@ export function toAgentProject(row: RawProjectRow): AgentProjectInfo {
     name: row.name,
     repo: repos[0] ?? row.repo,
     repos,
+    automation_paused: Boolean(row.automation_paused),
+    delivery_mode: normalizeDeliveryMode(row.delivery_mode),
+    widget_code_context: row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
     agent_instructions: row.agent_instructions,
   };
 }
@@ -266,6 +335,10 @@ export function toTaskView(row: RawTaskRow): TaskRecord {
     status: row.status as TaskStatus,
     owner: row.owner as TaskRecord["owner"],
     version: row.version,
+    attempts: typeof row.attempts === "number" ? row.attempts : 0,
+    resolution: normalizeResolution(row.resolution),
+    delivery_ref: row.delivery_ref ?? "",
+    triaged_by: row.triaged_by ?? "",
     merged_into: row.merged_into,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -307,6 +380,42 @@ export class Store {
         "ALTER TABLE projects ADD COLUMN repos TEXT NOT NULL DEFAULT '[]'",
       );
     }
+    if (!cols.some((c) => c.name === "automation_paused")) {
+      this.db.exec(
+        "ALTER TABLE projects ADD COLUMN automation_paused INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+    if (!cols.some((c) => c.name === "delivery_mode")) {
+      this.db.exec(
+        "ALTER TABLE projects ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'direct_push'",
+      );
+    }
+    if (!cols.some((c) => c.name === "widget_code_context")) {
+      this.db.exec(
+        "ALTER TABLE projects ADD COLUMN widget_code_context INTEGER NOT NULL DEFAULT 1",
+      );
+    }
+    const taskCols = this.db
+      .prepare("PRAGMA table_info(tasks)")
+      .all() as Array<{ name: string }>;
+    if (!taskCols.some((c) => c.name === "attempts")) {
+      this.db.exec(
+        "ALTER TABLE tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+    if (!taskCols.some((c) => c.name === "resolution")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN resolution TEXT");
+    }
+    if (!taskCols.some((c) => c.name === "delivery_ref")) {
+      this.db.exec(
+        "ALTER TABLE tasks ADD COLUMN delivery_ref TEXT NOT NULL DEFAULT ''",
+      );
+    }
+    if (!taskCols.some((c) => c.name === "triaged_by")) {
+      this.db.exec(
+        "ALTER TABLE tasks ADD COLUMN triaged_by TEXT NOT NULL DEFAULT ''",
+      );
+    }
     const unmigrated = this.db
       .prepare("SELECT id, repo FROM projects WHERE (repos IS NULL OR repos = '' OR repos = '[]') AND repo != ''")
       .all() as Array<{ id: string; repo: string }>;
@@ -340,12 +449,17 @@ export class Store {
 
   listProjects(): ProjectSummary[] {
     const rows = this.db
-      .prepare("SELECT id, name, repo, repos, created_at FROM projects ORDER BY created_at")
+      .prepare(
+        "SELECT id, name, repo, repos, automation_paused, delivery_mode, widget_code_context, created_at FROM projects ORDER BY created_at",
+      )
       .all() as unknown as Array<{
       id: string;
       name: string;
       repo: string;
       repos?: string;
+      automation_paused?: number;
+      delivery_mode?: string;
+      widget_code_context?: number;
       created_at: string;
     }>;
     return rows.map((row) => {
@@ -355,6 +469,10 @@ export class Store {
         name: row.name,
         repo: repos[0] ?? row.repo,
         repos,
+        automation_paused: Boolean(row.automation_paused),
+        delivery_mode: normalizeDeliveryMode(row.delivery_mode),
+        widget_code_context:
+          row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
         created_at: row.created_at,
       };
     });
@@ -382,12 +500,34 @@ export class Store {
     const repo = repos[0];
     const allowedOrigins = serializeOrigins(data.allowed_origins ?? []);
     const agentInstructions = field(data, "agent_instructions", 8000, false);
+    const automationPaused =
+      "automation_paused" in data && data.automation_paused !== undefined
+        ? (() => {
+            if (typeof data.automation_paused !== "boolean") {
+              throw new ApiError(400, "automation_paused must be a boolean");
+            }
+            return data.automation_paused ? 1 : 0;
+          })()
+        : 0;
+    const deliveryMode =
+      "delivery_mode" in data && data.delivery_mode !== undefined
+        ? parseDeliveryMode(data.delivery_mode)
+        : "direct_push";
+    const widgetCodeContext =
+      "widget_code_context" in data && data.widget_code_context !== undefined
+        ? (() => {
+            if (typeof data.widget_code_context !== "boolean") {
+              throw new ApiError(400, "widget_code_context must be a boolean");
+            }
+            return data.widget_code_context ? 1 : 0;
+          })()
+        : 1;
     const projectId = uuidHex();
     const created = nowIso();
     this.db
       .prepare(
-        `INSERT INTO projects(id, name, repo, repos, intake_key, bot_key, agent_key, allowed_origins, created_at, agent_instructions)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO projects(id, name, repo, repos, intake_key, bot_key, agent_key, allowed_origins, created_at, agent_instructions, automation_paused, delivery_mode, widget_code_context)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         projectId,
@@ -400,6 +540,9 @@ export class Store {
         allowedOrigins,
         created,
         agentInstructions,
+        automationPaused,
+        deliveryMode,
+        widgetCodeContext,
       );
     return toProjectView(this.getProjectRow(projectId));
   }
@@ -431,11 +574,40 @@ export class Store {
       "agent_instructions" in data
         ? field(data, "agent_instructions", 8000, false)
         : project.agent_instructions;
+    let automationPaused = project.automation_paused ? 1 : 0;
+    if ("automation_paused" in data && data.automation_paused !== undefined) {
+      if (typeof data.automation_paused !== "boolean") {
+        throw new ApiError(400, "automation_paused must be a boolean");
+      }
+      automationPaused = data.automation_paused ? 1 : 0;
+    }
+    const deliveryMode =
+      "delivery_mode" in data && data.delivery_mode !== undefined
+        ? parseDeliveryMode(data.delivery_mode)
+        : normalizeDeliveryMode(project.delivery_mode);
+    let widgetCodeContext =
+      project.widget_code_context === undefined ? 1 : project.widget_code_context ? 1 : 0;
+    if ("widget_code_context" in data && data.widget_code_context !== undefined) {
+      if (typeof data.widget_code_context !== "boolean") {
+        throw new ApiError(400, "widget_code_context must be a boolean");
+      }
+      widgetCodeContext = data.widget_code_context ? 1 : 0;
+    }
     this.db
       .prepare(
-        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ? WHERE id = ?",
+        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ?, automation_paused = ?, delivery_mode = ?, widget_code_context = ? WHERE id = ?",
       )
-      .run(name, repo, JSON.stringify(nextRepos), allowed, instructions, projectId);
+      .run(
+        name,
+        repo,
+        JSON.stringify(nextRepos),
+        allowed,
+        instructions,
+        automationPaused,
+        deliveryMode,
+        widgetCodeContext,
+        projectId,
+      );
     return toProjectView(this.getProjectRow(projectId));
   }
 
@@ -501,7 +673,42 @@ export class Store {
     data: Record<string, unknown>,
     source: "widget" | "bot" | "console",
   ): RawTaskRow {
-    const body = field(data, "body", 24000);
+    let body = field(data, "body", 24000);
+    if ("attachments" in data && data.attachments !== undefined) {
+      if (!Array.isArray(data.attachments) || data.attachments.length > 8) {
+        throw new ApiError(400, "attachments must be an array of at most 8 image URLs");
+      }
+      const extraImages: string[] = [];
+      for (const item of data.attachments) {
+        const rawUrl =
+          typeof item === "string"
+            ? item.trim()
+            : item && typeof item === "object" && typeof (item as { url?: unknown }).url === "string"
+              ? ((item as { url: string }).url).trim()
+              : "";
+        if (!rawUrl || rawUrl.length > 2000) {
+          throw new ApiError(400, "Invalid attachment URL");
+        }
+        let parsed: URL;
+        try {
+          parsed = new URL(rawUrl);
+        } catch {
+          throw new ApiError(400, "Attachment URL must be an HTTP(S) URL");
+        }
+        if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+          throw new ApiError(400, "Attachment URL must be an HTTP(S) URL");
+        }
+        if (!body.includes(rawUrl)) {
+          extraImages.push(`![截图](${rawUrl})`);
+        }
+      }
+      if (extraImages.length > 0) {
+        const suffix = `\n\n### 附件截图\n${extraImages.join("\n\n")}`;
+        if (body.length + suffix.length <= 24000) {
+          body += suffix;
+        }
+      }
+    }
     const title =
       field(data, "title", 180, false) || (body.split(/\r?\n/)[0] ?? "").slice(0, 120);
     const priority = (field(data, "priority", 10, false) || "normal") as TaskPriority;
@@ -637,6 +844,15 @@ export class Store {
         changes.owner = "none";
       }
       event = `${status} → ${newStatus}`;
+    } else if (action === "reopen" && owner !== "agent") {
+      changes = {
+        status: "ready",
+        owner: "none",
+        lease: null,
+        attempts: 0,
+        resolution: null,
+      };
+      event = "Reopened for automation";
     } else if (action === "merge" && owner !== "agent") {
       const targetId = field(data, "target_id", 64);
       const target = this.getTaskRow(targetId);
@@ -655,7 +871,12 @@ export class Store {
       this.db
         .prepare("UPDATE tasks SET merged_into = ? WHERE merged_into = ?")
         .run(targetId, task.id);
-      changes = { merged_into: targetId, status: "done", owner: "none" };
+      changes = {
+        merged_into: targetId,
+        status: "done",
+        owner: "none",
+        resolution: "merged",
+      };
       event = `Merged into #${target.number}`;
       this.updateTaskFields(target, {});
       this.addMessage(
@@ -673,6 +894,165 @@ export class Store {
     return { task: toTaskView(this.getTaskRow(task.id)) };
   }
 
+  operatorAddComment(
+    taskId: string,
+    body: string,
+    reopen = true,
+  ): { message: TaskMessage; task: TaskRecord; reopened: boolean } {
+    const task = this.getTaskRow(taskId);
+    const message = this.addMessage(taskId, "comment", "human", body);
+    let reopened = false;
+    if (
+      reopen !== false &&
+      !task.merged_into &&
+      task.owner === "none" &&
+      (task.status === "waiting" || task.status === "review" || task.status === "done")
+    ) {
+      this.updateTaskFields(task, {
+        status: "ready",
+        attempts: 0,
+        resolution: null,
+      });
+      this.addMessage(taskId, "event", "human", "Reopened by operator comment");
+      reopened = true;
+    }
+    return {
+      message,
+      task: toTaskView(this.getTaskRow(taskId)),
+      reopened,
+    };
+  }
+
+  applyServerPrescreen(taskId: string, result: PrescreenResult): TaskRecord | null {
+    const task = this.db
+      .prepare("SELECT * FROM tasks WHERE id = ?")
+      .get(taskId) as unknown as RawTaskRow | undefined;
+    if (!task || task.merged_into || task.status !== "triage" || task.owner !== "none") {
+      return null;
+    }
+
+    if (result.verdict === "noise") {
+      this.updateTaskFields(task, {
+        status: "done",
+        owner: "none",
+        resolution: "dismissed",
+        triaged_by: "server_ai",
+      });
+      const reason =
+        result.reason.trim() || "该提交属于测试/无效噪音消息，未包含可执行的产品反馈。";
+      this.addMessage(
+        task.id,
+        "comment",
+        "assistant",
+        `**AI 预筛已自动归档**\n\n- **判定原因**：${reason}\n- **误判恢复**：如需重新进入自动化队列，直接在此下方回复评论即可自动重新打开任务。`,
+      );
+      this.addMessage(
+        task.id,
+        "event",
+        "system",
+        "Server AI pre-screened as noise and archived",
+      );
+      return toTaskView(this.getTaskRow(task.id));
+    }
+
+    if (result.verdict === "valid") {
+      const changes: Record<string, string | number | null> = {
+        status: "ready",
+        triaged_by: "server_ai",
+      };
+      if (
+        task.priority === "normal" &&
+        result.priority &&
+        PRIORITIES.has(result.priority)
+      ) {
+        changes.priority = result.priority;
+      }
+      this.updateTaskFields(task, changes);
+      this.addMessage(
+        task.id,
+        "event",
+        "system",
+        "Server AI pre-screened and promoted to ready",
+      );
+      return toTaskView(this.getTaskRow(task.id));
+    }
+
+    return toTaskView(task);
+  }
+
+  reclaimStaleAgentLeases(projectId: string, staleMs = STALE_LEASE_MS): number {
+    const working = this.db
+      .prepare(
+        "SELECT * FROM tasks WHERE project_id = ? AND owner = 'agent' AND status = 'working'",
+      )
+      .all(projectId) as unknown as RawTaskRow[];
+
+    let reclaimed = 0;
+    const now = Date.now();
+    for (const task of working) {
+      const lastActivity = Date.parse(task.last_seen || task.updated_at);
+      if (Number.isNaN(lastActivity) || now - lastActivity <= staleMs) {
+        continue;
+      }
+      const nextAttempts = (task.attempts ?? 0) + 1;
+      if (nextAttempts >= MAX_AGENT_ATTEMPTS) {
+        this.updateTaskFields(task, {
+          status: "waiting",
+          owner: "none",
+          lease: null,
+          attempts: nextAttempts,
+        });
+        this.addMessage(
+          task.id,
+          "event",
+          "system",
+          "Stale agent lease reached max attempts",
+        );
+      } else {
+        this.updateTaskFields(task, {
+          status: "ready",
+          owner: "none",
+          lease: null,
+          attempts: nextAttempts,
+        });
+        this.addMessage(task.id, "event", "system", "Stale agent lease reclaimed");
+      }
+      reclaimed += 1;
+    }
+    return reclaimed;
+  }
+
+  getAgentQueue(project: RawProjectRow): AgentQueuePayload {
+    this.reclaimStaleAgentLeases(project.id);
+    const active = this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE project_id = ? AND owner = 'agent' AND status IN ('working', 'handoff')
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+      )
+      .get(project.id) as unknown as RawTaskRow | undefined;
+
+    const pending = this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE project_id = ? AND status IN ('ready', 'triage') AND owner = 'none' AND merged_into IS NULL AND attempts < ?
+         ORDER BY
+           CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+           CASE status WHEN 'ready' THEN 0 ELSE 1 END,
+           number ASC
+         LIMIT 20`,
+      )
+      .all(project.id, MAX_AGENT_ATTEMPTS) as unknown as RawTaskRow[];
+
+    return {
+      paused: Boolean(project.automation_paused),
+      active: active ? toAgentQueueItem(active) : null,
+      pending: pending.map(toAgentQueueItem),
+      project: toAgentProject(project),
+    };
+  }
+
   agentCall(
     project: RawProjectRow,
     parts: string[],
@@ -682,15 +1062,57 @@ export class Store {
     const publicProject = toAgentProject(project);
 
     if (parts.length === 1 && parts[0] === "claim") {
-      const task = this.db
+      this.reclaimStaleAgentLeases(projectId);
+      if (project.automation_paused) {
+        return {
+          task: null,
+          paused: true,
+          reason: "paused",
+          project: publicProject,
+        };
+      }
+
+      const active = this.db
         .prepare(
           `SELECT * FROM tasks
-           WHERE project_id = ? AND status = 'ready' AND owner = 'none' AND merged_into IS NULL
-           ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, number
+           WHERE project_id = ? AND owner = 'agent' AND status IN ('working', 'handoff')
            LIMIT 1`,
         )
         .get(projectId) as unknown as RawTaskRow | undefined;
-      if (!task) return { task: null };
+      if (active) {
+        return {
+          task: null,
+          busy: true,
+          active_task: toTaskView(active),
+          project: publicProject,
+        };
+      }
+
+      const requestedTaskId = field(data, "task_id", 64, false);
+      const task = requestedTaskId
+        ? (this.db
+            .prepare(
+              `SELECT * FROM tasks
+               WHERE id = ? AND project_id = ? AND status IN ('ready', 'triage') AND owner = 'none' AND merged_into IS NULL AND attempts < ?
+               LIMIT 1`,
+            )
+            .get(requestedTaskId, projectId, MAX_AGENT_ATTEMPTS) as unknown as
+            | RawTaskRow
+            | undefined)
+        : (this.db
+            .prepare(
+              `SELECT * FROM tasks
+               WHERE project_id = ? AND status IN ('ready', 'triage') AND owner = 'none' AND merged_into IS NULL AND attempts < ?
+               ORDER BY
+                 CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+                 CASE status WHEN 'ready' THEN 0 ELSE 1 END,
+                 number ASC
+               LIMIT 1`,
+            )
+            .get(projectId, MAX_AGENT_ATTEMPTS) as unknown as RawTaskRow | undefined);
+
+      if (!task) return { task: null, project: publicProject };
+
       const lease = tokenUrlSafe(32);
       this.updateTaskFields(task, {
         lease,
@@ -701,6 +1123,12 @@ export class Store {
       this.addMessage(task.id, "event", "agent", "Local agent claimed task");
       const acquired = toTaskView(this.getTaskRow(task.id));
       acquired.linked_feedback = this.getMergedTasks(task.id);
+      const countRow = this.db
+        .prepare(
+          "SELECT COUNT(*) AS cnt FROM messages WHERE task_id = ? AND kind = 'comment'",
+        )
+        .get(task.id) as unknown as { cnt: number };
+      acquired.message_count = countRow.cnt;
       return { task: acquired, lease, project: publicProject };
     }
 
@@ -721,41 +1149,224 @@ export class Store {
       this.db
         .prepare("UPDATE tasks SET last_seen = ? WHERE id = ?")
         .run(nowIso(), taskId);
-    } else {
-      let nextStatus: TaskStatus;
-      let nextOwner: "none" | "human";
-      let fallback: string;
-      if (operation === "handoff" && task.status === "handoff") {
-        nextStatus = "working";
-        nextOwner = "human";
-        fallback = "Agent handed over task";
-      } else if (operation === "finish" && task.status === "working") {
-        this.checkVersion(data, task, true);
-        nextStatus = "review";
-        nextOwner = "none";
-        fallback = "Agent submitted task for review";
-      } else if (operation === "fail" && task.status === "working") {
-        nextStatus = "waiting";
-        nextOwner = "none";
-        fallback = "Agent needs assistance";
-      } else {
+      return { task: toTaskView(this.getTaskRow(taskId)) };
+    }
+
+    if (operation === "comment") {
+      const body = field(data, "body", 24000);
+      const message = this.addMessage(taskId, "comment", "agent", body);
+      this.db
+        .prepare("UPDATE tasks SET last_seen = ? WHERE id = ?")
+        .run(nowIso(), taskId);
+      return { message, task: toTaskView(this.getTaskRow(taskId)) };
+    }
+
+    if (operation === "triage") {
+      if (task.status !== "working") {
         throw new ApiError(409, "Agent must honor the current task state");
       }
+      const changes: Record<string, string | number | null> = {
+        triaged_by: "agent",
+        last_seen: nowIso(),
+      };
+      if ("title" in data && data.title !== undefined) {
+        const nextTitle = field(data, "title", 180, false);
+        if (nextTitle) changes.title = nextTitle;
+      }
+      if ("requirements" in data && data.requirements !== undefined) {
+        changes.requirements = field(data, "requirements", 24000, false);
+      }
+      if ("priority" in data && data.priority !== undefined) {
+        const nextPriority = field(data, "priority", 10) as TaskPriority;
+        if (!PRIORITIES.has(nextPriority)) {
+          throw new ApiError(400, "Unknown priority");
+        }
+        changes.priority = nextPriority;
+      }
+      this.updateTaskFields(task, changes);
+      this.addMessage(taskId, "event", "agent", "Agent triaged task");
+      return { task: toTaskView(this.getTaskRow(taskId)) };
+    }
+
+    if (operation === "complete") {
+      if (task.status !== "working") {
+        throw new ApiError(409, "Agent must honor the current task state");
+      }
+      const summary =
+        "summary" in data && data.summary !== undefined
+          ? field(data, "summary", 24000, false)
+          : field(data, "body", 24000, false);
+      const deliveryRef =
+        "delivery_ref" in data && data.delivery_ref !== undefined
+          ? field(data, "delivery_ref", 500, false)
+          : undefined;
+      const requirements =
+        "requirements" in data && data.requirements !== undefined
+          ? field(data, "requirements", 24000, false)
+          : undefined;
+
+      const deliveryMode = normalizeDeliveryMode(project.delivery_mode);
+      const reviewOnly = deliveryMode === "review_only" && data.force_done !== true;
+      const nextStatus: TaskStatus = reviewOnly ? "review" : "done";
+      const nextResolution: TaskResolution = reviewOnly ? null : "shipped";
+
+      const changes: Record<string, string | number | null> = {
+        status: nextStatus,
+        resolution: nextResolution,
+        owner: "none",
+        lease: null,
+        last_seen: nowIso(),
+      };
+      if (deliveryRef !== undefined) {
+        changes.delivery_ref = deliveryRef;
+      }
+      if (requirements !== undefined) {
+        changes.requirements = requirements;
+      }
+      this.updateTaskFields(task, changes);
+      if (summary) {
+        this.addMessage(taskId, "comment", "agent", summary);
+      }
+      this.addMessage(
+        taskId,
+        "event",
+        "agent",
+        reviewOnly
+          ? "Agent submitted task for review"
+          : "Agent shipped and completed task",
+      );
+      return { task: toTaskView(this.getTaskRow(taskId)) };
+    }
+
+    if (operation === "dismiss") {
+      if (task.status !== "working") {
+        throw new ApiError(409, "Agent must honor the current task state");
+      }
+      const reason =
+        "reason" in data && data.reason !== undefined
+          ? field(data, "reason", 12000, false)
+          : field(data, "body", 12000, false);
+      this.updateTaskFields(task, {
+        status: "done",
+        owner: "none",
+        lease: null,
+        resolution: "dismissed",
+        triaged_by: "agent",
+        last_seen: nowIso(),
+      });
+      this.addMessage(
+        taskId,
+        "comment",
+        "agent",
+        reason || "Dismissed as non-actionable feedback.",
+      );
+      this.addMessage(taskId, "event", "agent", "Agent dismissed task");
+      return { task: toTaskView(this.getTaskRow(taskId)) };
+    }
+
+    if (operation === "merge") {
+      if (task.status !== "working") {
+        throw new ApiError(409, "Agent must honor the current task state");
+      }
+      const targetId = field(data, "target_id", 64);
+      const target = this.getTaskRow(targetId);
+      if (
+        target.project_id !== task.project_id ||
+        targetId === task.id ||
+        target.merged_into ||
+        target.status === "done"
+      ) {
+        throw new ApiError(409, "Select an open, unmerged task in this project");
+      }
+      this.db
+        .prepare("UPDATE tasks SET merged_into = ? WHERE merged_into = ?")
+        .run(targetId, task.id);
+      this.updateTaskFields(task, {
+        merged_into: targetId,
+        status: "done",
+        owner: "none",
+        lease: null,
+        resolution: "merged",
+        triaged_by: "agent",
+        last_seen: nowIso(),
+      });
+      this.addMessage(task.id, "event", "agent", `Merged into #${target.number}`);
+      this.updateTaskFields(target, {});
+      this.addMessage(
+        targetId,
+        "event",
+        "agent",
+        `Linked feedback #${task.number}: ${task.title}`,
+      );
+      return { task: toTaskView(this.getTaskRow(task.id)) };
+    }
+
+    if (operation === "handoff" && task.status === "handoff") {
       const body = field(data, "body", 24000, false);
       this.updateTaskFields(task, {
         lease: null,
-        status: nextStatus,
-        owner: nextOwner,
+        status: "working",
+        owner: "human",
         last_seen: nowIso(),
       });
       this.addMessage(
         taskId,
         "event",
         "agent",
-        body ? `${fallback}\n${body}` : fallback,
+        body ? `Agent handed over task\n${body}` : "Agent handed over task",
       );
+      return { task: toTaskView(this.getTaskRow(taskId)) };
     }
 
-    return { task: toTaskView(this.getTaskRow(taskId)) };
+    if (operation === "finish" && task.status === "working") {
+      this.checkVersion(data, task, true);
+      const body = field(data, "body", 24000, false);
+      const completeNow = data.complete === true;
+      const nextStatus: TaskStatus = completeNow ? "done" : "review";
+      const nextResolution: TaskResolution = completeNow ? "shipped" : null;
+      const fallback = completeNow
+        ? "Agent shipped and completed task"
+        : "Agent submitted task for review";
+      this.updateTaskFields(task, {
+        lease: null,
+        status: nextStatus,
+        owner: "none",
+        resolution: nextResolution,
+        last_seen: nowIso(),
+      });
+      if (completeNow && body) {
+        this.addMessage(taskId, "comment", "agent", body);
+        this.addMessage(taskId, "event", "agent", fallback);
+      } else {
+        this.addMessage(
+          taskId,
+          "event",
+          "agent",
+          body ? `${fallback}\n${body}` : fallback,
+        );
+      }
+      return { task: toTaskView(this.getTaskRow(taskId)) };
+    }
+
+    if (operation === "fail" && task.status === "working") {
+      const body = field(data, "body", 24000, false);
+      const nextAttempts = (task.attempts ?? 0) + 1;
+      const retryable =
+        data.retryable === true && nextAttempts < MAX_AGENT_ATTEMPTS;
+      this.updateTaskFields(task, {
+        lease: null,
+        status: retryable ? "ready" : "waiting",
+        owner: "none",
+        attempts: nextAttempts,
+        last_seen: nowIso(),
+      });
+      if (body) {
+        this.addMessage(taskId, "comment", "agent", body);
+      }
+      this.addMessage(taskId, "event", "agent", "Agent needs assistance");
+      return { task: toTaskView(this.getTaskRow(taskId)) };
+    }
+
+    throw new ApiError(409, "Agent must honor the current task state");
   }
 }

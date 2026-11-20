@@ -1,4 +1,29 @@
-import type { TaskOwner, TaskPriority, TaskSource, TaskStatus } from "./types.ts";
+import type {
+  DeliveryMode,
+  TaskOwner,
+  TaskPriority,
+  TaskResolution,
+  TaskSource,
+  TaskStatus,
+} from "./types.ts";
+
+export const DELIVERY_MODE_LABELS: Record<DeliveryMode, string> = {
+  direct_push: "直推部署",
+  pr_automerge: "PR 自动合流",
+  review_only: "仅提交验收",
+};
+
+export const DELIVERY_MODE_DESCRIPTIONS: Record<DeliveryMode, string> = {
+  direct_push: "验证通过后直接 commit 并 push 到工作分支触发自动部署，立即闭环。",
+  pr_automerge: "切独立分支提交并创建 PR 开启 auto-merge，CI 通过后自动合并闭环。",
+  review_only: "在独立分支完成改动并汇报，流转至待验收，等待人工检查。",
+};
+
+export const RESOLUTION_LABELS: Record<Exclude<TaskResolution, null>, string> = {
+  shipped: "已自动交付",
+  dismissed: "已过滤归档",
+  merged: "已合并去重",
+};
 
 export const STATUS_LABELS: Record<TaskStatus, string> = {
   triage: "待整理",
@@ -104,6 +129,15 @@ const EVENT_TRANSLATIONS: Record<string, string> = {
   "Local agent claimed task": "Local agent 已领取任务",
   "Agent handed over task": "Agent 已完成交接",
   "Agent submitted task for review": "Agent 已提交验收",
+  "Agent shipped and completed task": "Agent 已验证交付并自动闭环",
+  "Agent dismissed task": "Agent 研判为无效/已解决并归档",
+  "Server AI pre-screened as noise and archived": "服务端 AI 预筛判定为噪音并自动归档",
+  "Server AI pre-screened and promoted to ready": "服务端 AI 预筛通过，自动进入队列",
+  "Stale agent lease reclaimed": "超时 Agent 租约已自动回收",
+  "Stale agent lease reached max attempts": "多次超时失败，已暂停自动重试待人工查看",
+  "Reopened by operator comment": "收到新评论，已自动重新激活进入队列",
+  "Reopened for automation": "已重新放回自动执行队列",
+  "Agent triaged task": "Agent 已整理任务要求与优先级",
   "Agent needs assistance": "Agent 需要补充信息",
   "Task created": "任务已创建",
 };

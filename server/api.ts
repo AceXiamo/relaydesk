@@ -7,6 +7,8 @@ import {
   toAgentProject,
   toProjectView,
   toTaskView,
+  type RawProjectRow,
+  type RawTaskRow,
 } from "./store.ts";
 import {
   WalletAuth,
@@ -34,8 +36,43 @@ import {
   toAiConfigStatus,
   validateAiBaseUrl,
 } from "./ai-config.ts";
-import { intakeReply, operatorReply, testAiConnection } from "./assistant.ts";
-import type { AuthMode, AuthStatusPayload, GithubOwnerInfo } from "../app/lib/types.ts";
+import {
+  intakeReply,
+  operatorReply,
+  prescreenFeedback,
+  testAiConnection,
+} from "./assistant.ts";
+import {
+  deleteStoredR2Config,
+  getEffectiveR2Config,
+  isR2ConfigComplete,
+  readStoredR2Config,
+  saveStoredR2Config,
+  toR2ConfigStatus,
+  validateR2AccountId,
+  validateR2Bucket,
+  validateR2Endpoint,
+  validateR2PublicUrl,
+} from "./r2-config.ts";
+import {
+  MAX_UPLOAD_BYTES,
+  parseDataUrlImage,
+  testR2Connection,
+  uploadProjectImage,
+} from "./r2.ts";
+import { getProjectReposStatus, syncProjectRepos } from "./repo-workspace.ts";
+import {
+  runWidgetAgentStream,
+  type WidgetChatMessage,
+  type WidgetPageContext,
+  type WidgetStreamEvent,
+} from "./widget-agent.ts";
+import type {
+  AuthMode,
+  AuthStatusPayload,
+  GithubOwnerInfo,
+  WidgetConfigPayload,
+} from "../app/lib/types.ts";
 
 export interface ApiContextOptions {
   store: Store;
@@ -51,6 +88,7 @@ export class ApiRouter {
   readonly bindHost: string;
   private traffic = new Map<string, number[]>();
   private assistantInFlight = 0;
+  private prescreenInFlight = 0;
   private readonly maxAssistantSlots = 4;
 
   constructor(options: ApiContextOptions) {
@@ -170,7 +208,10 @@ export class ApiRouter {
     meta.corsOrigin = origin;
   }
 
-  private async readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  private async readJson(
+    req: IncomingMessage,
+    maxBytes = 160_000,
+  ): Promise<Record<string, unknown>> {
     const contentType = (req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
     if (contentType !== "application/json") {
       throw new ApiError(415, "Send application/json");
@@ -178,7 +219,7 @@ export class ApiRouter {
     const contentLengthHeader = req.headers["content-length"];
     if (contentLengthHeader) {
       const declared = Number(contentLengthHeader);
-      if (Number.isNaN(declared) || declared < 0 || declared > 160_000) {
+      if (Number.isNaN(declared) || declared < 0 || declared > maxBytes) {
         throw new ApiError(413, "Request too large");
       }
     }
@@ -187,7 +228,7 @@ export class ApiRouter {
     for await (const chunk of req) {
       const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
       total += buf.length;
-      if (total > 160_000) {
+      if (total > maxBytes) {
         throw new ApiError(413, "Request too large");
       }
       chunks.push(buf);
@@ -203,6 +244,27 @@ export class ApiRouter {
       throw new ApiError(400, "Expected a JSON object");
     }
     return parsed as Record<string, unknown>;
+  }
+
+  private async readBinary(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+    const contentLengthHeader = req.headers["content-length"];
+    if (contentLengthHeader) {
+      const declared = Number(contentLengthHeader);
+      if (Number.isNaN(declared) || declared < 0 || declared > maxBytes) {
+        throw new ApiError(413, "文件体积超出限制（最大 5 MB）");
+      }
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of req) {
+      const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      total += buf.length;
+      if (total > maxBytes) {
+        throw new ApiError(413, "文件体积超出限制（最大 5 MB）");
+      }
+      chunks.push(buf);
+    }
+    return Buffer.concat(chunks);
   }
 
   private sendJson(
@@ -236,7 +298,7 @@ export class ApiRouter {
     if (meta.corsOrigin) {
       res.setHeader("Access-Control-Allow-Origin", meta.corsOrigin);
       res.setHeader("Vary", "Origin");
-      res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
     }
     if (req.method === "HEAD" || body.length === 0) {
@@ -280,10 +342,20 @@ export class ApiRouter {
         return;
       }
 
+      if (parts[0] === "r2") {
+        const result = await this.handleR2(req, method, parts.slice(1), meta);
+        this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
       const isPublicPath =
         parts.length === 3 &&
         parts[0] === "projects" &&
-        (parts[2] === "intake" || parts[2] === "clarify");
+        (parts[2] === "intake" ||
+          parts[2] === "clarify" ||
+          parts[2] === "uploads" ||
+          parts[2] === "chat" ||
+          parts[2] === "widget-config");
       const isAgentPath =
         parts.length >= 4 && parts[0] === "projects" && parts[2] === "agent";
 
@@ -300,8 +372,61 @@ export class ApiRouter {
         this.checkOperator(req, meta);
       }
 
-      const isWrite = method === "POST" || method === "PATCH";
-      const data = isWrite ? await this.readJson(req) : {};
+      // Async operator repo mirror endpoints
+      if (
+        parts.length === 4 &&
+        parts[0] === "projects" &&
+        parts[2] === "repos" &&
+        (parts[3] === "status" || parts[3] === "sync")
+      ) {
+        const result = await this.handleProjectRepos(method, parts[1], parts[3]);
+        this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
+      // Public widget bootstrap config
+      if (
+        method === "GET" &&
+        parts.length === 3 &&
+        parts[0] === "projects" &&
+        parts[2] === "widget-config"
+      ) {
+        const result = this.handleWidgetConfig(req, parts[1], meta);
+        this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
+      // Public widget screenshot / image upload to R2
+      if (
+        method === "POST" &&
+        parts.length === 3 &&
+        parts[0] === "projects" &&
+        parts[2] === "uploads"
+      ) {
+        const result = await this.handleWidgetUpload(req, parts[1], meta);
+        this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
+      // Public widget streaming Agent chat (SSE)
+      if (
+        method === "POST" &&
+        parts.length === 3 &&
+        parts[0] === "projects" &&
+        parts[2] === "chat"
+      ) {
+        await this.handleWidgetChatStream(req, res, parts[1], meta);
+        return;
+      }
+
+      const isMutation = method === "POST" || method === "PATCH";
+      const isAgentQueueGet =
+        method === "GET" &&
+        isAgentPath &&
+        parts.length === 4 &&
+        parts[3] === "queue";
+      const isWrite = isMutation || isAgentQueueGet;
+      const data = isMutation ? await this.readJson(req) : {};
 
       if (
         method === "POST" &&
@@ -314,9 +439,13 @@ export class ApiRouter {
         return;
       }
 
+      const postCommit: Array<() => void> = [];
       const result = this.store.transaction(isWrite, () =>
-        this.handleStoreApi(req, method, parts, data, meta),
+        this.handleStoreApi(req, method, parts, data, meta, postCommit),
       );
+      for (const taskFn of postCommit) {
+        taskFn();
+      }
       this.sendJson(req, res, 200, result, meta);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -701,6 +830,262 @@ export class ApiRouter {
     throw new ApiError(404, "Unknown AI settings endpoint");
   }
 
+  private async handleR2(
+    req: IncomingMessage,
+    method: string,
+    subparts: string[],
+    meta: { adminChallenge?: boolean },
+  ): Promise<unknown> {
+    this.checkOperator(req, meta);
+    if (subparts.length === 0 && method === "GET") {
+      return toR2ConfigStatus(getEffectiveR2Config(this.store.dbPath));
+    }
+    if (method !== "POST") {
+      throw new ApiError(405, "Method not allowed");
+    }
+    const data = await this.readJson(req);
+
+    if (subparts.length === 0) {
+      const endpoint =
+        typeof data.endpoint === "string" && data.endpoint.trim()
+          ? validateR2Endpoint(data.endpoint)
+          : "";
+      const accountId = endpoint
+        ? typeof data.account_id === "string"
+          ? data.account_id.trim().slice(0, 128)
+          : ""
+        : validateR2AccountId(field(data, "account_id", 128));
+      const bucket = validateR2Bucket(field(data, "bucket", 63));
+      const publicUrl = validateR2PublicUrl(field(data, "public_url", 512));
+      const rawAccessKey =
+        typeof data.access_key_id === "string" ? data.access_key_id.trim() : "";
+      const rawSecretKey =
+        typeof data.secret_access_key === "string" ? data.secret_access_key.trim() : "";
+      if (rawAccessKey.length > 256 || rawSecretKey.length > 512) {
+        throw new ApiError(400, "R2 凭据长度超出限制");
+      }
+      const existing = readStoredR2Config(this.store.dbPath);
+      const accessKeyId = rawAccessKey || existing?.access_key_id || "";
+      const secretAccessKey = rawSecretKey || existing?.secret_access_key || "";
+      if (!accessKeyId || !secretAccessKey) {
+        throw new ApiError(400, "请填写 R2 Access Key ID 和 Secret Access Key");
+      }
+      saveStoredR2Config(this.store.dbPath, {
+        account_id: accountId,
+        bucket,
+        access_key_id: accessKeyId,
+        secret_access_key: secretAccessKey,
+        public_url: publicUrl,
+        endpoint,
+      });
+      return toR2ConfigStatus(getEffectiveR2Config(this.store.dbPath));
+    }
+
+    if (subparts.length === 1 && subparts[0] === "disconnect") {
+      deleteStoredR2Config(this.store.dbPath);
+      return toR2ConfigStatus(getEffectiveR2Config(this.store.dbPath));
+    }
+
+    if (subparts.length === 1 && subparts[0] === "test") {
+      return await testR2Connection(this.store.dbPath, {
+        account_id: typeof data.account_id === "string" ? data.account_id.trim() : undefined,
+        bucket: typeof data.bucket === "string" ? data.bucket.trim() : undefined,
+        public_url: typeof data.public_url === "string" ? data.public_url.trim() : undefined,
+        access_key_id:
+          typeof data.access_key_id === "string" ? data.access_key_id.trim() : undefined,
+        secret_access_key:
+          typeof data.secret_access_key === "string" ? data.secret_access_key.trim() : undefined,
+        endpoint: typeof data.endpoint === "string" ? data.endpoint.trim() : undefined,
+      });
+    }
+
+    throw new ApiError(404, "Unknown R2 settings endpoint");
+  }
+
+  private async handleProjectRepos(
+    method: string,
+    projectId: string,
+    action: string,
+  ): Promise<unknown> {
+    const projectInfo = this.store.transaction(false, () =>
+      toAgentProject(this.store.getProjectRow(projectId)),
+    );
+    if (action === "status" && method === "GET") {
+      return getProjectReposStatus(this.store.dbPath, projectInfo);
+    }
+    if (action === "sync" && method === "POST") {
+      return await syncProjectRepos(this.store.dbPath, projectInfo);
+    }
+    throw new ApiError(405, "Method not allowed");
+  }
+
+  private handleWidgetConfig(
+    req: IncomingMessage,
+    projectId: string,
+    meta: { corsOrigin?: string },
+  ): WidgetConfigPayload {
+    const project = this.store.transaction(false, () => {
+      const row = this.store.getProjectRow(projectId);
+      this.checkWidgetOrigin(req, row.allowed_origins, meta);
+      this.checkBearer(req, row.intake_key);
+      return toAgentProject(row);
+    });
+    const aiCfg = getEffectiveAiConfig(this.store.dbPath);
+    const r2Cfg = getEffectiveR2Config(this.store.dbPath);
+    const aiEnabled = Boolean(aiCfg.intake_enabled && aiCfg.base_url && aiCfg.model);
+    return {
+      project_id: project.id,
+      project_name: project.name,
+      ai_enabled: aiEnabled,
+      code_context_enabled: Boolean(
+        aiEnabled && project.widget_code_context && project.repos.length > 0,
+      ),
+      upload_enabled: isR2ConfigComplete(r2Cfg),
+      max_upload_bytes: MAX_UPLOAD_BYTES,
+    };
+  }
+
+  private async handleWidgetUpload(
+    req: IncomingMessage,
+    projectId: string,
+    meta: { corsOrigin?: string },
+  ): Promise<unknown> {
+    this.store.transaction(false, () => {
+      const row = this.store.getProjectRow(projectId);
+      this.checkWidgetOrigin(req, row.allowed_origins, meta);
+      this.checkBearer(req, row.intake_key);
+      this.rateLimit(`${row.id}:upload`, 30);
+    });
+
+    const contentType = (req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+    if (contentType === "application/json") {
+      const data = await this.readJson(req, 7_600_000);
+      const dataUrl = field(data, "data_url", 7_400_000);
+      const { buffer, mime } = parseDataUrlImage(dataUrl);
+      return await uploadProjectImage(this.store.dbPath, projectId, buffer, mime);
+    }
+    if (contentType.startsWith("image/")) {
+      const buffer = await this.readBinary(req, MAX_UPLOAD_BYTES);
+      return await uploadProjectImage(this.store.dbPath, projectId, buffer, contentType);
+    }
+    throw new ApiError(415, "Send image/* binary or application/json with data_url");
+  }
+
+  private async handleWidgetChatStream(
+    req: IncomingMessage,
+    res: ServerResponse,
+    projectId: string,
+    meta: { corsOrigin?: string },
+  ): Promise<void> {
+    const data = await this.readJson(req, 160_000);
+    const project = this.store.transaction(false, () => {
+      const row = this.store.getProjectRow(projectId);
+      this.checkWidgetOrigin(req, row.allowed_origins, meta);
+      this.checkBearer(req, row.intake_key);
+      this.rateLimit(`${row.id}:chat`, 24);
+      return toAgentProject(row);
+    });
+
+    const rawMessages = data.messages;
+    if (!Array.isArray(rawMessages) || rawMessages.length === 0 || rawMessages.length > 30) {
+      throw new ApiError(400, "messages must be a non-empty array (max 30 items)");
+    }
+
+    const messages: WidgetChatMessage[] = [];
+    for (const item of rawMessages) {
+      if (!item || typeof item !== "object") continue;
+      const obj = item as Record<string, unknown>;
+      const role = obj.role === "assistant" ? "assistant" : obj.role === "user" ? "user" : null;
+      if (!role) continue;
+      const text = typeof obj.text === "string" ? obj.text.trim().slice(0, 6000) : "";
+      const attachments: Array<{ url: string; name?: string }> = [];
+      if (Array.isArray(obj.attachments)) {
+        for (const att of obj.attachments.slice(0, 4)) {
+          if (typeof att === "string" && att.trim()) {
+            attachments.push({ url: att.trim().slice(0, 2000) });
+          } else if (att && typeof att === "object") {
+            const a = att as Record<string, unknown>;
+            if (typeof a.url === "string" && a.url.trim()) {
+              attachments.push({
+                url: a.url.trim().slice(0, 2000),
+                ...(typeof a.name === "string" ? { name: a.name.trim().slice(0, 120) } : {}),
+              });
+            }
+          }
+        }
+      }
+      if (!text && attachments.length === 0) continue;
+      messages.push({ role, text, ...(attachments.length ? { attachments } : {}) });
+    }
+    if (messages.length === 0 || !messages.some((m) => m.role === "user")) {
+      throw new ApiError(400, "请输入有效的对话内容");
+    }
+
+    let page: WidgetPageContext | undefined;
+    if (data.page && typeof data.page === "object") {
+      const p = data.page as Record<string, unknown>;
+      page = {
+        url: typeof p.url === "string" ? p.url.slice(0, 1000) : undefined,
+        title: typeof p.title === "string" ? p.title.slice(0, 300) : undefined,
+        viewport: typeof p.viewport === "string" ? p.viewport.slice(0, 60) : undefined,
+        user_agent: typeof p.user_agent === "string" ? p.user_agent.slice(0, 300) : undefined,
+      };
+    }
+
+    if (this.assistantInFlight >= this.maxAssistantSlots) {
+      throw new ApiError(429, "AI 助手当前较忙，请稍后重试。");
+    }
+    this.assistantInFlight += 1;
+
+    const abortController = new AbortController();
+    req.on("close", () => {
+      if (!res.writableEnded) {
+        abortController.abort();
+      }
+    });
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    if (meta.corsOrigin) {
+      res.setHeader("Access-Control-Allow-Origin", meta.corsOrigin);
+      res.setHeader("Vary", "Origin");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    }
+    res.flushHeaders?.();
+
+    const writeEvent = (event: WidgetStreamEvent) => {
+      if (res.writableEnded || res.destroyed) return;
+      res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    };
+
+    try {
+      await runWidgetAgentStream({
+        dbPath: this.store.dbPath,
+        project,
+        messages,
+        page,
+        signal: abortController.signal,
+        onEvent: writeEvent,
+      });
+    } catch (err) {
+      writeEvent({
+        type: "error",
+        error: err instanceof Error ? err.message.slice(0, 200) : "对话处理异常",
+      });
+    } finally {
+      this.assistantInFlight = Math.max(0, this.assistantInFlight - 1);
+      if (!res.writableEnded) {
+        res.end();
+      }
+    }
+  }
+
   private async handleChat(
     req: IncomingMessage,
     parts: string[],
@@ -755,12 +1140,37 @@ export class ApiRouter {
     }
   }
 
+  private schedulePrescreen(project: RawProjectRow, task: RawTaskRow): void {
+    if (project.automation_paused) return;
+    if (task.merged_into || task.status !== "triage" || task.owner !== "none") return;
+    if (this.prescreenInFlight >= 4) return;
+
+    const projectInfo = toAgentProject(project);
+    const taskView = toTaskView(task);
+    this.prescreenInFlight += 1;
+
+    void prescreenFeedback(this.store.dbPath, projectInfo, taskView)
+      .then((result) => {
+        if (!result) return;
+        this.store.transaction(true, () => {
+          this.store.applyServerPrescreen(task.id, result);
+        });
+      })
+      .catch(() => {
+        // Fail open so intake never fails and background errors never leak unhandled rejections.
+      })
+      .finally(() => {
+        this.prescreenInFlight = Math.max(0, this.prescreenInFlight - 1);
+      });
+  }
+
   private handleStoreApi(
     req: IncomingMessage,
     method: string,
     parts: string[],
     data: Record<string, unknown>,
     meta: { corsOrigin?: string },
+    postCommit: Array<() => void>,
   ): unknown {
     if (parts.length === 1 && parts[0] === "projects") {
       if (method === "GET") {
@@ -789,7 +1199,11 @@ export class ApiRouter {
           return { tasks: this.store.listTasks(projectId) };
         }
         if (method === "POST") {
-          return { task: toTaskView(this.store.createTask(projectId, data, "console")) };
+          const created = this.store.createTask(projectId, data, "console");
+          if (data.skip_prescreen !== true) {
+            postCommit.push(() => this.schedulePrescreen(project, created));
+          }
+          return { task: toTaskView(created) };
         }
       }
 
@@ -802,6 +1216,9 @@ export class ApiRouter {
         this.checkBearer(req, source === "bot" ? project.bot_key : project.intake_key);
         this.rateLimit(`${projectId}:intake`, 120);
         const created = this.store.createTask(projectId, data, source);
+        if (data.skip_prescreen !== true) {
+          postCommit.push(() => this.schedulePrescreen(project, created));
+        }
         return { task_id: created.id, number: created.number };
       }
 
@@ -810,6 +1227,20 @@ export class ApiRouter {
         const agentParts = parts.slice(3);
         if (method === "GET" && agentParts.length === 1 && agentParts[0] === "project") {
           return { project: toAgentProject(project) };
+        }
+        if (method === "GET" && agentParts.length === 1 && agentParts[0] === "queue") {
+          return this.store.getAgentQueue(project);
+        }
+        if (method === "GET" && agentParts.length === 2 && agentParts[1] === "thread") {
+          const taskRow = this.store.getTaskRow(agentParts[0]);
+          if (taskRow.project_id !== project.id) {
+            throw new ApiError(404, "Task not found");
+          }
+          return {
+            task_id: taskRow.id,
+            number: taskRow.number,
+            messages: this.store.getTaskMessages(taskRow.id),
+          };
         }
         if (method === "POST") {
           return this.store.agentCall(project, agentParts, data);
@@ -827,14 +1258,11 @@ export class ApiRouter {
         };
       }
       if (parts.length === 3 && parts[2] === "messages" && method === "POST") {
-        return {
-          message: this.store.addMessage(
-            taskRow.id,
-            "comment",
-            "human",
-            field(data, "body", 12000),
-          ),
-        };
+        return this.store.operatorAddComment(
+          taskRow.id,
+          field(data, "body", 12000),
+          data.reopen !== false,
+        );
       }
       if (parts.length === 3 && parts[2] === "action" && method === "POST") {
         return this.store.operatorAction(taskRow.id, data);

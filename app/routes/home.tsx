@@ -12,6 +12,7 @@ import { TaskDetailDrawer } from "~/components/TaskDetailDrawer.tsx";
 import {
   TaskQueueView,
   filterTasksForView,
+  type CockpitFilter,
   type SortMode,
 } from "~/components/TaskQueueView.tsx";
 import { Button, ToastProvider, useToast } from "~/components/ui.tsx";
@@ -67,11 +68,13 @@ function ConsoleWorkspace() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [booting, setBooting] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [automationBusy, setAutomationBusy] = useState(false);
 
   // Filters
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "">("");
   const [sourceFilter, setSourceFilter] = useState<TaskSource | "">("");
+  const [cockpitFilter, setCockpitFilter] = useState<CockpitFilter>("");
   const [sortMode, setSortMode] = useState<SortMode>("updated");
 
   // Detail Drawer & Stack
@@ -100,6 +103,9 @@ function ConsoleWorkspace() {
 
   const changeView = useCallback((next: WorkspaceView) => {
     setView(next);
+    if (next !== "queue") {
+      setCockpitFilter("");
+    }
     if (typeof window !== "undefined") {
       const targetHash = next === "queue" ? "" : `#${next}`;
       if (window.location.hash !== targetHash) {
@@ -107,6 +113,17 @@ function ConsoleWorkspace() {
       }
     }
   }, []);
+
+  const openSkillSetup = useCallback(() => {
+    changeView("settings");
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => {
+        document
+          .getElementById("relaydesk-skill-setup")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 60);
+    }
+  }, [changeView]);
 
   const toggleTheme = useCallback(() => {
     setDark((prev) => {
@@ -127,6 +144,20 @@ function ConsoleWorkspace() {
       api.listTasks(projectId),
     ]);
     setCurrentProject(project);
+    setProjects((prev) =>
+      prev.map((p) =>
+        p.id === project.id
+          ? {
+              ...p,
+              name: project.name,
+              repo: project.repo,
+              repos: project.repos,
+              automation_paused: project.automation_paused,
+              delivery_mode: project.delivery_mode,
+            }
+          : p,
+      ),
+    );
     setTasks(nextTasks);
     try {
       localStorage.setItem("relaydesk.project", project.id);
@@ -277,6 +308,56 @@ function ConsoleWorkspace() {
     [detail?.task.id, refreshTasks, toast],
   );
 
+  const handleReopenTask = useCallback(
+    async (task: TaskRecord) => {
+      try {
+        await api.taskAction(task.id, {
+          action: "reopen",
+          version: task.version,
+        });
+        toast.success("已重新放回自动执行队列");
+        await refreshTasks();
+        if (detail?.task.id === task.id) {
+          const payload = await api.getTaskDetail(task.id);
+          setDetail(payload);
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "重新入队失败");
+      }
+    },
+    [detail?.task.id, refreshTasks, toast],
+  );
+
+  const handleToggleAutomation = useCallback(
+    async (paused: boolean) => {
+      if (!currentProject || automationBusy) return;
+      setAutomationBusy(true);
+      try {
+        const { project: updated } = await api.updateProject(currentProject.id, {
+          automation_paused: paused,
+        });
+        setCurrentProject(updated);
+        setProjects((prev) =>
+          prev.map((p) =>
+            p.id === updated.id
+              ? {
+                  ...p,
+                  automation_paused: updated.automation_paused,
+                  delivery_mode: updated.delivery_mode,
+                }
+              : p,
+          ),
+        );
+        toast.success(paused ? "已暂停本项目自动执行" : "已恢复全自动迭代");
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "更新自动执行状态失败");
+      } finally {
+        setAutomationBusy(false);
+      }
+    },
+    [automationBusy, currentProject, toast],
+  );
+
   const visibleTasks = useMemo(
     () =>
       filterTasksForView(
@@ -286,8 +367,9 @@ function ConsoleWorkspace() {
         statusFilter,
         sourceFilter,
         sortMode,
+        cockpitFilter,
       ),
-    [tasks, view, search, statusFilter, sourceFilter, sortMode],
+    [tasks, view, search, statusFilter, sourceFilter, sortMode, cockpitFilter],
   );
 
   // Global keyboard shortcuts
@@ -419,6 +501,7 @@ function ConsoleWorkspace() {
           setSearch("");
           setStatusFilter("");
           setSourceFilter("");
+          setCockpitFilter("");
           void loadProject(id);
         }}
         onSelectView={changeView}
@@ -471,7 +554,14 @@ function ConsoleWorkspace() {
               setProjects((prev) =>
                 prev.map((p) =>
                   p.id === updated.id
-                    ? { ...p, name: updated.name, repo: updated.repo, repos: updated.repos }
+                    ? {
+                        ...p,
+                        name: updated.name,
+                        repo: updated.repo,
+                        repos: updated.repos,
+                        automation_paused: updated.automation_paused,
+                        delivery_mode: updated.delivery_mode,
+                      }
                     : p,
                 ),
               );
@@ -487,25 +577,32 @@ function ConsoleWorkspace() {
             search={search}
             statusFilter={statusFilter}
             sourceFilter={sourceFilter}
+            cockpitFilter={cockpitFilter}
             sortMode={sortMode}
             loading={refreshing}
+            automationBusy={automationBusy}
             onSearchChange={setSearch}
             onStatusFilterChange={setStatusFilter}
             onSourceFilterChange={setSourceFilter}
+            onCockpitFilterChange={setCockpitFilter}
             onSortModeChange={setSortMode}
             onClearFilters={() => {
               setSearch("");
               setStatusFilter("");
               setSourceFilter("");
+              setCockpitFilter("");
             }}
             onSelectTask={(id) => void openTaskDetail(id, false)}
             onQuickAction={handleQuickAction}
+            onReopenTask={handleReopenTask}
+            onToggleAutomation={handleToggleAutomation}
             onNewFeedback={() =>
               currentProject ? setFeedbackModalOpen(true) : setProjectModalOpen(true)
             }
             onNewProject={() => setProjectModalOpen(true)}
             onRefresh={() => void refreshTasks()}
             onNavigateView={changeView}
+            onOpenSkillSetup={openSkillSetup}
             searchInputRef={searchInputRef}
           />
         )}
@@ -513,6 +610,7 @@ function ConsoleWorkspace() {
 
       {/* Task Detail Slide-Over Drawer */}
       <TaskDetailDrawer
+        project={currentProject}
         detail={detail}
         loading={detailLoading}
         allTasks={tasks}
@@ -551,6 +649,9 @@ function ConsoleWorkspace() {
               name: proj.name,
               repo: proj.repo,
               repos: proj.repos,
+              automation_paused: proj.automation_paused,
+              delivery_mode: proj.delivery_mode,
+              widget_code_context: proj.widget_code_context,
               created_at: proj.created_at,
             },
           ]);

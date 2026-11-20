@@ -1,11 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon.tsx";
+import { MarkdownContent, hasMarkdownSyntax } from "./MarkdownContent.tsx";
 import {
   Button,
   CopyButton,
+  DeliveryModeBadge,
+  Kbd,
+  LivePulseDot,
   Modal,
   OwnerChip,
   PriorityBadge,
+  ResolutionBadge,
   SourceBadge,
   StatusBadge,
   useToast,
@@ -24,7 +29,9 @@ import {
 } from "~/lib/format.ts";
 import type {
   AiConfigStatus,
+  ProjectDetail,
   TaskDetailPayload,
+  TaskMessage,
   TaskPriority,
   TaskRecord,
   TaskStatus,
@@ -35,6 +42,7 @@ interface TaskDetailDrawerProps {
   loading: boolean;
   allTasks: TaskRecord[];
   aiConfig: AiConfigStatus | null;
+  project?: ProjectDetail | null;
   canGoBack: boolean;
   onGoBack: () => void;
   onClose: () => void;
@@ -43,11 +51,190 @@ interface TaskDetailDrawerProps {
   onOpenAiSettings: () => void;
 }
 
+type TimelineSegment =
+  | { type: "comment"; message: TaskMessage }
+  | {
+      type: "event_single";
+      message: TaskMessage;
+      header: string;
+      detail: string | null;
+    }
+  | { type: "event_group"; id: string; messages: TaskMessage[] };
+
+function splitEventBody(rawBody: string): {
+  header: string;
+  detail: string | null;
+} {
+  const formatted = formatEventBody(rawBody);
+  const idx = formatted.indexOf("\n");
+  if (idx === -1) {
+    return { header: formatted, detail: null };
+  }
+  const header = formatted.slice(0, idx).trim();
+  const rest = formatted.slice(idx + 1).trim();
+  return {
+    header: header || formatted,
+    detail: rest || null,
+  };
+}
+
+function eventDotColor(rawBody: string): string {
+  const lower = rawBody.toLowerCase();
+  if (
+    lower.includes("shipped") ||
+    lower.includes("promoted to ready") ||
+    lower.includes("submitted task for review")
+  ) {
+    return "bg-emerald-500 dark:bg-emerald-400";
+  }
+  if (
+    lower.includes("claimed") ||
+    lower.includes("handoff") ||
+    lower.includes("handed over")
+  ) {
+    return "bg-amber-500 dark:bg-amber-400";
+  }
+  if (
+    lower.includes("stale") ||
+    lower.includes("needs assistance") ||
+    lower.includes("revoked")
+  ) {
+    return "bg-rose-500 dark:bg-rose-400";
+  }
+  if (lower.includes("reopened") || lower.includes("triaged")) {
+    return "bg-indigo-500 dark:bg-indigo-400";
+  }
+  return "bg-zinc-400 dark:bg-zinc-500";
+}
+
+function buildTimelineSegments(messages: TaskMessage[]): TimelineSegment[] {
+  const segments: TimelineSegment[] = [];
+  let pendingSingleEvents: TaskMessage[] = [];
+
+  const flushEvents = () => {
+    if (pendingSingleEvents.length === 0) return;
+    if (pendingSingleEvents.length === 1) {
+      const only = pendingSingleEvents[0]!;
+      const { header } = splitEventBody(only.body);
+      segments.push({
+        type: "event_single",
+        message: only,
+        header,
+        detail: null,
+      });
+    } else {
+      segments.push({
+        type: "event_group",
+        id: `trace-${pendingSingleEvents[0]!.id}-${pendingSingleEvents[pendingSingleEvents.length - 1]!.id}`,
+        messages: pendingSingleEvents,
+      });
+    }
+    pendingSingleEvents = [];
+  };
+
+  for (const m of messages) {
+    if (m.kind === "event") {
+      const { header, detail } = splitEventBody(m.body);
+      if (detail) {
+        flushEvents();
+        segments.push({
+          type: "event_single",
+          message: m,
+          header,
+          detail,
+        });
+      } else {
+        pendingSingleEvents.push(m);
+      }
+    } else {
+      flushEvents();
+      segments.push({ type: "comment", message: m });
+    }
+  }
+
+  flushEvents();
+  return segments;
+}
+
+function formatDeliveryRefLabel(ref: string): string {
+  const trimmed = ref.trim();
+  const prMatch = /\/pull\/(\d+)(?:[/?#]|$)/i.exec(trimmed);
+  if (prMatch?.[1]) {
+    return `PR #${prMatch[1]}`;
+  }
+  const commitMatch = /\/commit\/([0-9a-f]{7,40})(?:[/?#]|$)/i.exec(trimmed);
+  if (commitMatch?.[1]) {
+    return `commit ${commitMatch[1].slice(0, 7)}`;
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      const compactPath = `${parsed.host}${parsed.pathname}`.replace(/\/$/, "");
+      return compactPath.length > 36
+        ? `${compactPath.slice(0, 34)}…`
+        : compactPath;
+    } catch {
+      return trimmed.length > 36 ? `${trimmed.slice(0, 34)}…` : trimmed;
+    }
+  }
+  return trimmed.length > 32 ? `${trimmed.slice(0, 30)}…` : trimmed;
+}
+
+interface PromptSuggestion {
+  label: string;
+  text: string;
+  mode: "comment" | "assistant";
+}
+
+function getPromptSuggestions(status: TaskStatus): PromptSuggestion[] {
+  if (status === "done" || status === "review") {
+    return [
+      {
+        label: "返工调整",
+        text: "需要返工调整：\n- ",
+        mode: "comment",
+      },
+      {
+        label: "补充验收标准",
+        text: "请补充以下验收标准并重新验证：\n- [ ] ",
+        mode: "comment",
+      },
+    ];
+  }
+  if (status === "waiting") {
+    return [
+      {
+        label: "补充说明并继续",
+        text: "补充信息如下，请继续自动处理：\n",
+        mode: "comment",
+      },
+      {
+        label: "梳理当前阻塞点",
+        text: "请帮我总结当前的阻塞点以及我需要确认的关键信息。",
+        mode: "assistant",
+      },
+    ];
+  }
+  return [
+    {
+      label: "总结并起草验收标准",
+      text: "请总结这条反馈的核心诉求，并起草清晰的验收标准清单。",
+      mode: "assistant",
+    },
+    {
+      label: "判断是否为有效反馈",
+      text: "请结合项目背景判断这条反馈是否有效、是否属于重复需求，并建议优先级。",
+      mode: "assistant",
+    },
+  ];
+}
+
 export function TaskDetailDrawer({
   detail,
   loading,
   allTasks,
   aiConfig,
+  project,
   canGoBack,
   onGoBack,
   onClose,
@@ -58,21 +245,35 @@ export function TaskDetailDrawer({
   const toast = useToast();
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [editingReq, setEditingReq] = useState(false);
+  const [reqEditTab, setReqEditTab] = useState<"write" | "preview">("write");
   const [reqDraft, setReqDraft] = useState("");
   const [comment, setComment] = useState("");
+  const [autoReopen, setAutoReopen] = useState(true);
+  const [expandedTraces, setExpandedTraces] = useState<Record<string, boolean>>(
+    {},
+  );
   const [mergeOpen, setMergeOpen] = useState(false);
   const [mergeTarget, setMergeTarget] = useState("");
   const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
+
+  const commentInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const task = detail?.task ?? null;
 
   useEffect(() => {
     setEditingReq(false);
+    setReqEditTab("write");
     setReqDraft(task?.requirements ?? "");
     setComment("");
+    setAutoReopen(true);
+    setExpandedTraces({});
     setMergeOpen(false);
     setMergeTarget("");
   }, [task?.id]);
+
+  useEffect(() => {
+    setAutoReopen(true);
+  }, [task?.status]);
 
   useEffect(() => {
     if (!editingReq) {
@@ -80,7 +281,40 @@ export function TaskDetailDrawer({
     }
   }, [task?.requirements, editingReq]);
 
+  const timelineSegments = useMemo(
+    () => buildTimelineSegments(detail?.messages ?? []),
+    [detail?.messages],
+  );
+
   if (!detail && !loading) return null;
+
+  const canReopenTask = Boolean(
+    task &&
+      !task.merged_into &&
+      task.owner === "none" &&
+      (task.status === "done" ||
+        task.status === "waiting" ||
+        task.status === "review"),
+  );
+
+  const showTelemetryBanner = Boolean(
+    task &&
+      (task.resolution ||
+        task.delivery_ref ||
+        task.attempts > 0 ||
+        task.triaged_by ||
+        canReopenTask),
+  );
+
+  const isAgentWorking = Boolean(
+    task && task.owner === "agent" && task.status === "working",
+  );
+
+  const isDeliveryUrl = Boolean(
+    task?.delivery_ref && /^https?:\/\//i.test(task.delivery_ref.trim()),
+  );
+
+  const promptSuggestions = task ? getPromptSuggestions(task.status) : [];
 
   const runAction = async (
     label: string,
@@ -109,6 +343,7 @@ export function TaskDetailDrawer({
       "执行要求已保存",
     );
     setEditingReq(false);
+    setReqEditTab("write");
   };
 
   const handleSendMessage = async (askAssistant: boolean) => {
@@ -121,8 +356,16 @@ export function TaskDetailDrawer({
         await api.discussTask(task.id, text);
         toast.success("项目助手已回复");
       } else {
-        await api.addTaskMessage(task.id, text);
-        toast.success("备注已添加");
+        const res = await api.addTaskMessage(
+          task.id,
+          text,
+          canReopenTask ? { reopen: autoReopen } : undefined,
+        );
+        if (res.reopened) {
+          toast.success("已发送评论并重新推入自动队列");
+        } else {
+          toast.success("评论已发送");
+        }
       }
       setComment("");
       await onRefreshTask(task.id);
@@ -131,6 +374,16 @@ export function TaskDetailDrawer({
     } finally {
       setBusyAction(null);
     }
+  };
+
+  const handleApplySuggestion = (suggestion: PromptSuggestion) => {
+    setComment(suggestion.text);
+    window.requestAnimationFrame(() => {
+      const el = commentInputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(suggestion.text.length, suggestion.text.length);
+    });
   };
 
   const handleMerge = async (e: React.FormEvent) => {
@@ -142,6 +395,10 @@ export function TaskDetailDrawer({
       "已合并到主任务",
     );
     setMergeOpen(false);
+  };
+
+  const toggleTrace = (traceId: string) => {
+    setExpandedTraces((prev) => ({ ...prev, [traceId]: !prev[traceId] }));
   };
 
   const eligibleMergeTargets = task
@@ -169,16 +426,16 @@ export function TaskDetailDrawer({
         <aside
           role="dialog"
           aria-label="任务详情"
-          className="relative z-10 w-full max-w-[620px] h-full flex flex-col bg-[var(--surface-elevated)] border-l border-[var(--border-subtle)] shadow-2xl animate-slide-in-right"
+          className="relative z-10 w-full max-w-[640px] h-full flex flex-col bg-[var(--surface-elevated)] border-l border-[var(--border-subtle)] shadow-2xl animate-slide-in-right"
         >
           {/* Sticky Header */}
-          <div className="shrink-0 flex items-center justify-between gap-2 px-5 h-13 border-b border-[var(--border-subtle)]">
+          <div className="shrink-0 flex items-center justify-between gap-2 px-5 h-13 border-b border-[var(--border-subtle)] bg-[var(--surface-elevated)]/95 backdrop-blur-sm">
             <div className="flex items-center gap-2 min-w-0">
               {canGoBack && (
                 <button
                   type="button"
                   onClick={onGoBack}
-                  className="inline-flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] px-1.5 py-1 rounded-md hover:bg-[var(--surface-hover)] cursor-pointer"
+                  className="inline-flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] px-1.5 py-1 rounded-md hover:bg-[var(--surface-hover)] cursor-pointer transition-colors"
                 >
                   <Icon name="arrow-left" size={13} />
                   返回
@@ -196,12 +453,19 @@ export function TaskDetailDrawer({
                     size="xs"
                     variant="ghost"
                   />
+                  {project?.delivery_mode && (
+                    <DeliveryModeBadge
+                      mode={project.delivery_mode}
+                      compact
+                      className="hidden sm:inline-flex"
+                    />
+                  )}
                 </>
               )}
             </div>
             <div className="flex items-center gap-1.5">
               {task && (
-                <span className="text-[11px] text-[var(--text-muted)] hidden sm:inline">
+                <span className="text-[11px] font-mono tabular-nums text-[var(--text-muted)] hidden sm:inline">
                   更新于 {formatRelativeTime(task.updated_at)}
                 </span>
               )}
@@ -209,7 +473,7 @@ export function TaskDetailDrawer({
                 type="button"
                 onClick={onClose}
                 aria-label="关闭任务详情"
-                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer rd-focus-ring"
               >
                 <Icon name="x" size={16} />
               </button>
@@ -223,7 +487,7 @@ export function TaskDetailDrawer({
               正在加载任务详情…
             </div>
           ) : task ? (
-            <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
+            <div className="flex-1 overflow-y-auto rd-scroll px-5 py-5 space-y-5">
               {/* Title & Meta */}
               <div>
                 <h2 className="text-[18px] font-semibold tracking-tight text-[var(--text-primary)] leading-snug">
@@ -237,11 +501,129 @@ export function TaskDetailDrawer({
                 </div>
               </div>
 
+              {/* Autonomous Telemetry & Delivery Summary Strip */}
+              {showTelemetryBanner && (
+                <section
+                  className={`relative overflow-hidden rounded-xl border px-3.5 py-2.5 rd-hairline-glow transition-colors ${
+                    task.resolution === "shipped"
+                      ? "border-emerald-500/25 bg-emerald-500/[0.05] dark:bg-emerald-500/[0.07]"
+                      : task.attempts >= 3
+                        ? "border-rose-500/25 bg-rose-500/[0.05] dark:bg-rose-500/[0.07]"
+                        : "border-[var(--border-subtle)] bg-[var(--surface-card)]"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2.5">
+                    <div className="flex flex-wrap items-center gap-2 min-w-0">
+                      <ResolutionBadge
+                        resolution={task.resolution}
+                        triagedBy={task.triaged_by}
+                      />
+
+                      {task.triaged_by && !task.resolution && (
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium border border-indigo-500/20 bg-indigo-500/8 text-indigo-700 dark:text-indigo-300">
+                          <Icon name="sparkles" size={11} />
+                          <span>
+                            {task.triaged_by === "server_ai"
+                              ? "AI 预筛通过"
+                              : task.triaged_by === "local_agent"
+                                ? "Agent 已整理"
+                                : `预筛：${task.triaged_by}`}
+                          </span>
+                        </span>
+                      )}
+
+                      {task.delivery_ref && (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-elevated)] pl-2 pr-1 py-0.5 max-w-full">
+                          {isDeliveryUrl ? (
+                            <a
+                              href={task.delivery_ref.trim()}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={task.delivery_ref}
+                              className="inline-flex items-center gap-1 text-[11.5px] font-mono text-indigo-600 dark:text-indigo-400 hover:underline truncate max-w-[240px]"
+                            >
+                              <Icon name="external-link" size={11} />
+                              <span className="truncate">
+                                {formatDeliveryRefLabel(task.delivery_ref)}
+                              </span>
+                            </a>
+                          ) : (
+                            <span
+                              title={task.delivery_ref}
+                              className="inline-flex items-center gap-1 text-[11.5px] font-mono text-[var(--text-secondary)] truncate max-w-[240px]"
+                            >
+                              <Icon
+                                name="git-branch"
+                                size={11}
+                                className="text-[var(--text-muted)]"
+                              />
+                              <span className="truncate">
+                                {formatDeliveryRefLabel(task.delivery_ref)}
+                              </span>
+                            </span>
+                          )}
+                          <CopyButton
+                            value={task.delivery_ref}
+                            label=""
+                            copiedLabel=""
+                            size="xs"
+                            variant="ghost"
+                            className="h-5 px-1"
+                          />
+                        </span>
+                      )}
+
+                      {task.attempts > 0 && (
+                        <span
+                          title={`自动执行累计尝试 ${task.attempts} 次（上限 3 次）`}
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11.5px] font-mono tabular-nums font-medium border ${
+                            task.attempts >= 3
+                              ? "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25"
+                              : "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25"
+                          }`}
+                        >
+                          <Icon
+                            name={
+                              task.attempts >= 3 ? "alert-triangle" : "refresh-cw"
+                            }
+                            size={11}
+                          />
+                          <span>尝试 {task.attempts}/3</span>
+                        </span>
+                      )}
+                    </div>
+
+                    {canReopenTask && (
+                      <Button
+                        variant="secondary"
+                        size="xs"
+                        icon="refresh-cw"
+                        loading={busyAction === "reopen"}
+                        disabled={busyAction !== null}
+                        onClick={() =>
+                          void runAction(
+                            "reopen",
+                            { action: "reopen", version: task.version },
+                            "已重新推入自动执行队列",
+                          )
+                        }
+                      >
+                        重新入队返工
+                      </Button>
+                    )}
+                  </div>
+                </section>
+              )}
+
               {/* Merged banner */}
               {task.merged_into && (
                 <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl border border-indigo-500/30 bg-indigo-500/8">
                   <div className="flex items-center gap-2.5 text-[13px] text-[var(--text-primary)]">
-                    <Icon name="git-merge" size={16} className="text-indigo-500 shrink-0" />
+                    <Icon
+                      name="git-merge"
+                      size={16}
+                      className="text-indigo-500 shrink-0"
+                    />
                     <span>此反馈已并入主任务，请在主任务继续流转。</span>
                   </div>
                   <Button
@@ -254,23 +636,44 @@ export function TaskDetailDrawer({
                 </div>
               )}
 
-              {/* Workflow & Properties Bar */}
+              {/* Workflow & Human-on-the-loop Properties Bar */}
               {!task.merged_into && (
-                <section className="p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] space-y-3">
+                <section className="relative overflow-hidden p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] rd-hairline-glow space-y-3">
+                  {isAgentWorking && (
+                    <div
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-x-0 top-0 h-[2px] overflow-hidden bg-amber-500/15"
+                    >
+                      <div className="h-full w-1/2 bg-gradient-to-r from-transparent via-amber-500/80 to-transparent animate-rd-shimmer" />
+                    </div>
+                  )}
+
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-[12px] font-medium text-[var(--text-muted)]">
-                      流转与归属
+                      自动执行与人工介入
                     </span>
-                    {task.owner === "agent" && (
-                      <span className="inline-flex items-center gap-1.5 text-[11.5px] text-amber-600 dark:text-amber-400">
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                        Agent 最近同步 · {formatDateTime(task.last_seen)}
+                    {task.owner === "agent" ? (
+                      <span className="inline-flex items-center gap-1.5 text-[11.5px] font-mono tabular-nums text-amber-600 dark:text-amber-400">
+                        <LivePulseDot tone="amber" active={isAgentWorking} />
+                        <span>
+                          {task.status === "handoff"
+                            ? "等待交接"
+                            : "Agent 自动执行中"}
+                          {" · "}
+                          {formatDateTime(task.last_seen)}
+                        </span>
                       </span>
-                    )}
+                    ) : task.owner === "none" &&
+                      (task.status === "triage" || task.status === "ready") ? (
+                      <span className="inline-flex items-center gap-1.5 text-[11.5px] text-emerald-600 dark:text-emerald-400">
+                        <LivePulseDot tone="emerald" active />
+                        <span>自动队列巡检中，无需手动流转</span>
+                      </span>
+                    ) : null}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
-                    {/* Ownership CTA */}
+                    {/* Optional Human Intervention CTA */}
                     {task.owner === "agent" ? (
                       task.status === "handoff" ? (
                         <Button
@@ -309,15 +712,15 @@ export function TaskDetailDrawer({
                           void runAction(
                             "release",
                             { action: "release", version: task.version },
-                            "已释放认领",
+                            "已释放认领，交回自动队列",
                           )
                         }
                       >
-                        释放认领
+                        交回自动队列
                       </Button>
                     ) : task.status !== "done" ? (
                       <Button
-                        variant="primary"
+                        variant="secondary"
                         size="sm"
                         icon="user-check"
                         loading={busyAction === "claim"}
@@ -329,7 +732,7 @@ export function TaskDetailDrawer({
                           )
                         }
                       >
-                        我来处理
+                        人工接手
                       </Button>
                     ) : null}
 
@@ -418,8 +821,20 @@ export function TaskDetailDrawer({
                     </a>
                   )}
                 </div>
-                <div className="p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[13.5px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap break-words">
-                  {task.body || "未填写详细描述"}
+                <div className="p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] rd-hairline-glow text-[13px] leading-[1.65] text-[var(--text-primary)]">
+                  {task.body ? (
+                    hasMarkdownSyntax(task.body) ? (
+                      <MarkdownContent content={task.body} />
+                    ) : (
+                      <p className="whitespace-pre-wrap break-words m-0">
+                        {task.body}
+                      </p>
+                    )
+                  ) : (
+                    <span className="text-[var(--text-muted)]">
+                      未填写详细描述
+                    </span>
+                  )}
                 </div>
               </section>
 
@@ -435,56 +850,120 @@ export function TaskDetailDrawer({
                         variant="ghost"
                         size="xs"
                         icon="pen-line"
-                        onClick={() => setEditingReq(true)}
+                        onClick={() => {
+                          setReqEditTab("write");
+                          setEditingReq(true);
+                        }}
                       >
-                        {task.requirements ? "编辑要求" : "补充要求"}
+                        {task.requirements ? "编辑要求" : "补充约束"}
                       </Button>
                     )}
                   </div>
 
                   {editingReq ? (
-                    <form onSubmit={handleSaveReq} className="space-y-2.5">
-                      <textarea
-                        value={reqDraft}
-                        onChange={(e) => setReqDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                            e.preventDefault();
-                            void handleSaveReq(e);
-                          }
-                        }}
-                        rows={5}
-                        maxLength={24000}
-                        placeholder="写明具体改动范围、边界条件与验收标准，Local Agent 将严格按此执行…"
-                        className="w-full rounded-xl border border-indigo-500/50 bg-[var(--surface-card)] p-3 text-[13px] leading-relaxed text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                      />
-                      <div className="flex items-center justify-end gap-2">
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="xs"
-                          onClick={() => {
-                            setEditingReq(false);
-                            setReqDraft(task.requirements);
+                    <form
+                      onSubmit={handleSaveReq}
+                      className="rounded-xl border border-indigo-500/45 bg-[var(--surface-card)] overflow-hidden shadow-[var(--rd-shadow-sm)]"
+                    >
+                      <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-[var(--border-subtle)] bg-[var(--surface-subtle)]/70">
+                        <div className="inline-flex items-center gap-1 rounded-lg bg-[var(--surface-elevated)] p-0.5 border border-[var(--border-subtle)]">
+                          <button
+                            type="button"
+                            onClick={() => setReqEditTab("write")}
+                            className={`px-2 py-0.5 rounded-md text-[11.5px] font-medium transition-colors cursor-pointer ${
+                              reqEditTab === "write"
+                                ? "bg-[var(--surface-active)] text-[var(--text-primary)]"
+                                : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                            }`}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setReqEditTab("preview")}
+                            className={`px-2 py-0.5 rounded-md text-[11.5px] font-medium transition-colors cursor-pointer ${
+                              reqEditTab === "preview"
+                                ? "bg-[var(--surface-active)] text-[var(--text-primary)]"
+                                : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                            }`}
+                          >
+                            预览
+                          </button>
+                        </div>
+                        <span className="text-[11px] text-[var(--text-muted)]">
+                          支持 Markdown 与任务清单
+                        </span>
+                      </div>
+
+                      {reqEditTab === "write" ? (
+                        <textarea
+                          value={reqDraft}
+                          onChange={(e) => setReqDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (
+                              (e.metaKey || e.ctrlKey) &&
+                              e.key === "Enter" &&
+                              !e.nativeEvent.isComposing
+                            ) {
+                              e.preventDefault();
+                              void handleSaveReq(e);
+                            }
                           }}
-                        >
-                          取消
-                        </Button>
-                        <Button
-                          type="submit"
-                          variant="primary"
-                          size="xs"
-                          loading={busyAction === "requirements"}
-                        >
-                          保存要求
-                        </Button>
+                          rows={6}
+                          maxLength={24000}
+                          placeholder="写明具体改动范围、边界条件与验收标准（支持 - [ ] 清单与代码块），Local Agent 将按此执行…"
+                          className="w-full resize-y bg-transparent p-3 text-[13px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+                        />
+                      ) : (
+                        <div className="min-h-[120px] p-3.5 bg-[var(--surface-card)]">
+                          {reqDraft.trim() ? (
+                            <MarkdownContent content={reqDraft} />
+                          ) : (
+                            <p className="text-[12.5px] text-[var(--text-muted)] m-0">
+                              暂无内容可预览。
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between gap-2 px-3 py-2 border-t border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40">
+                        <span className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+                          <Kbd>⌘/Ctrl</Kbd>
+                          <span>+</span>
+                          <Kbd>Enter</Kbd>
+                          <span>保存</span>
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            onClick={() => {
+                              setEditingReq(false);
+                              setReqEditTab("write");
+                              setReqDraft(task.requirements);
+                            }}
+                          >
+                            取消
+                          </Button>
+                          <Button
+                            type="submit"
+                            variant="primary"
+                            size="xs"
+                            loading={busyAction === "requirements"}
+                          >
+                            保存要求
+                          </Button>
+                        </div>
                       </div>
                     </form>
                   ) : (
-                    <div className="p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[13px] leading-relaxed whitespace-pre-wrap break-words text-[var(--text-secondary)]">
-                      {task.requirements || (
-                        <span className="text-[var(--text-muted)]">
-                          暂无单独确认的执行要求。点击右上角「补充要求」即可编写。
+                    <div className="p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] rd-hairline-glow text-[13px] text-[var(--text-secondary)]">
+                      {task.requirements ? (
+                        <MarkdownContent content={task.requirements} />
+                      ) : (
+                        <span className="text-[var(--text-muted)] leading-relaxed block">
+                          暂未设置额外约束，Agent 将直接依据原始反馈与项目指令自主执行；如需限定范围可随时点击右上角补充。
                         </span>
                       )}
                     </div>
@@ -506,20 +985,26 @@ export function TaskDetailDrawer({
                         onClick={() => onOpenRelated(m.id)}
                         className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] hover:border-[var(--border-strong)] text-[12.5px] text-[var(--text-primary)] transition cursor-pointer"
                       >
-                        <Icon name="git-merge" size={12} className="text-indigo-500" />
+                        <Icon
+                          name="git-merge"
+                          size={12}
+                          className="text-indigo-500"
+                        />
                         <span className="font-mono text-[11.5px] text-[var(--text-muted)]">
                           {taskCode(m.number)}
                         </span>
-                        <span className="truncate max-w-[220px]">{m.title}</span>
+                        <span className="truncate max-w-[220px]">
+                          {m.title}
+                        </span>
                       </button>
                     ))}
                   </div>
                 </section>
               )}
 
-              {/* Discussion Thread & AI Assistant */}
+              {/* Discussion Thread & Activity Trace */}
               <section className="space-y-3 pt-1">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <h3 className="text-[12px] font-medium uppercase tracking-wider text-[var(--text-muted)]">
                     动态与讨论 ({detail?.messages.length ?? 0})
                   </h3>
@@ -543,117 +1028,333 @@ export function TaskDetailDrawer({
 
                 {/* Timeline */}
                 <div className="space-y-2.5">
-                  {(detail?.messages ?? []).length === 0 ? (
+                  {timelineSegments.length === 0 ? (
                     <p className="text-[13px] text-[var(--text-muted)] py-2">
-                      还没有讨论记录。
+                      还没有动态与讨论记录。
                     </p>
                   ) : (
-                    detail?.messages.map((m) => {
-                      if (m.kind === "event") {
+                    timelineSegments.map((segment) => {
+                      if (segment.type === "event_group") {
+                        const expanded = Boolean(expandedTraces[segment.id]);
+                        const firstMsg = segment.messages[0]!;
+                        const lastMsg =
+                          segment.messages[segment.messages.length - 1]!;
+                        const dotColors = segment.messages
+                          .slice(-4)
+                          .map((m) => eventDotColor(m.body));
+
                         return (
                           <div
-                            key={m.id}
-                            className="flex items-start gap-2.5 text-[12px] text-[var(--text-muted)] py-0.5"
+                            key={segment.id}
+                            className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/55 overflow-hidden transition-colors"
                           >
-                            <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[var(--border-strong)] shrink-0" />
-                            <div className="flex-1 min-w-0">
-                              <span className="font-medium text-[var(--text-secondary)]">
-                                {AUTHOR_LABELS[m.author] ?? m.author}
+                            <button
+                              type="button"
+                              aria-expanded={expanded}
+                              onClick={() => toggleTrace(segment.id)}
+                              className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]/60 transition-colors cursor-pointer rd-focus-ring"
+                            >
+                              <span className="inline-flex items-center gap-2 min-w-0">
+                                <span
+                                  aria-hidden="true"
+                                  className="inline-flex items-center -space-x-0.5 shrink-0"
+                                >
+                                  {dotColors.map((dotClass, idx) => (
+                                    <span
+                                      key={idx}
+                                      className={`w-2 h-2 rounded-full ring-2 ring-[var(--surface-elevated)] ${dotClass}`}
+                                    />
+                                  ))}
+                                </span>
+                                <span className="font-medium text-[var(--text-secondary)] truncate">
+                                  流水线轨迹 · {segment.messages.length} 条状态记录
+                                </span>
                               </span>
-                              <span className="mx-1.5">·</span>
-                              <span className="whitespace-pre-wrap break-words">
-                                {formatEventBody(m.body)}
+                              <span className="inline-flex items-center gap-1.5 shrink-0">
+                                <time className="text-[11px] font-mono tabular-nums opacity-75">
+                                  {formatRelativeTime(firstMsg.created_at) ===
+                                  formatRelativeTime(lastMsg.created_at)
+                                    ? formatRelativeTime(lastMsg.created_at)
+                                    : `${formatRelativeTime(firstMsg.created_at)} – ${formatRelativeTime(lastMsg.created_at)}`}
+                                </time>
+                                <Icon
+                                  name={
+                                    expanded ? "chevron-down" : "chevron-right"
+                                  }
+                                  size={13}
+                                />
                               </span>
-                            </div>
-                            <time className="shrink-0 text-[11px] font-mono tabular-nums opacity-75">
-                              {formatRelativeTime(m.created_at)}
-                            </time>
+                            </button>
+
+                            {expanded && (
+                              <div className="px-3 pb-2.5 pt-1 border-t border-[var(--border-subtle)]/80 space-y-1.5">
+                                {segment.messages.map((m, idx) => {
+                                  const isLast =
+                                    idx === segment.messages.length - 1;
+                                  return (
+                                    <div
+                                      key={m.id}
+                                      className="relative flex items-start gap-2.5 text-[12px] text-[var(--text-muted)] py-0.5"
+                                    >
+                                      <div className="relative flex flex-col items-center pt-1.5 shrink-0">
+                                        <span
+                                          className={`w-1.5 h-1.5 rounded-full ${eventDotColor(m.body)}`}
+                                        />
+                                        {!isLast && (
+                                          <span
+                                            aria-hidden="true"
+                                            className="w-px h-4 bg-[var(--border-subtle)] mt-1"
+                                          />
+                                        )}
+                                      </div>
+                                      <div className="flex-1 min-w-0 leading-snug">
+                                        <span className="font-medium text-[var(--text-secondary)]">
+                                          {AUTHOR_LABELS[m.author] ?? m.author}
+                                        </span>
+                                        <span className="mx-1.5 opacity-60">
+                                          ·
+                                        </span>
+                                        <span className="break-words">
+                                          {formatEventBody(m.body)}
+                                        </span>
+                                      </div>
+                                      <time
+                                        title={formatDateTime(m.created_at)}
+                                        className="shrink-0 text-[11px] font-mono tabular-nums opacity-75"
+                                      >
+                                        {formatRelativeTime(m.created_at)}
+                                      </time>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
                         );
                       }
 
+                      if (segment.type === "event_single") {
+                        const { message: m, header, detail: eventDetail } =
+                          segment;
+                        return (
+                          <div
+                            key={m.id}
+                            className="space-y-1.5 py-0.5"
+                          >
+                            <div className="flex items-start gap-2.5 text-[12px] text-[var(--text-muted)]">
+                              <span
+                                className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${eventDotColor(m.body)}`}
+                              />
+                              <div className="flex-1 min-w-0 leading-snug">
+                                <span className="font-medium text-[var(--text-secondary)]">
+                                  {AUTHOR_LABELS[m.author] ?? m.author}
+                                </span>
+                                <span className="mx-1.5 opacity-60">·</span>
+                                <span className="break-words">{header}</span>
+                              </div>
+                              <time
+                                title={formatDateTime(m.created_at)}
+                                className="shrink-0 text-[11px] font-mono tabular-nums opacity-75"
+                              >
+                                {formatRelativeTime(m.created_at)}
+                              </time>
+                            </div>
+                            {eventDetail && (
+                              <div className="ml-4 pl-3 pr-3 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/55">
+                                <MarkdownContent
+                                  content={eventDetail}
+                                  compact
+                                />
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      const m = segment.message;
                       const isAssistant = m.author === "assistant";
+                      const isAgent = m.author === "agent";
+
                       return (
                         <article
                           key={m.id}
-                          className={`p-3.5 rounded-xl border text-[13px] ${
+                          className={`p-3.5 rounded-xl border text-[13px] rd-hairline-glow ${
                             isAssistant
-                              ? "border-indigo-500/25 bg-indigo-500/[0.06]"
-                              : "border-[var(--border-subtle)] bg-[var(--surface-card)]"
+                              ? "border-indigo-500/25 bg-indigo-500/[0.05] dark:bg-indigo-500/[0.08]"
+                              : isAgent
+                                ? "border-[var(--border-subtle)] bg-[var(--surface-card)]"
+                                : "border-[var(--border-subtle)] bg-[var(--surface-card)]"
                           }`}
                         >
-                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                          <div className="flex items-center justify-between gap-2 mb-2">
                             <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)]">
-                              <Icon
-                                name={
+                              <span
+                                className={`inline-flex items-center justify-center w-5 h-5 rounded-md border ${
                                   isAssistant
-                                    ? "sparkles"
-                                    : m.author === "agent"
-                                      ? "terminal"
-                                      : "user"
-                                }
-                                size={13}
-                                className={
-                                  isAssistant ? "text-indigo-500" : "text-[var(--text-muted)]"
-                                }
-                              />
-                              {AUTHOR_LABELS[m.author] ?? m.author}
+                                    ? "bg-indigo-500/12 border-indigo-500/25 text-indigo-600 dark:text-indigo-400"
+                                    : isAgent
+                                      ? "bg-cyan-500/10 border-cyan-500/25 text-cyan-700 dark:text-cyan-300"
+                                      : "bg-[var(--surface-subtle)] border-[var(--border-subtle)] text-[var(--text-muted)]"
+                                }`}
+                              >
+                                <Icon
+                                  name={
+                                    isAssistant
+                                      ? "sparkles"
+                                      : isAgent
+                                        ? "terminal"
+                                        : "user"
+                                  }
+                                  size={12}
+                                />
+                              </span>
+                              <span>{AUTHOR_LABELS[m.author] ?? m.author}</span>
+                              {isAgent && (
+                                <span className="text-[10.5px] font-mono px-1.5 py-0.5 rounded bg-[var(--surface-subtle)] text-[var(--text-muted)] border border-[var(--border-subtle)]">
+                                  执行汇报
+                                </span>
+                              )}
                             </span>
-                            <time className="text-[11px] font-mono text-[var(--text-muted)]">
+                            <time
+                              title={formatDateTime(m.created_at)}
+                              className="text-[11px] font-mono tabular-nums text-[var(--text-muted)]"
+                            >
                               {formatDateTime(m.created_at)}
                             </time>
                           </div>
-                          <p className="leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap break-words">
-                            {m.body}
-                          </p>
+                          <MarkdownContent content={m.body} />
                         </article>
                       );
                     })
                   )}
                 </div>
 
-                {/* Composer */}
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-3 space-y-2.5 focus-within:border-indigo-500/60 transition">
-                  <textarea
-                    value={comment}
-                    onChange={(e) => setComment(e.target.value)}
-                    onKeyDown={(e) => {
-                      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.nativeEvent.isComposing) {
-                        e.preventDefault();
-                        void handleSendMessage(false);
+                {/* Beautiful UI-inspired Prompt Bar Composer */}
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] rd-hairline-glow overflow-hidden focus-within:border-indigo-500/60 focus-within:ring-2 focus-within:ring-indigo-500/12 transition-all">
+                  {/* Context-aware quick suggestion chips */}
+                  {promptSuggestions.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2.5 pb-1">
+                      <span className="text-[11px] text-[var(--text-muted)] mr-0.5 select-none">
+                        快捷指令
+                      </span>
+                      {promptSuggestions.map((chip) => (
+                        <button
+                          key={chip.label}
+                          type="button"
+                          onClick={() => handleApplySuggestion(chip)}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11.5px] font-medium border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/80 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer rd-focus-ring"
+                        >
+                          <Icon
+                            name={
+                              chip.mode === "assistant" ? "sparkles" : "zap"
+                            }
+                            size={10}
+                            className={
+                              chip.mode === "assistant"
+                                ? "text-indigo-500"
+                                : "text-emerald-500"
+                            }
+                          />
+                          <span>{chip.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="px-3 py-2">
+                    <textarea
+                      ref={commentInputRef}
+                      value={comment}
+                      onChange={(e) => setComment(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (
+                          (e.metaKey || e.ctrlKey) &&
+                          e.key === "Enter" &&
+                          !e.nativeEvent.isComposing
+                        ) {
+                          e.preventDefault();
+                          void handleSendMessage(false);
+                        }
+                      }}
+                      rows={3}
+                      maxLength={8000}
+                      placeholder={
+                        canReopenTask
+                          ? "输入返工要求、补充说明或验收意见（支持 Markdown）…"
+                          : "输入评论补充上下文，或直接向项目助手提问（支持 Markdown）…"
                       }
-                    }}
-                    rows={3}
-                    maxLength={8000}
-                    placeholder="写下备注，或向项目助手提问（例如：帮我起草验收标准 / 总结这条反馈）…"
-                    className="w-full resize-none bg-transparent text-[13px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
-                  />
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-[var(--border-subtle)]">
-                    <span className="text-[11px] text-[var(--text-muted)]">
-                      ⌘/Ctrl + Enter 发送备注
-                    </span>
-                    <div className="flex items-center gap-2">
+                      className="w-full resize-none bg-transparent text-[13px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+                    />
+                  </div>
+
+                  {/* Comment-to-Wakeup Indicator & Footer Controls */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-t border-[var(--border-subtle)] bg-[var(--surface-subtle)]/45">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {canReopenTask ? (
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={autoReopen}
+                          onClick={() => setAutoReopen((v) => !v)}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-all cursor-pointer rd-focus-ring ${
+                            autoReopen
+                              ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border-emerald-500/30"
+                              : "bg-[var(--surface-elevated)] text-[var(--text-muted)] border-[var(--border-subtle)] hover:text-[var(--text-primary)]"
+                          }`}
+                        >
+                          <LivePulseDot
+                            tone={autoReopen ? "emerald" : "zinc"}
+                            active={autoReopen}
+                          />
+                          <span>
+                            {autoReopen
+                              ? "发送后自动唤醒 Agent"
+                              : "仅留存评论（不唤醒）"}
+                          </span>
+                        </button>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+                          <Kbd>⌘/Ctrl</Kbd>
+                          <span>+</span>
+                          <Kbd>Enter</Kbd>
+                          <span>发送</span>
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2 ml-auto">
+                      {canReopenTask && (
+                        <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)] mr-1">
+                          <Kbd>⌘/Ctrl</Kbd>
+                          <span>+</span>
+                          <Kbd>Enter</Kbd>
+                        </span>
+                      )}
                       <Button
                         type="button"
-                        variant="secondary"
+                        variant={
+                          canReopenTask && autoReopen ? "primary" : "secondary"
+                        }
                         size="xs"
                         icon="send"
                         disabled={!comment.trim() || busyAction !== null}
                         loading={busyAction === "comment"}
                         onClick={() => void handleSendMessage(false)}
                       >
-                        添加备注
+                        发送评论
                       </Button>
                       <Button
                         type="button"
-                        variant="primary"
+                        variant={
+                          canReopenTask && autoReopen ? "secondary" : "primary"
+                        }
                         size="xs"
                         icon="sparkles"
                         disabled={!comment.trim() || busyAction !== null}
                         loading={busyAction === "discuss"}
                         onClick={() => void handleSendMessage(true)}
                       >
-                        询问项目助手
+                        问项目助手
                       </Button>
                     </div>
                   </div>
@@ -753,7 +1454,8 @@ export function TaskDetailDrawer({
         }
       >
         <p className="text-[13.5px] leading-relaxed text-[var(--text-secondary)]">
-          强制接手会立即撤销当前 Local Agent 的回写租约并将任务归属给你。若本机执行器只是暂时断网，其进程可能仍在后台运行，请记得在本机检查。
+          强制接手会立即撤销当前 Local
+          Agent 的回写租约并将任务归属给你。若本机执行器只是暂时断网，其进程可能仍在后台运行，请记得在本机检查。
         </p>
       </Modal>
     </>

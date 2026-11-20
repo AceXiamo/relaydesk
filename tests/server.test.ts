@@ -3,8 +3,10 @@ import { createServer } from "node:http";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { privateKeyToAccount } from "viem/accounts";
 import { startRelaydeskServer, type RunningRelaydeskServer } from "../server.ts";
+import { Store } from "../server/store.ts";
 import { WalletAuth } from "../server/wallet.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -1216,5 +1218,674 @@ describe("GitHub Personal & Organization Repository Listing", () => {
       "acme-org/api",
       "acme-org/mobile",
     ]);
+  });
+});
+
+async function waitForCondition(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 3000,
+  intervalMs = 30,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error("Timed out waiting for condition");
+}
+
+describe("Autonomous Execution Queue, Lease Reclamation & Agent Operations", () => {
+  it("smoothly migrates legacy SQLite tables to include automation and task metadata columns", () => {
+    const { dbPath } = makeTempDb();
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, repo TEXT NOT NULL,
+        intake_key TEXT NOT NULL, bot_key TEXT NOT NULL, agent_key TEXT NOT NULL,
+        allowed_origins TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL
+      );
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+        number INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+        requirements TEXT NOT NULL DEFAULT '', source TEXT NOT NULL,
+        source_url TEXT NOT NULL DEFAULT '', external_id TEXT,
+        priority TEXT NOT NULL, status TEXT NOT NULL, owner TEXT NOT NULL DEFAULT 'none',
+        lease TEXT, version INTEGER NOT NULL DEFAULT 1, merged_into TEXT REFERENCES tasks(id),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_seen TEXT
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+        kind TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      INSERT INTO projects VALUES ('p1', 'Legacy', 'acme/legacy', 'ik', 'bk', 'ak', '[]', '2026-01-01T00:00:00.000Z');
+      INSERT INTO tasks VALUES ('t1', 'p1', 1, 'Old task', 'Body', '', 'console', '', NULL, 'normal', 'triage', 'none', NULL, 1, NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL);
+    `);
+    legacy.close();
+
+    const store = new Store(dbPath);
+    cleanups.push(() => store.close());
+
+    const projects = store.listProjects();
+    expect(projects).toHaveLength(1);
+    expect(projects[0].automation_paused).toBe(false);
+    expect(projects[0].delivery_mode).toBe("direct_push");
+    expect(projects[0].repos).toEqual(["acme/legacy"]);
+
+    const tasks = store.listTasks("p1");
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].attempts).toBe(0);
+    expect(tasks[0].resolution).toBeNull();
+    expect(tasks[0].delivery_ref).toBe("");
+    expect(tasks[0].triaged_by).toBe("");
+  });
+
+  it("supports zero-human-gate claiming, queue ordering, serial lock, and automation pause", async () => {
+    const srv = await startApiServer();
+
+    const pRes = await jsonReq(`${srv.url}/api/projects`, "POST", {
+      name: "Auto Queue App",
+      repo: "acexiamo/auto-queue",
+    });
+    expect(pRes.status).toBe(200);
+    const project = pRes.json.project as {
+      id: string;
+      agent_key: string;
+      automation_paused: boolean;
+      delivery_mode: string;
+    };
+    expect(project.automation_paused).toBe(false);
+    expect(project.delivery_mode).toBe("direct_push");
+
+    // Create three tasks: #1 triage normal, #2 triage high, #3 ready high
+    const t1 = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "Normal triage feedback",
+        body: "Minor copy fix",
+        priority: "normal",
+      })
+    ).json.task as { id: string; version: number };
+    const t2 = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "High triage bug",
+        body: "Crash on click",
+        priority: "high",
+      })
+    ).json.task as { id: string; version: number };
+    const t3 = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "High ready bug",
+        body: "Already triaged high bug",
+        priority: "high",
+      })
+    ).json.task as { id: string; version: number };
+    await jsonReq(`${srv.url}/api/tasks/${t3.id}/action`, "POST", {
+      action: "status",
+      status: "ready",
+      version: t3.version,
+    });
+
+    const auth = { Authorization: `Bearer ${project.agent_key}` };
+
+    // GET /agent/queue orders by priority -> ready before triage -> number ASC
+    const q1 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/queue`, "GET", undefined, auth);
+    expect(q1.status).toBe(200);
+    expect(q1.json.paused).toBe(false);
+    expect(q1.json.active).toBeNull();
+    const pendingIds = (q1.json.pending as Array<{ id: string }>).map((i) => i.id);
+    expect(pendingIds).toEqual([t3.id, t2.id, t1.id]);
+
+    // Pause automation blocks claims
+    const pauseRes = await jsonReq(`${srv.url}/api/projects/${project.id}`, "PATCH", {
+      automation_paused: true,
+    });
+    expect(pauseRes.status).toBe(200);
+    expect((pauseRes.json.project as { automation_paused: boolean }).automation_paused).toBe(true);
+
+    const pausedClaim = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/claim`,
+      "POST",
+      {},
+      auth,
+    );
+    expect(pausedClaim.status).toBe(200);
+    expect(pausedClaim.json.task).toBeNull();
+    expect(pausedClaim.json.paused).toBe(true);
+    expect(pausedClaim.json.reason).toBe("paused");
+
+    // Reject invalid delivery_mode
+    const badMode = await jsonReq(`${srv.url}/api/projects/${project.id}`, "PATCH", {
+      delivery_mode: "yolo_push",
+    });
+    expect(badMode.status).toBe(400);
+
+    // Resume automation
+    await jsonReq(`${srv.url}/api/projects/${project.id}`, "PATCH", {
+      automation_paused: false,
+    });
+
+    // Claim specific triage task directly (zero human gate)
+    const claimSpecific = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/claim`,
+      "POST",
+      { task_id: t2.id },
+      auth,
+    );
+    expect(claimSpecific.status).toBe(200);
+    const claimed = claimSpecific.json.task as Record<string, unknown>;
+    expect(claimed.id).toBe(t2.id);
+    expect(claimed.status).toBe("working");
+    expect(claimed.owner).toBe("agent");
+    expect(Array.isArray(claimed.linked_feedback)).toBe(true);
+    expect(typeof claimed.message_count).toBe("number");
+
+    // Serial lock: a second claim while t2 is active returns busy: true
+    const busyClaim = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/claim`,
+      "POST",
+      {},
+      auth,
+    );
+    expect(busyClaim.status).toBe(200);
+    expect(busyClaim.json.task).toBeNull();
+    expect(busyClaim.json.busy).toBe(true);
+    expect((busyClaim.json.active_task as { id: string }).id).toBe(t2.id);
+
+    // Queue reflects active task
+    const q2 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/queue`, "GET", undefined, auth);
+    expect((q2.json.active as { id: string }).id).toBe(t2.id);
+  });
+
+  it("supports agent triage, comment, thread, complete (direct_push & review_only), dismiss, merge, and retryable fail", async () => {
+    const srv = await startApiServer();
+
+    const pRes = await jsonReq(`${srv.url}/api/projects`, "POST", {
+      name: "Lifecycle App",
+      repo: "acexiamo/lifecycle",
+    });
+    const project = pRes.json.project as { id: string; agent_key: string };
+    const auth = { Authorization: `Bearer ${project.agent_key}` };
+
+    // Task 1: triage -> comment -> thread -> complete (direct_push -> done + shipped)
+    const t1 = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "Login button misaligned",
+        body: "Button shifts right on Safari",
+        priority: "normal",
+      })
+    ).json.task as { id: string };
+
+    const c1 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    const lease1 = c1.json.lease as string;
+
+    const triageRes = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t1.id}/triage`,
+      "POST",
+      {
+        lease: lease1,
+        title: "Fix Safari login button alignment",
+        requirements: "- Align CTA with form grid on Safari 18",
+        priority: "high",
+      },
+      auth,
+    );
+    expect(triageRes.status).toBe(200);
+    const triaged = triageRes.json.task as Record<string, unknown>;
+    expect(triaged.title).toBe("Fix Safari login button alignment");
+    expect(triaged.priority).toBe("high");
+    expect(triaged.triaged_by).toBe("agent");
+
+    const commentRes = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t1.id}/comment`,
+      "POST",
+      { lease: lease1, body: "### Investigation\nFound flex-basis bug in `LoginForm.tsx`." },
+      auth,
+    );
+    expect(commentRes.status).toBe(200);
+    expect((commentRes.json.message as { author: string }).author).toBe("agent");
+
+    const threadRes = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t1.id}/thread`,
+      "GET",
+      undefined,
+      auth,
+    );
+    expect(threadRes.status).toBe(200);
+    expect(threadRes.json.task_id).toBe(t1.id);
+    expect((threadRes.json.messages as Array<{ body: string }>).some((m) => m.body.includes("LoginForm.tsx"))).toBe(true);
+
+    const complete1 = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t1.id}/complete`,
+      "POST",
+      {
+        lease: lease1,
+        summary: "## Shipped\nFixed Safari flex-basis and added regression test.",
+        delivery_ref: "commit:abc1234",
+      },
+      auth,
+    );
+    expect(complete1.status).toBe(200);
+    const completed1 = complete1.json.task as Record<string, unknown>;
+    expect(completed1.status).toBe("done");
+    expect(completed1.resolution).toBe("shipped");
+    expect(completed1.delivery_ref).toBe("commit:abc1234");
+    expect(completed1.owner).toBe("none");
+
+    // Verify markdown summary was stored as an agent comment
+    const detail1 = await jsonReq(`${srv.url}/api/tasks/${t1.id}`);
+    const msgs1 = detail1.json.messages as Array<{ kind: string; author: string; body: string }>;
+    expect(msgs1.some((m) => m.kind === "comment" && m.author === "agent" && m.body.includes("## Shipped"))).toBe(true);
+
+    // Task 2: review_only mode -> complete goes to review
+    await jsonReq(`${srv.url}/api/projects/${project.id}`, "PATCH", {
+      delivery_mode: "review_only",
+    });
+    const t2 = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "Add export filter",
+        body: "Allow filtering by date range",
+        priority: "normal",
+      })
+    ).json.task as { id: string };
+    const c2 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    const lease2 = c2.json.lease as string;
+    const complete2 = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t2.id}/complete`,
+      "POST",
+      {
+        lease: lease2,
+        summary: "Opened PR #42 for date filter.",
+        delivery_ref: "https://github.com/acexiamo/lifecycle/pull/42",
+      },
+      auth,
+    );
+    expect(complete2.status).toBe(200);
+    const completed2 = complete2.json.task as Record<string, unknown>;
+    expect(completed2.status).toBe("review");
+    expect(completed2.resolution).toBeNull();
+    expect(completed2.delivery_ref).toBe("https://github.com/acexiamo/lifecycle/pull/42");
+
+    // Task 3: dismiss noise feedback
+    const t3 = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "test 123",
+        body: "just testing",
+        priority: "low",
+      })
+    ).json.task as { id: string };
+    const c3 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    const lease3 = c3.json.lease as string;
+    const dismissRes = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t3.id}/dismiss`,
+      "POST",
+      { lease: lease3, reason: "Connectivity test with no actionable product issue." },
+      auth,
+    );
+    expect(dismissRes.status).toBe(200);
+    const dismissed = dismissRes.json.task as Record<string, unknown>;
+    expect(dismissed.status).toBe("done");
+    expect(dismissed.resolution).toBe("dismissed");
+    expect(dismissed.triaged_by).toBe("agent");
+
+    // Task 4 & Task 5: agent merge duplicate into open task
+    const t4 = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "Primary dark mode issue",
+        body: "Sidebar stays light in dark mode",
+        priority: "normal",
+      })
+    ).json.task as { id: string };
+    const t5 = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "Duplicate dark mode issue",
+        body: "Left nav does not respect dark theme",
+        priority: "high",
+      })
+    ).json.task as { id: string };
+
+    // Claims higher priority t5 first
+    const c5 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    expect((c5.json.task as { id: string }).id).toBe(t5.id);
+    const mergeRes = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t5.id}/merge`,
+      "POST",
+      { lease: c5.json.lease, target_id: t4.id },
+      auth,
+    );
+    expect(mergeRes.status).toBe(200);
+    const mergedTask = mergeRes.json.task as Record<string, unknown>;
+    expect(mergedTask.status).toBe("done");
+    expect(mergedTask.resolution).toBe("merged");
+    expect(mergedTask.merged_into).toBe(t4.id);
+    expect(mergedTask.triaged_by).toBe("agent");
+
+    // Verify target task t4 has t5 linked
+    const t4Detail = await jsonReq(`${srv.url}/api/tasks/${t4.id}`);
+    expect((t4Detail.json.merged as Array<{ id: string }>).map((m) => m.id)).toEqual([t5.id]);
+
+    // Task 4: retryable fail increments attempts and returns to ready, then non-retryable goes to waiting
+    const c4a = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    const fail1 = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t4.id}/fail`,
+      "POST",
+      { lease: c4a.json.lease, retryable: true, body: "Transient network error during test" },
+      auth,
+    );
+    expect(fail1.status).toBe(200);
+    expect((fail1.json.task as { status: string; attempts: number }).status).toBe("ready");
+    expect((fail1.json.task as { attempts: number }).attempts).toBe(1);
+
+    const c4b = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    const fail2 = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t4.id}/fail`,
+      "POST",
+      { lease: c4b.json.lease, retryable: false, body: "Need design confirmation" },
+      auth,
+    );
+    expect(fail2.status).toBe(200);
+    expect((fail2.json.task as { status: string; attempts: number }).status).toBe("waiting");
+    expect((fail2.json.task as { attempts: number }).attempts).toBe(2);
+  });
+
+  it("reclaims stale agent leases and escalates to waiting at max attempts (3)", async () => {
+    const { dbPath } = makeTempDb();
+    const srv = await startApiServer({ dbPath });
+
+    const pRes = await jsonReq(`${srv.url}/api/projects`, "POST", {
+      name: "Stale Lease App",
+      repo: "acexiamo/stale",
+    });
+    const project = pRes.json.project as { id: string; agent_key: string };
+    const auth = { Authorization: `Bearer ${project.agent_key}` };
+
+    const t = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "Long running refactor",
+        body: "Refactor billing pipeline",
+        priority: "high",
+      })
+    ).json.task as { id: string };
+
+    const backdateLastSeen = (taskId: string) => {
+      const db = new DatabaseSync(dbPath);
+      const oldIso = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      db.prepare("UPDATE tasks SET last_seen = ?, updated_at = ? WHERE id = ?").run(
+        oldIso,
+        oldIso,
+        taskId,
+      );
+      db.close();
+    };
+
+    // Attempt 1 -> stale -> reclaimed to ready (attempts=1)
+    const c1 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    expect((c1.json.task as { id: string }).id).toBe(t.id);
+    backdateLastSeen(t.id);
+
+    const q1 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/queue`, "GET", undefined, auth);
+    expect(q1.json.active).toBeNull();
+    expect((q1.json.pending as Array<{ id: string; status: string; attempts: number }>)[0]).toMatchObject({
+      id: t.id,
+      status: "ready",
+      attempts: 1,
+    });
+
+    // Attempt 2 -> stale -> reclaimed to ready (attempts=2)
+    const c2 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    expect((c2.json.task as { id: string }).id).toBe(t.id);
+    backdateLastSeen(t.id);
+
+    // Claiming triggers reclamation and immediately claims for attempt 3
+    const c3 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    expect((c3.json.task as { id: string; attempts: number }).id).toBe(t.id);
+    expect((c3.json.task as { attempts: number }).attempts).toBe(2);
+
+    // Attempt 3 -> stale -> reaches max attempts (3) -> waiting (not claimable)
+    backdateLastSeen(t.id);
+    const c4 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    expect(c4.json.task).toBeNull();
+
+    const detail = await jsonReq(`${srv.url}/api/tasks/${t.id}`);
+    const task = detail.json.task as { status: string; owner: string; attempts: number };
+    expect(task.status).toBe("waiting");
+    expect(task.owner).toBe("none");
+    expect(task.attempts).toBe(3);
+    const msgs = detail.json.messages as Array<{ body: string }>;
+    expect(msgs.some((m) => m.body === "Stale agent lease reclaimed")).toBe(true);
+    expect(msgs.some((m) => m.body === "Stale agent lease reached max attempts")).toBe(true);
+  });
+
+  it("auto-reopens done/waiting/review tasks on operator comment, supports reopen: false, and reopen action", async () => {
+    const srv = await startApiServer();
+
+    const pRes = await jsonReq(`${srv.url}/api/projects`, "POST", {
+      name: "Reopen App",
+      repo: "acexiamo/reopen",
+    });
+    const project = pRes.json.project as { id: string; agent_key: string };
+    const auth = { Authorization: `Bearer ${project.agent_key}` };
+
+    const t = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "Export timeout",
+        body: "Large export times out",
+        priority: "high",
+      })
+    ).json.task as { id: string };
+
+    // Agent dismisses task
+    const c1 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t.id}/dismiss`,
+      "POST",
+      { lease: c1.json.lease, reason: "False alarm" },
+      auth,
+    );
+
+    // Comment with reopen: false does NOT reopen
+    const noReopen = await jsonReq(`${srv.url}/api/tasks/${t.id}/messages`, "POST", {
+      body: "Leaving an internal note only",
+      reopen: false,
+    });
+    expect(noReopen.status).toBe(200);
+    expect(noReopen.json.reopened).toBe(false);
+    expect((noReopen.json.task as { status: string; resolution: string }).status).toBe("done");
+    expect((noReopen.json.task as { resolution: string }).resolution).toBe("dismissed");
+
+    // Normal operator comment auto-reopens to ready and clears resolution/attempts
+    const autoReopen = await jsonReq(`${srv.url}/api/tasks/${t.id}/messages`, "POST", {
+      body: "Actually this reproduces with 50k rows, please fix.",
+    });
+    expect(autoReopen.status).toBe(200);
+    expect(autoReopen.json.reopened).toBe(true);
+    const reopenedTask = autoReopen.json.task as {
+      status: string;
+      resolution: string | null;
+      attempts: number;
+      version: number;
+    };
+    expect(reopenedTask.status).toBe("ready");
+    expect(reopenedTask.resolution).toBeNull();
+    expect(reopenedTask.attempts).toBe(0);
+
+    // Agent fails into waiting, then operator uses explicit action: "reopen"
+    const c2 = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    const failed = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t.id}/fail`,
+      "POST",
+      { lease: c2.json.lease, retryable: false, body: "Blocked on fixture" },
+      auth,
+    );
+    const waitingVer = (failed.json.task as { version: number }).version;
+
+    const explicitReopen = await jsonReq(`${srv.url}/api/tasks/${t.id}/action`, "POST", {
+      action: "reopen",
+      version: waitingVer,
+    });
+    expect(explicitReopen.status).toBe(200);
+    const tReopened = explicitReopen.json.task as {
+      status: string;
+      attempts: number;
+      resolution: string | null;
+    };
+    expect(tReopened.status).toBe("ready");
+    expect(tReopened.attempts).toBe(0);
+    expect(tReopened.resolution).toBeNull();
+  });
+});
+
+describe("Two-Tier Server LLM Pre-screening (Plan A)", () => {
+  it("auto-archives noise, promotes valid feedback, fails open on errors, and honors skip_prescreen", async () => {
+    let callCount = 0;
+    const mockAi = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        callCount += 1;
+        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+          messages: Array<{ role: string; content: string }>;
+        };
+        const userMsg = payload.messages.find((m) => m.role === "user")?.content ?? "";
+
+        if (userMsg.includes("TRIGGER_ERROR")) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: "Upstream unavailable" }));
+          return;
+        }
+
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+
+        if (userMsg.includes("这是一次测试")) {
+          res.end(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      verdict: "noise",
+                      reason: "这是一条连通性测试消息，不包含产品问题",
+                      priority: "low",
+                    }),
+                  },
+                },
+              ],
+            }),
+          );
+          return;
+        }
+
+        res.end(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content:
+                    '```json\n{"verdict":"valid","reason":"明确描述了结账页崩溃问题","priority":"high"}\n```',
+                },
+              },
+            ],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((r) => mockAi.listen(0, "127.0.0.1", r));
+    cleanups.push(() => new Promise<void>((r) => mockAi.close(() => r())));
+    const mockPort = (mockAi.address() as { port: number }).port;
+
+    const srv = await startApiServer();
+
+    // Configure loopback LLM
+    const aiCfg = await jsonReq(`${srv.url}/api/ai`, "POST", {
+      base_url: `http://127.0.0.1:${mockPort}/v1`,
+      model: "gpt-4o-mini",
+      api_key: "{{SECRET_prescreen_test}}",
+      intake_enabled: false,
+    });
+    expect(aiCfg.status).toBe(200);
+
+    const pRes = await jsonReq(`${srv.url}/api/projects`, "POST", {
+      name: "Prescreen App",
+      repo: "acexiamo/prescreen",
+    });
+    const project = pRes.json.project as { id: string; intake_key: string };
+
+    // 1. Noise via widget intake -> auto-archived as done + dismissed + triaged_by=server_ai
+    const noiseIntake = await jsonReq(
+      `${srv.url}/api/projects/${project.id}/intake`,
+      "POST",
+      { source: "widget", title: "测试", body: "这是一次测试" },
+      { Authorization: `Bearer ${project.intake_key}` },
+    );
+    expect(noiseIntake.status).toBe(200);
+    const noiseId = noiseIntake.json.task_id as string;
+
+    await waitForCondition(async () => {
+      const d = await jsonReq(`${srv.url}/api/tasks/${noiseId}`);
+      return (d.json.task as { status: string }).status === "done";
+    });
+
+    const noiseDetail = await jsonReq(`${srv.url}/api/tasks/${noiseId}`);
+    const noiseTask = noiseDetail.json.task as Record<string, unknown>;
+    expect(noiseTask.status).toBe("done");
+    expect(noiseTask.resolution).toBe("dismissed");
+    expect(noiseTask.triaged_by).toBe("server_ai");
+    const noiseMsgs = noiseDetail.json.messages as Array<{ kind: string; author: string; body: string }>;
+    expect(noiseMsgs.some((m) => m.kind === "comment" && m.author === "assistant")).toBe(true);
+    expect(noiseMsgs.some((m) => m.body === "Server AI pre-screened as noise and archived")).toBe(true);
+
+    // Operator comment recovers a dismissed task back to ready
+    const recoverRes = await jsonReq(`${srv.url}/api/tasks/${noiseId}/messages`, "POST", {
+      body: "其实需要查一下这个入口",
+    });
+    expect(recoverRes.json.reopened).toBe(true);
+    expect((recoverRes.json.task as { status: string }).status).toBe("ready");
+
+    // 2. Valid feedback via console -> auto-promoted to ready with suggested priority
+    const validRes = await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+      title: "结账页点击提交后白屏",
+      body: "在 Chrome 点击确认支付后控制台报 TypeError 并白屏",
+      priority: "normal",
+    });
+    const validId = (validRes.json.task as { id: string }).id;
+
+    await waitForCondition(async () => {
+      const d = await jsonReq(`${srv.url}/api/tasks/${validId}`);
+      return (d.json.task as { status: string }).status === "ready";
+    });
+
+    const validDetail = await jsonReq(`${srv.url}/api/tasks/${validId}`);
+    const validTask = validDetail.json.task as Record<string, unknown>;
+    expect(validTask.status).toBe("ready");
+    expect(validTask.priority).toBe("high");
+    expect(validTask.triaged_by).toBe("server_ai");
+
+    // 3. LLM error -> fails open (remains in triage)
+    const beforeErrCalls = callCount;
+    const errRes = await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+      title: "Error case",
+      body: "TRIGGER_ERROR real bug report",
+      priority: "normal",
+    });
+    expect(errRes.status).toBe(200);
+    const errId = (errRes.json.task as { id: string }).id;
+    await waitForCondition(async () => callCount > beforeErrCalls);
+    await new Promise((r) => setTimeout(r, 60));
+    const errDetail = await jsonReq(`${srv.url}/api/tasks/${errId}`);
+    expect((errDetail.json.task as { status: string }).status).toBe("triage");
+
+    // 4. skip_prescreen: true does not invoke LLM
+    const beforeSkipCalls = callCount;
+    const skipRes = await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+      title: "Skipped prescreen",
+      body: "这是一次测试",
+      priority: "normal",
+      skip_prescreen: true,
+    });
+    expect(skipRes.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(callCount).toBe(beforeSkipCalls);
+    const skipDetail = await jsonReq(`${srv.url}/api/tasks/${(skipRes.json.task as { id: string }).id}`);
+    expect((skipDetail.json.task as { status: string }).status).toBe("triage");
   });
 });

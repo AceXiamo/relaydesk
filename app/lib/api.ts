@@ -2,13 +2,17 @@ import type {
   AiConfigStatus,
   AiTestResult,
   AuthStatusPayload,
+  DeliveryMode,
   GithubConnectionSummary,
   GithubInspectPayload,
   GithubOwnerInfo,
   GithubReposPayload,
   GithubStatusPayload,
   ProjectDetail,
+  ProjectReposSyncStatus,
   ProjectSummary,
+  R2ConfigStatus,
+  R2TestResult,
   TaskDetailPayload,
   TaskMessage,
   TaskPriority,
@@ -84,6 +88,9 @@ export const api = {
       repos?: string[];
       agent_instructions?: string;
       allowed_origins?: string[];
+      automation_paused?: boolean;
+      delivery_mode?: DeliveryMode;
+      widget_code_context?: boolean;
     },
   ) =>
     request<{ project: ProjectDetail }>(
@@ -98,7 +105,7 @@ export const api = {
     ),
   createTask: (
     projectId: string,
-    payload: { title?: string; body: string; priority: TaskPriority },
+    payload: { title?: string; body: string; priority: TaskPriority; skip_prescreen?: boolean },
   ) =>
     request<{ task: TaskRecord }>(
       `/api/projects/${encodeURIComponent(projectId)}/tasks`,
@@ -107,11 +114,11 @@ export const api = {
     ),
   getTaskDetail: (taskId: string) =>
     request<TaskDetailPayload>(`/api/tasks/${encodeURIComponent(taskId)}`),
-  addTaskMessage: (taskId: string, body: string) =>
-    request<{ message: TaskMessage }>(
+  addTaskMessage: (taskId: string, body: string, options?: { reopen?: boolean }) =>
+    request<{ message: TaskMessage; task?: TaskRecord; reopened?: boolean }>(
       `/api/tasks/${encodeURIComponent(taskId)}/messages`,
       "POST",
-      { body },
+      options?.reopen === false ? { body, reopen: false } : { body },
     ),
   discussTask: (taskId: string, body: string) =>
     request<{ reply: string }>(
@@ -130,7 +137,8 @@ export const api = {
         | "requirements"
         | "status"
         | "priority"
-        | "merge";
+        | "merge"
+        | "reopen";
       version: number;
       status?: TaskStatus;
       priority?: TaskPriority;
@@ -214,4 +222,35 @@ export const api = {
     request<AiTestResult>("/api/ai/test", "POST", payload ?? {}),
   disconnectAiConfig: () =>
     request<AiConfigStatus>("/api/ai/disconnect", "POST", {}),
+
+  getR2Config: () => request<R2ConfigStatus>("/api/r2"),
+  saveR2Config: (payload: {
+    account_id: string;
+    bucket: string;
+    public_url: string;
+    access_key_id?: string;
+    secret_access_key?: string;
+    endpoint?: string;
+  }) => request<R2ConfigStatus>("/api/r2", "POST", payload),
+  testR2Config: (payload?: {
+    account_id?: string;
+    bucket?: string;
+    public_url?: string;
+    access_key_id?: string;
+    secret_access_key?: string;
+    endpoint?: string;
+  }) => request<R2TestResult>("/api/r2/test", "POST", payload ?? {}),
+  disconnectR2Config: () =>
+    request<R2ConfigStatus>("/api/r2/disconnect", "POST", {}),
+
+  getProjectReposStatus: (projectId: string) =>
+    request<ProjectReposSyncStatus>(
+      `/api/projects/${encodeURIComponent(projectId)}/repos/status`,
+    ),
+  syncProjectRepos: (projectId: string) =>
+    request<ProjectReposSyncStatus>(
+      `/api/projects/${encodeURIComponent(projectId)}/repos/sync`,
+      "POST",
+      {},
+    ),
 };

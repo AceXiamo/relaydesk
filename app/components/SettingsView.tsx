@@ -5,15 +5,31 @@ import {
   GithubRepoPicker,
   parseManualRepoInput,
 } from "./GithubRepoPicker.tsx";
-import { Button, CopyButton, EmptyState, Switch, useToast } from "./ui.tsx";
+import {
+  Button,
+  CopyButton,
+  DeliveryModeBadge,
+  EmptyState,
+  LivePulseDot,
+  Switch,
+  useToast,
+} from "./ui.tsx";
 import { api } from "~/lib/api.ts";
+import {
+  DELIVERY_MODE_DESCRIPTIONS,
+  DELIVERY_MODE_LABELS,
+} from "~/lib/format.ts";
 import type {
   AiConfigStatus,
   AiTestResult,
+  DeliveryMode,
   GithubConnectionSummary,
   GithubInspectPayload,
   GithubOwnerInfo,
   ProjectDetail,
+  ProjectReposSyncStatus,
+  R2ConfigStatus,
+  R2TestResult,
 } from "~/lib/types.ts";
 
 interface SettingsViewProps {
@@ -60,20 +76,79 @@ const LLM_PRESETS = [
 
 const VALID_OWNER_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
-function buildSnippets(project: ProjectDetail, activeRepo?: string) {
+const DELIVERY_MODE_OPTIONS: Array<{
+  mode: DeliveryMode;
+  icon: string;
+  badge?: string;
+}> = [
+  { mode: "direct_push", icon: "zap", badge: "默认" },
+  { mode: "pr_automerge", icon: "git-merge" },
+  { mode: "review_only", icon: "file-check-2" },
+];
+
+const SKILL_INSTALL_COMMAND = [
+  "# Clone or link Relaydesk skill into Claude Code & Codex",
+  "mkdir -p ~/.claude/skills ~/.codex/skills",
+  "ln -sfn /path/to/relaydesk/skills/relaydesk ~/.claude/skills/relaydesk",
+  "ln -sfn /path/to/relaydesk/skills/relaydesk ~/.codex/skills/relaydesk",
+].join("\n");
+
+const SKILL_WAKEUP_PROMPT =
+  "Use the relaydesk skill to autonomously handle at most 1 task in this workspace. If NOOP, PAUSED, or BUSY, reply with that exact word and stop immediately.";
+
+function maskAgentKey(key: string): string {
+  if (!key) return "••••••••";
+  if (key.length <= 10) return "••••••••••";
+  return `${key.slice(0, 6)}${"•".repeat(Math.min(14, key.length - 10))}${key.slice(-4)}`;
+}
+
+function buildSkillInitPrompt(
+  project: ProjectDetail,
+  origin: string,
+  repos: string[],
+  keyText: string,
+): string {
+  const repoLines = repos.length ? repos.join(", ") : project.repo;
+  return [
+    "请使用 relaydesk skill 为当前工作目录初始化 Relaydesk 全自动迭代接入，并配置本项目专属的 1:1 定时任务。",
+    "",
+    "项目接入参数：",
+    `- Project Name: ${project.name}`,
+    `- Server URL: ${origin}`,
+    `- Project ID: ${project.id}`,
+    `- Agent Key: ${keyText}`,
+    `- Bound Repos: ${repoLines}`,
+    `- Delivery Mode: ${project.delivery_mode}`,
+    "",
+    "请按顺序帮我完成：",
+    "1. 扫描当前工作目录及一级子目录中的 git 仓库，核对与上方 Bound Repos 的映射关系；若有缺失仓库请提示我补充路径或确认 clone。",
+    `2. 运行 \`node ~/.claude/skills/relaydesk/scripts/relaydesk.mjs init --url "${origin}" --project "${project.id}" --key "${keyText}" --delivery "${project.delivery_mode}"\`（Codex 环境使用 \`~/.codex/skills/relaydesk/scripts/relaydesk.mjs\`），将密钥安全写入本机 \`~/.config/relaydesk/projects/${project.id}.json\`（0600 权限，不进 git），并在工作目录生成不含密钥的 \`.relaydesk.json\`。`,
+    "3. 运行 `check` 命令验证服务端连通性、自动化开关状态和本地子仓库映射。",
+    "4. 通过对话引导我为当前工作目录创建一条专属的 1:1 定时自动任务（建议每 10–15 分钟巡检一次），定时任务触发 Prompt 请严格使用以下极简指令：",
+    `   ${SKILL_WAKEUP_PROMPT}`,
+  ].join("\n");
+}
+
+function buildManualInitCli(
+  project: ProjectDetail,
+  origin: string,
+  keyText: string,
+): string {
+  return [
+    "node ~/.claude/skills/relaydesk/scripts/relaydesk.mjs init \\",
+    `  --url '${origin}' \\`,
+    `  --project '${project.id}' \\`,
+    `  --key '${keyText}' \\`,
+    `  --delivery '${project.delivery_mode}'`,
+  ].join("\n");
+}
+
+function buildSnippets(project: ProjectDetail) {
   const origin =
     typeof window !== "undefined" ? window.location.origin : "https://your-relaydesk.example";
-  const targetRepo = activeRepo || project.repo;
-  const repoDir = targetRepo.split("/").pop() || "repo";
   return {
+    origin,
     widget: `<script defer src="${origin}/widget.js" data-project="${project.id}" data-key="${project.intake_key}"></script>`,
-    agent: [
-      `export RELAYDESK_URL='${origin}'`,
-      `export RELAYDESK_PROJECT='${project.id}'`,
-      `read -rsp 'Agent key: ' RELAYDESK_AGENT_KEY; echo`,
-      `export RELAYDESK_AGENT_KEY`,
-      `python3 agent/relay.py --repo ~/src/${repoDir} -- codex exec --sandbox workspace-write -`,
-    ].join("\n"),
     bot: [
       `export RELAY_URL='${origin}'`,
       `export RELAY_PROJECT='${project.id}'`,
@@ -142,8 +217,36 @@ export function SettingsView({
   const [projInstructions, setProjInstructions] = useState(
     project?.agent_instructions ?? "",
   );
+  const [projPaused, setProjPaused] = useState(project?.automation_paused ?? false);
+  const [projDeliveryMode, setProjDeliveryMode] = useState<DeliveryMode>(
+    project?.delivery_mode ?? "direct_push",
+  );
+  const [projWidgetCodeContext, setProjWidgetCodeContext] = useState<boolean>(
+    project?.widget_code_context ?? true,
+  );
   const [savingProject, setSavingProject] = useState(false);
-  const [snippetRepo, setSnippetRepo] = useState(project?.repo ?? "");
+
+  // R2 object storage settings
+  const [r2Config, setR2Config] = useState<R2ConfigStatus | null>(null);
+  const [r2AccountId, setR2AccountId] = useState("");
+  const [r2Bucket, setR2Bucket] = useState("");
+  const [r2PublicUrl, setR2PublicUrl] = useState("");
+  const [r2AccessKeyId, setR2AccessKeyId] = useState("");
+  const [r2SecretKey, setR2SecretKey] = useState("");
+  const [showR2Secret, setShowR2Secret] = useState(false);
+  const [savingR2, setSavingR2] = useState(false);
+  const [testingR2, setTestingR2] = useState(false);
+  const [r2TestResult, setR2TestResult] = useState<R2TestResult | null>(null);
+  const [r2TestError, setR2TestError] = useState("");
+
+  // Project container repo mirror status (for widget code context)
+  const [repoMirrorStatus, setRepoMirrorStatus] = useState<ProjectReposSyncStatus | null>(null);
+  const [syncingRepos, setSyncingRepos] = useState(false);
+  const [togglingCodeCtx, setTogglingCodeCtx] = useState(false);
+
+  // Skill onboarding UI state
+  const [showPromptKey, setShowPromptKey] = useState(false);
+  const [showAdvancedSkill, setShowAdvancedSkill] = useState(false);
 
   // Origins form (sources view)
   const [originsList, setOriginsList] = useState<string[]>(
@@ -167,8 +270,10 @@ export function SettingsView({
       setProjRepos(nextRepos);
       setProjRepoDraft("");
       setProjInstructions(project.agent_instructions);
+      setProjPaused(project.automation_paused);
+      setProjDeliveryMode(project.delivery_mode);
+      setProjWidgetCodeContext(project.widget_code_context ?? true);
       setOriginsList(project.allowed_origins);
-      setSnippetRepo(nextRepos[0] ?? project.repo);
     }
   }, [
     project?.id,
@@ -176,8 +281,45 @@ export function SettingsView({
     project?.repo,
     project?.repos,
     project?.agent_instructions,
+    project?.automation_paused,
+    project?.delivery_mode,
+    project?.widget_code_context,
     project?.allowed_origins,
   ]);
+
+  useEffect(() => {
+    let active = true;
+    api
+      .getR2Config()
+      .then((cfg) => {
+        if (!active) return;
+        setR2Config(cfg);
+        setR2AccountId(cfg.account_id);
+        setR2Bucket(cfg.bucket);
+        setR2PublicUrl(cfg.public_url);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!project?.id) {
+      setRepoMirrorStatus(null);
+      return;
+    }
+    let active = true;
+    api
+      .getProjectReposStatus(project.id)
+      .then((st) => {
+        if (active) setRepoMirrorStatus(st);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [project?.id, project?.repos, project?.widget_code_context]);
 
   const handleSaveAi = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -519,6 +661,9 @@ export function SettingsView({
         repo: effectiveProjRepos[0],
         repos: effectiveProjRepos,
         agent_instructions: projInstructions,
+        automation_paused: projPaused,
+        delivery_mode: projDeliveryMode,
+        widget_code_context: projWidgetCodeContext,
       });
       setProjRepoDraft("");
       onProjectUpdated(updated);
@@ -527,6 +672,109 @@ export function SettingsView({
       toast.error(err instanceof Error ? err.message : "保存项目配置失败");
     } finally {
       setSavingProject(false);
+    }
+  };
+
+  const handleSaveR2 = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingR2(true);
+    setR2TestError("");
+    try {
+      const updated = await api.saveR2Config({
+        account_id: r2AccountId.trim(),
+        bucket: r2Bucket.trim(),
+        public_url: r2PublicUrl.trim(),
+        access_key_id: r2AccessKeyId.trim() || undefined,
+        secret_access_key: r2SecretKey.trim() || undefined,
+      });
+      setR2Config(updated);
+      setR2AccessKeyId("");
+      setR2SecretKey("");
+      toast.success("Cloudflare R2 图床配置已保存");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "保存 R2 配置失败");
+    } finally {
+      setSavingR2(false);
+    }
+  };
+
+  const handleTestR2 = async () => {
+    setTestingR2(true);
+    setR2TestResult(null);
+    setR2TestError("");
+    try {
+      const res = await api.testR2Config({
+        account_id: r2AccountId.trim() || undefined,
+        bucket: r2Bucket.trim() || undefined,
+        public_url: r2PublicUrl.trim() || undefined,
+        access_key_id: r2AccessKeyId.trim() || undefined,
+        secret_access_key: r2SecretKey.trim() || undefined,
+      });
+      setR2TestResult(res);
+      toast.success(`R2 连接正常（${res.latency_ms}ms）`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "R2 连接测试失败";
+      setR2TestError(msg);
+      toast.error(msg);
+    } finally {
+      setTestingR2(false);
+    }
+  };
+
+  const handleClearR2 = async () => {
+    setSavingR2(true);
+    try {
+      const updated = await api.disconnectR2Config();
+      setR2Config(updated);
+      setR2AccountId(updated.account_id);
+      setR2Bucket(updated.bucket);
+      setR2PublicUrl(updated.public_url);
+      setR2AccessKeyId("");
+      setR2SecretKey("");
+      setR2TestResult(null);
+      setR2TestError("");
+      toast.info("已清除工作区 R2 配置");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "清除 R2 配置失败");
+    } finally {
+      setSavingR2(false);
+    }
+  };
+
+  const handleToggleWidgetCodeContext = async (enabled: boolean) => {
+    if (!project) return;
+    setTogglingCodeCtx(true);
+    setProjWidgetCodeContext(enabled);
+    try {
+      const { project: updated } = await api.updateProject(project.id, {
+        widget_code_context: enabled,
+      });
+      onProjectUpdated(updated);
+      toast.success(enabled ? "已开启收集组件只读代码上下文" : "已关闭收集组件代码上下文");
+    } catch (err) {
+      setProjWidgetCodeContext(!enabled);
+      toast.error(err instanceof Error ? err.message : "更新设置失败");
+    } finally {
+      setTogglingCodeCtx(false);
+    }
+  };
+
+  const handleSyncProjectRepos = async () => {
+    if (!project) return;
+    setSyncingRepos(true);
+    try {
+      const st = await api.syncProjectRepos(project.id);
+      setRepoMirrorStatus(st);
+      const failed = st.repos.filter((r) => r.error);
+      if (failed.length > 0) {
+        toast.error(`同步完成，但 ${failed.length} 个仓库拉取失败：${failed[0].error}`);
+      } else {
+        toast.success(`已同步 ${st.repos.length} 个仓库最新代码`);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "同步仓库代码失败");
+    } finally {
+      setSyncingRepos(false);
     }
   };
 
@@ -573,7 +821,32 @@ export function SettingsView({
     }
   };
 
-  const snippets = project ? buildSnippets(project, snippetRepo) : null;
+  const snippets = project ? buildSnippets(project) : null;
+  const skillInitPromptReal =
+    project && snippets
+      ? buildSkillInitPrompt(project, snippets.origin, projectReposList, project.agent_key)
+      : "";
+  const skillInitPromptPreview =
+    project && snippets
+      ? buildSkillInitPrompt(
+          project,
+          snippets.origin,
+          projectReposList,
+          showPromptKey ? project.agent_key : maskAgentKey(project.agent_key),
+        )
+      : "";
+  const manualInitCliReal =
+    project && snippets
+      ? buildManualInitCli(project, snippets.origin, project.agent_key)
+      : "";
+  const manualInitCliPreview =
+    project && snippets
+      ? buildManualInitCli(
+          project,
+          snippets.origin,
+          showPromptKey ? project.agent_key : maskAgentKey(project.agent_key),
+        )
+      : "";
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -604,10 +877,10 @@ export function SettingsView({
                   </div>
                   <div>
                     <h2 className="text-[14.5px] font-semibold text-[var(--text-primary)]">
-                      AI 助手与 LLM 配置
+                      AI 助手与服务端噪音预筛 (LLM)
                     </h2>
                     <p className="text-[12px] text-[var(--text-muted)]">
-                      用于任务讨论助手与可选的反馈组件追问，支持任何 OpenAI 兼容接口。
+                      支持任何 OpenAI 兼容接口，用于新反馈异步噪音预筛（方案 A）、任务讨论助手与可选追问。
                     </p>
                   </div>
                 </div>
@@ -630,12 +903,28 @@ export function SettingsView({
                       ? aiConfig.source === "workspace"
                         ? `工作区已配置 · ${aiConfig.model}`
                         : `环境变量 · ${aiConfig.model}`
-                      : "未配置（本地规则模式）"}
+                      : "未配置（直通 Local Agent 终裁）"}
                   </span>
                 )}
               </div>
 
               <div className="p-5 space-y-4">
+                {/* Scheme A two-tier noise pre-screen explanation */}
+                <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/[0.045] dark:bg-indigo-500/[0.07] px-3.5 py-3 flex items-start gap-2.5">
+                  <Icon
+                    name="shield-check"
+                    size={15}
+                    className="text-indigo-600 dark:text-indigo-400 mt-0.5 shrink-0"
+                  />
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                      方案 A · 两级省 Token 噪音预筛
+                    </div>
+                    <p className="text-[12px] leading-relaxed text-[var(--text-secondary)]">
+                      配置服务端低成本 LLM 后，新反馈入库时会自动异步预检：明显测试单与无意义垃圾单直接自动归档，不唤醒本机 Claude / Codex 消耗 Token；拿不准或未配置 LLM 时一律放行给 Local Agent 结合代码终裁。
+                    </p>
+                  </div>
+                </div>
                 {/* Quick Provider Presets */}
                 <div>
                   <span className="block text-[12px] font-medium text-[var(--text-secondary)] mb-2">
@@ -767,8 +1056,8 @@ export function SettingsView({
                     id="ai-intake-toggle"
                     checked={aiIntakeEnabled}
                     onChange={setAiIntakeEnabled}
-                    label="允许反馈组件使用 LLM 追问"
-                    description="开启后，访客在嵌入组件填写初步描述时，将调用上述模型生成一句针对性追问（仅发送访客当前描述，不含内部任务数据）。"
+                    label="允许收集组件启用 AI 对话助手（Agent）"
+                    description="开启后，访客可在嵌入组件中与 AI 实时流式对话、附带截屏看图排查；配合项目代码上下文开关，可直接查阅绑定仓库解答使用疑问，并将真实 Bug/建议整理为一键提单卡。"
                   />
                 </div>
 
@@ -826,6 +1115,208 @@ export function SettingsView({
                     loading={savingAi}
                   >
                     保存 AI 配置
+                  </Button>
+                </div>
+              </div>
+            </form>
+
+            {/* 1.5 Cloudflare R2 Screenshot Storage */}
+            <form
+              onSubmit={handleSaveR2}
+              className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs"
+            >
+              <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-amber-500/12 text-amber-600 dark:text-amber-400 flex items-center justify-center">
+                    <Icon name="cloud" size={16} />
+                  </div>
+                  <div>
+                    <h2 className="text-[14.5px] font-semibold text-[var(--text-primary)]">
+                      Cloudflare R2 截图图床
+                    </h2>
+                    <p className="text-[12px] text-[var(--text-muted)]">
+                      用于托管收集组件的自由框选截屏与粘贴图片，自动返回自定义公开域名链接。
+                    </p>
+                  </div>
+                </div>
+                {r2Config && (
+                  <span
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium ${
+                      r2Config.configured
+                        ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
+                        : "bg-[var(--surface-subtle)] text-[var(--text-muted)]"
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        r2Config.configured ? "bg-emerald-500" : "bg-zinc-400"
+                      }`}
+                    />
+                    {r2Config.configured
+                      ? `${r2Config.source === "workspace" ? "已配置" : "环境变量"} · ${r2Config.bucket}`
+                      : "未配置"}
+                  </span>
+                )}
+              </div>
+
+              <div className="p-5 space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <label className="block space-y-1.5">
+                    <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                      Cloudflare Account ID
+                    </span>
+                    <input
+                      type="text"
+                      required
+                      value={r2AccountId}
+                      onChange={(e) => setR2AccountId(e.target.value)}
+                      placeholder="例如 2492b541649a..."
+                      spellCheck={false}
+                      className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                    />
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                      R2 Bucket 名称
+                    </span>
+                    <input
+                      type="text"
+                      required
+                      value={r2Bucket}
+                      onChange={(e) => setR2Bucket(e.target.value)}
+                      placeholder="relaydesk"
+                      spellCheck={false}
+                      className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                    />
+                  </label>
+                </div>
+
+                <label className="block space-y-1.5">
+                  <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                    公开访问域名 (Custom Domain)
+                  </span>
+                  <input
+                    type="url"
+                    required
+                    value={r2PublicUrl}
+                    onChange={(e) => setR2PublicUrl(e.target.value)}
+                    placeholder="https://relaydesk-r2.acexiamo.com"
+                    spellCheck={false}
+                    className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                  />
+                  <span className="block text-[11.5px] text-[var(--text-muted)]">
+                    上传后的截图将以 <code className="font-mono">{r2PublicUrl || "https://relaydesk-r2.acexiamo.com"}/uploads/...</code> 嵌进反馈单并供 AI 多模态读取。
+                  </span>
+                </label>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <label className="block space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                        Access Key ID
+                      </span>
+                      {r2Config?.has_credentials && (
+                        <span className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400">
+                          {r2Config.access_key_preview}
+                        </span>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      value={r2AccessKeyId}
+                      onChange={(e) => setR2AccessKeyId(e.target.value)}
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder={
+                        r2Config?.has_credentials
+                          ? "已保存，留空保持不变"
+                          : "R2 S3 Access Key ID"
+                      }
+                      className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                    />
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                      Secret Access Key
+                    </span>
+                    <div className="relative">
+                      <input
+                        type={showR2Secret ? "text" : "password"}
+                        value={r2SecretKey}
+                        onChange={(e) => setR2SecretKey(e.target.value)}
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder={
+                          r2Config?.has_credentials
+                            ? "已保存，留空保持不变"
+                            : "R2 S3 Secret Access Key"
+                        }
+                        className="w-full h-9.5 pl-3 pr-10 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowR2Secret((v) => !v)}
+                        aria-label={showR2Secret ? "隐藏密钥" : "显示密钥"}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer p-1"
+                      >
+                        <Icon name={showR2Secret ? "eye-off" : "eye"} size={15} />
+                      </button>
+                    </div>
+                  </label>
+                </div>
+
+                {r2TestResult && (
+                  <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/8 text-[12.5px] text-emerald-700 dark:text-emerald-300">
+                    <Icon name="check-circle-2" size={15} className="shrink-0" />
+                    <span>
+                      R2 写入连通正常 · Bucket <strong className="font-mono">{r2TestResult.bucket}</strong> ·
+                      延迟 <strong className="font-mono">{r2TestResult.latency_ms}ms</strong>
+                    </span>
+                  </div>
+                )}
+                {r2TestError && (
+                  <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl border border-rose-500/30 bg-rose-500/8 text-[12.5px] text-rose-600 dark:text-rose-400">
+                    <Icon name="alert-circle" size={15} className="shrink-0" />
+                    <span>{r2TestError}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="px-5 py-3.5 bg-[var(--surface-subtle)] border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  {r2Config?.source === "workspace" && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      icon="trash-2"
+                      onClick={() => void handleClearR2()}
+                      disabled={savingR2}
+                    >
+                      清除配置
+                    </Button>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    icon="zap"
+                    loading={testingR2}
+                    disabled={!r2Bucket.trim() || !r2PublicUrl.trim()}
+                    onClick={() => void handleTestR2()}
+                  >
+                    测试写入
+                  </Button>
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    size="sm"
+                    icon="check"
+                    loading={savingR2}
+                  >
+                    保存 R2 配置
                   </Button>
                 </div>
               </div>
@@ -1336,15 +1827,30 @@ export function SettingsView({
               onSubmit={handleSaveProject}
               className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs"
             >
-              <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+              <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
                     <Icon name="git-branch" size={16} />
                   </div>
-                  <div>
-                    <h2 className="text-[14.5px] font-semibold text-[var(--text-primary)]">
-                      项目配置 · {project.name}
-                    </h2>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h2 className="text-[14.5px] font-semibold text-[var(--text-primary)] truncate">
+                        项目配置 · {project.name}
+                      </h2>
+                      <span
+                        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                          projPaused
+                            ? "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20"
+                            : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20"
+                        }`}
+                      >
+                        <LivePulseDot
+                          tone={projPaused ? "amber" : "emerald"}
+                          active={!projPaused}
+                        />
+                        {projPaused ? "已暂停" : "全自动运行中"}
+                      </span>
+                    </div>
                     <p className="text-[12px] text-[var(--text-muted)]">
                       项目 ID：<code className="font-mono">{project.id}</code>
                     </p>
@@ -1383,6 +1889,75 @@ export function SettingsView({
                   defaultExpanded={false}
                 />
 
+                {/* Automation Switch */}
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/70 p-3.5 space-y-3.5">
+                  <Switch
+                    checked={!projPaused}
+                    onChange={(enabled) => setProjPaused(!enabled)}
+                    label="启用全自动迭代"
+                    description="开启后，本机 Agent 定时巡检时会自动领取并闭环处理新反馈；暂停后所有巡检会立即返回 PAUSED，不消耗本地 Agent Token。"
+                  />
+                  <div className="border-t border-[var(--border-subtle)] pt-3.5">
+                    <Switch
+                      checked={projWidgetCodeContext}
+                      onChange={setProjWidgetCodeContext}
+                      label="允许收集组件 AI 查阅绑定仓库代码（只读沙箱）"
+                      description="开启后，服务端会在容器内浅克隆本项目绑定仓库并按 5 分钟 TTL 后台刷新，访客咨询功能用法时由 AI 助手直接查代码秒答（禁止泄露原始源码与敏感文件）。"
+                    />
+                  </div>
+                </div>
+
+                {/* Default Delivery Mode Segmented Selector */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                      默认交付方式
+                    </span>
+                    <DeliveryModeBadge mode={projDeliveryMode} compact />
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {DELIVERY_MODE_OPTIONS.map((opt) => {
+                      const active = projDeliveryMode === opt.mode;
+                      return (
+                        <button
+                          key={opt.mode}
+                          type="button"
+                          onClick={() => setProjDeliveryMode(opt.mode)}
+                          aria-pressed={active}
+                          className={`group flex flex-col items-start gap-1.5 p-3 rounded-xl border text-left transition-all duration-150 cursor-pointer ${
+                            active
+                              ? "border-indigo-500/60 bg-indigo-500/[0.07] ring-1 ring-indigo-500/20 shadow-2xs"
+                              : "border-[var(--border-subtle)] bg-[var(--surface-elevated)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]"
+                          }`}
+                        >
+                          <div className="w-full flex items-center justify-between gap-1.5">
+                            <span className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-[var(--text-primary)]">
+                              <Icon
+                                name={opt.icon}
+                                size={13.5}
+                                className={
+                                  active
+                                    ? "text-indigo-600 dark:text-indigo-400"
+                                    : "text-[var(--text-muted)] group-hover:text-[var(--text-primary)]"
+                                }
+                              />
+                              {DELIVERY_MODE_LABELS[opt.mode]}
+                            </span>
+                            {opt.badge && (
+                              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-500/12 text-emerald-700 dark:text-emerald-300">
+                                {opt.badge}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+                            {DELIVERY_MODE_DESCRIPTIONS[opt.mode]}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <label className="block space-y-1.5">
                   <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
                     Agent 项目级指令
@@ -1392,11 +1967,11 @@ export function SettingsView({
                     maxLength={8000}
                     value={projInstructions}
                     onChange={(e) => setProjInstructions(e.target.value)}
-                    placeholder="例如：提交验收前务必运行 pnpm test 与 pnpm typecheck，不要修改数据库迁移脚本。"
+                    placeholder="例如：提交交付前务必运行 pnpm test 与 pnpm typecheck，不要修改数据库迁移脚本。"
                     className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-3 text-[13px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500"
                   />
                   <span className="block text-[11.5px] text-[var(--text-muted)]">
-                    每次派发任务给本机执行器时都会附带这段指令。
+                    每次派发任务给本机 Local Agent 时都会附带这段指令。
                   </span>
                 </label>
               </div>
@@ -1413,62 +1988,224 @@ export function SettingsView({
               </div>
             </form>
 
-            {/* 4. Local Agent Integration */}
+            {/* 4. Local Agent Skill · 1:1 Scheduled Task Onboarding */}
             {snippets && (
-              <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs">
-                <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-amber-500/12 text-amber-600 dark:text-amber-400 flex items-center justify-center">
-                    <Icon name="terminal" size={16} />
-                  </div>
-                  <div>
-                    <h2 className="text-[14.5px] font-semibold text-[var(--text-primary)]">
-                      连接 Local Agent 执行器
-                    </h2>
-                    <p className="text-[12px] text-[var(--text-muted)]">
-                      在开发机的 Relaydesk 目录运行，将 <code className="font-mono">--repo</code> 改为本机仓库路径。
-                    </p>
-                  </div>
-                </div>
-                <div className="p-5 space-y-3">
-                  {projectReposList.length > 1 && (
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[11.5px] text-[var(--text-muted)] mr-1">
-                        选择本地仓库：
-                      </span>
-                      {projectReposList.map((r) => {
-                        const active = r === snippetRepo;
-                        return (
-                          <button
-                            key={r}
-                            type="button"
-                            onClick={() => setSnippetRepo(r)}
-                            className={`px-2 py-1 rounded-lg text-[11.5px] font-mono border transition cursor-pointer ${
-                              active
-                                ? "border-indigo-500 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
-                                : "border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                            }`}
-                          >
-                            {r}
-                          </button>
-                        );
-                      })}
+              <section
+                id="relaydesk-skill-setup"
+                className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs scroll-mt-6"
+              >
+                <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-8 h-8 rounded-lg bg-amber-500/12 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+                      <Icon name="terminal" size={16} />
                     </div>
-                  )}
-                  <pre className="p-3.5 rounded-xl bg-zinc-950 text-zinc-100 text-[12px] font-mono leading-relaxed overflow-x-auto border border-zinc-800">
-                    {snippets.agent}
-                  </pre>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <CopyButton
-                      value={snippets.agent}
-                      label="复制启动命令"
-                      copiedLabel="命令已复制"
-                    />
-                    <CopyButton
-                      value={project.agent_key}
-                      label="复制 Agent Key"
-                      copiedLabel="Agent Key 已复制"
-                      variant="subtle"
-                    />
+                    <div className="min-w-0">
+                      <h2 className="text-[14.5px] font-semibold text-[var(--text-primary)]">
+                        Local Agent Skill · 1:1 定时任务接入
+                      </h2>
+                      <p className="text-[12px] text-[var(--text-muted)]">
+                        每个项目一个工作目录（聚合全部子仓库）+ 一条专属 1:1 定时任务，全程在 Claude Code / Codex 对话中完成。
+                      </p>
+                    </div>
+                  </div>
+                  <DeliveryModeBadge mode={project.delivery_mode} compact />
+                </div>
+
+                <div className="p-5 space-y-5">
+                  {/* Step 1: Global Skill Install */}
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-[var(--surface-subtle)] border border-[var(--border-strong)] text-[11px] font-mono font-semibold text-[var(--text-primary)] inline-flex items-center justify-center shrink-0">
+                          1
+                        </span>
+                        <h3 className="text-[13px] font-semibold text-[var(--text-primary)]">
+                          全局安装 Skill
+                        </h3>
+                        <span className="text-[11px] px-1.5 py-0.5 rounded bg-[var(--surface-subtle)] text-[var(--text-muted)]">
+                          仅需一次
+                        </span>
+                      </div>
+                      <CopyButton
+                        value={SKILL_INSTALL_COMMAND}
+                        label="复制安装命令"
+                        copiedLabel="命令已复制"
+                        size="xs"
+                      />
+                    </div>
+                    <p className="text-[12px] leading-relaxed text-[var(--text-muted)] pl-7">
+                      本仓库内置 Skill 位于{" "}
+                      <code className="font-mono text-[var(--text-secondary)]">
+                        skills/relaydesk/
+                      </code>
+                      。将下方路径替换为本机 Relaydesk 目录后执行一次，即可同时接入 Claude Code 与 Codex。
+                    </p>
+                    <pre className="ml-7 p-3.5 rounded-xl bg-zinc-950 text-zinc-100 text-[12px] font-mono leading-relaxed overflow-x-auto border border-zinc-800">
+                      {SKILL_INSTALL_COMMAND}
+                    </pre>
+                  </div>
+
+                  {/* Step 2: Highlighted One-Click Init Prompt */}
+                  <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/[0.04] dark:bg-indigo-500/[0.06] p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-indigo-600 text-white text-[11px] font-mono font-semibold inline-flex items-center justify-center shrink-0">
+                          2
+                        </span>
+                        <h3 className="text-[13.5px] font-semibold text-[var(--text-primary)]">
+                          一键复制本项目 Init 引导 Prompt
+                        </h3>
+                        <span className="text-[10.5px] font-medium px-1.5 py-0.5 rounded-md bg-indigo-500/15 text-indigo-700 dark:text-indigo-300">
+                          核心步骤
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setShowPromptKey((v) => !v)}
+                          className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] bg-[var(--surface-card)] border border-[var(--border-subtle)] hover:border-[var(--border-strong)] transition cursor-pointer"
+                        >
+                          <Icon name={showPromptKey ? "eye-off" : "eye"} size={12.5} />
+                          {showPromptKey ? "隐藏密钥" : "显示密钥"}
+                        </button>
+                        <CopyButton
+                          value={skillInitPromptReal}
+                          label="复制 Init Prompt"
+                          copiedLabel="Prompt 已复制"
+                          size="xs"
+                          className="!bg-[var(--rd-accent)] !text-white !border-transparent hover:!bg-[var(--rd-accent-hover)] shadow-xs"
+                        />
+                      </div>
+                    </div>
+
+                    <p className="text-[12px] leading-relaxed text-[var(--text-secondary)]">
+                      在本机对应项目的工作目录（可包含该项目绑定的全部子仓库文件夹）打开{" "}
+                      <strong className="font-semibold text-[var(--text-primary)]">
+                        Claude Code
+                      </strong>{" "}
+                      或{" "}
+                      <strong className="font-semibold text-[var(--text-primary)]">
+                        Codex
+                      </strong>
+                      ，直接粘贴下方 Prompt，Agent 会自动扫描本地子仓库、安全写入本机密钥（不进 git），并引导你通过对话为该项目创建专属 1:1 定时自动任务。
+                    </p>
+
+                    <pre className="p-3.5 rounded-xl bg-zinc-950 text-zinc-100 text-[12px] font-mono leading-relaxed whitespace-pre-wrap break-words overflow-x-auto border border-zinc-800 max-h-72 overflow-y-auto rd-scroll">
+                      {skillInitPromptPreview}
+                    </pre>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-[var(--text-muted)]">
+                      <span className="inline-flex items-center gap-1.5">
+                        <Icon name="lock" size={12} className="text-emerald-500" />
+                        {showPromptKey
+                          ? "当前预览显示真实 Agent Key，注意防止录屏泄露。"
+                          : "预览默认隐藏 Agent Key，点击「复制 Init Prompt」时自动带入真实密钥。"}
+                      </span>
+                      <span className="font-mono text-[11px]">
+                        已包含 {projectReposList.length} 个绑定仓库
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Step 3: Collapsible Advanced Reference */}
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/50 overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvancedSkill((v) => !v)}
+                      aria-expanded={showAdvancedSkill}
+                      className="w-full px-4 py-3 flex items-center justify-between gap-2 text-left hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="w-5 h-5 rounded-full bg-[var(--surface-card)] border border-[var(--border-subtle)] text-[11px] font-mono font-semibold text-[var(--text-muted)] inline-flex items-center justify-center shrink-0">
+                          3
+                        </span>
+                        <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                          高级参考：手动 CLI 命令、极简唤醒 Prompt 与密钥隔离说明
+                        </span>
+                      </div>
+                      <Icon
+                        name={showAdvancedSkill ? "chevron-down" : "chevron-right"}
+                        size={15}
+                        className="text-[var(--text-muted)] shrink-0"
+                      />
+                    </button>
+
+                    {showAdvancedSkill && (
+                      <div className="px-4 pb-4 pt-2 border-t border-[var(--border-subtle)] space-y-4">
+                        {/* Manual CLI */}
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-[12px] font-medium text-[var(--text-primary)]">
+                              手动 Init CLI 命令
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <CopyButton
+                                value={manualInitCliReal}
+                                label="复制 CLI 命令"
+                                copiedLabel="CLI 已复制"
+                                size="xs"
+                              />
+                              <CopyButton
+                                value={project.agent_key}
+                                label="复制 Agent Key"
+                                copiedLabel="Agent Key 已复制"
+                                size="xs"
+                                variant="subtle"
+                              />
+                            </div>
+                          </div>
+                          <pre className="p-3 rounded-xl bg-zinc-950 text-zinc-100 text-[12px] font-mono leading-relaxed overflow-x-auto border border-zinc-800">
+                            {manualInitCliPreview}
+                          </pre>
+                        </div>
+
+                        {/* Ultra-short Wake-up Prompt */}
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[12px] font-medium text-[var(--text-primary)]">
+                                极简固定唤醒 Prompt
+                              </span>
+                              <span className="text-[10.5px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+                                ~25 tokens
+                              </span>
+                            </div>
+                            <CopyButton
+                              value={SKILL_WAKEUP_PROMPT}
+                              label="复制唤醒 Prompt"
+                              copiedLabel="已复制"
+                              size="xs"
+                            />
+                          </div>
+                          <pre className="p-3 rounded-xl bg-zinc-950 text-zinc-100 text-[12px] font-mono leading-relaxed whitespace-pre-wrap break-words border border-zinc-800">
+                            {SKILL_WAKEUP_PROMPT}
+                          </pre>
+                        </div>
+
+                        {/* Secret Isolation Note */}
+                        <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] px-3.5 py-2.5 flex items-start gap-2 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+                          <Icon
+                            name="shield-check"
+                            size={14}
+                            className="text-emerald-500 mt-0.5 shrink-0"
+                          />
+                          <span>
+                            <strong className="font-medium text-[var(--text-primary)]">
+                              密钥隔离机制：
+                            </strong>
+                            Agent Key 保存在本机{" "}
+                            <code className="font-mono text-[var(--text-secondary)]">
+                              ~/.config/relaydesk/projects/{project.id}.json
+                            </code>
+                            （权限 <code className="font-mono">0600</code>），项目工作目录生成的{" "}
+                            <code className="font-mono text-[var(--text-secondary)]">
+                              ./.relaydesk.json
+                            </code>{" "}
+                            仅存项目 ID 与本地子仓库映射，不含任何敏感凭证，可安全置于工作区。
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </section>
@@ -1548,22 +2285,46 @@ export function SettingsView({
                 </div>
               </section>
 
-              {/* Widget Snippet */}
+              {/* Widget Snippet & Capabilities */}
               <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs">
-                <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
-                    <Icon name="code-2" size={16} />
+                <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+                      <Icon name="code-2" size={16} />
+                    </div>
+                    <div>
+                      <h2 className="text-[14.5px] font-semibold text-[var(--text-primary)]">
+                        应用内 AI 反馈组件
+                      </h2>
+                      <p className="text-[12px] text-[var(--text-muted)]">
+                        粘贴到应用 HTML 的 <code className="font-mono">&lt;body&gt;</code> 内即可启用 AI 对话浮窗、网页自由框选截屏标注与一键提单。
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h2 className="text-[14.5px] font-semibold text-[var(--text-primary)]">
-                      应用内反馈组件
-                    </h2>
-                    <p className="text-[12px] text-[var(--text-muted)]">
-                      粘贴到应用 HTML 的 <code className="font-mono">&lt;body&gt;</code> 内即可启用右下角悬浮反馈浮窗，支持自动跟随深浅主题。
-                    </p>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                        aiConfig?.configured && aiConfig.intake_enabled
+                          ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-300"
+                          : "bg-[var(--surface-subtle)] text-[var(--text-muted)]"
+                      }`}
+                    >
+                      <Icon name="sparkles" size={11} />
+                      {aiConfig?.configured && aiConfig.intake_enabled ? "AI 对话已启用" : "AI 对话未开启"}
+                    </span>
+                    <span
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                        r2Config?.configured
+                          ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
+                          : "bg-amber-500/12 text-amber-700 dark:text-amber-300"
+                      }`}
+                    >
+                      <Icon name="camera" size={11} />
+                      {r2Config?.configured ? `截屏 R2 · ${r2Config.bucket}` : "截屏图床未配置"}
+                    </span>
                   </div>
                 </div>
-                <div className="p-5 space-y-3">
+                <div className="p-5 space-y-4">
                   <pre className="p-3.5 rounded-xl bg-zinc-950 text-zinc-100 text-[12px] font-mono leading-relaxed overflow-x-auto border border-zinc-800">
                     {snippets.widget}
                   </pre>
@@ -1573,6 +2334,69 @@ export function SettingsView({
                       label="复制嵌入脚本"
                       copiedLabel="脚本已复制"
                     />
+                  </div>
+
+                  {/* Container Code Context Mirror Panel */}
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/70 p-4 space-y-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="flex-1 min-w-[220px]">
+                        <Switch
+                          checked={projWidgetCodeContext}
+                          disabled={togglingCodeCtx}
+                          onChange={(v) => void handleToggleWidgetCodeContext(v)}
+                          label="组件 AI 代码上下文（容器内只读仓库镜像）"
+                          description="开启后，访客在组件中咨询「怎么用/为什么报错」时，服务端 Agent 可只读查阅下方绑定仓库代码并当场解答；首次对话或满 5 分钟自动后台拉取最新代码。"
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="xs"
+                        icon="refresh-cw"
+                        loading={syncingRepos}
+                        disabled={!projWidgetCodeContext || projectReposList.length === 0}
+                        onClick={() => void handleSyncProjectRepos()}
+                      >
+                        立即同步代码
+                      </Button>
+                    </div>
+
+                    {projWidgetCodeContext && (
+                      <div className="space-y-1.5 pt-1 border-t border-[var(--border-subtle)]">
+                        {(repoMirrorStatus?.repos ?? projectReposList.map((r) => ({
+                          repo: r,
+                          ready: false,
+                          commit: "",
+                          updated_at: null,
+                          error: undefined as string | undefined,
+                        }))).map((entry) => (
+                          <div
+                            key={entry.repo}
+                            className="flex flex-wrap items-center justify-between gap-2 text-[12px] px-2.5 py-1.5 rounded-lg bg-[var(--surface-card)] border border-[var(--border-subtle)]"
+                          >
+                            <span className="inline-flex items-center gap-2 font-mono text-[var(--text-primary)]">
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  entry.error
+                                    ? "bg-rose-500"
+                                    : entry.ready
+                                      ? "bg-emerald-500"
+                                      : "bg-zinc-400"
+                                }`}
+                              />
+                              {entry.repo}
+                            </span>
+                            <span className="text-[11px] font-mono text-[var(--text-muted)]">
+                              {entry.error
+                                ? `同步失败: ${entry.error.slice(0, 64)}`
+                                : entry.ready
+                                  ? `已就绪${entry.commit ? ` · ${entry.commit}` : ""}`
+                                  : "尚未拉取（首次对话时自动克隆）"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               </section>

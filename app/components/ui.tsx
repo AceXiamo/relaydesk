@@ -11,6 +11,8 @@ import {
   type ReactNode,
 } from "react";
 import {
+  DELIVERY_MODE_DESCRIPTIONS,
+  DELIVERY_MODE_LABELS,
   OWNER_LABELS,
   PRIORITY_LABELS,
   SOURCE_ICONS,
@@ -20,8 +22,10 @@ import {
   formatRelativeTime,
 } from "../lib/format.ts";
 import type {
+  DeliveryMode,
   TaskOwner,
   TaskPriority,
+  TaskResolution,
   TaskSource,
   TaskStatus,
 } from "../lib/types.ts";
@@ -369,6 +373,226 @@ export function SourceBadge({ source, className }: SourceBadgeProps) {
       )}
     >
       <Icon name={icon} size={12} />
+      <span>{label}</span>
+    </span>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* LivePulseDot                                                               */
+/* -------------------------------------------------------------------------- */
+
+export type LivePulseTone = "emerald" | "amber" | "indigo" | "rose" | "zinc";
+
+export interface LivePulseDotProps {
+  tone?: LivePulseTone;
+  active?: boolean;
+  className?: string;
+}
+
+const LIVE_PULSE_TONES: Record<
+  LivePulseTone,
+  { core: string; halo: string; glow: string }
+> = {
+  emerald: {
+    core: "bg-emerald-500 dark:bg-emerald-400",
+    halo: "bg-emerald-500/70 dark:bg-emerald-400/70",
+    glow: "shadow-[0_0_6px_rgba(16,185,129,0.55)]",
+  },
+  amber: {
+    core: "bg-amber-500 dark:bg-amber-400",
+    halo: "bg-amber-500/70 dark:bg-amber-400/70",
+    glow: "shadow-[0_0_6px_rgba(245,158,11,0.55)]",
+  },
+  indigo: {
+    core: "bg-indigo-500 dark:bg-indigo-400",
+    halo: "bg-indigo-500/70 dark:bg-indigo-400/70",
+    glow: "shadow-[0_0_6px_rgba(99,102,241,0.55)]",
+  },
+  rose: {
+    core: "bg-rose-500 dark:bg-rose-400",
+    halo: "bg-rose-500/70 dark:bg-rose-400/70",
+    glow: "shadow-[0_0_6px_rgba(244,63,94,0.55)]",
+  },
+  zinc: {
+    core: "bg-zinc-400 dark:bg-zinc-500",
+    halo: "bg-zinc-400/60 dark:bg-zinc-500/60",
+    glow: "",
+  },
+};
+
+export function LivePulseDot({
+  tone = "emerald",
+  active = true,
+  className,
+}: LivePulseDotProps) {
+  const palette = LIVE_PULSE_TONES[tone];
+
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "relative inline-flex h-2 w-2 shrink-0 items-center justify-center",
+        className,
+      )}
+    >
+      {active ? (
+        <span
+          data-rd-pulse="true"
+          className={cn(
+            "absolute inline-flex h-full w-full rounded-full animate-ping opacity-65",
+            palette.halo,
+          )}
+        />
+      ) : null}
+      <span
+        className={cn(
+          "relative inline-flex h-1.5 w-1.5 rounded-full transition-opacity",
+          palette.core,
+          active ? palette.glow : "opacity-55",
+        )}
+      />
+    </span>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* ResolutionBadge                                                            */
+/* -------------------------------------------------------------------------- */
+
+export interface ResolutionBadgeProps {
+  resolution: TaskResolution;
+  triagedBy?: string;
+  compact?: boolean;
+  className?: string;
+}
+
+export function ResolutionBadge({
+  resolution,
+  triagedBy,
+  compact = false,
+  className,
+}: ResolutionBadgeProps) {
+  if (!resolution) return null;
+
+  const iconSize = compact ? 11 : 12;
+
+  let pillClass: string;
+  let iconName: string;
+  let label: string;
+
+  if (resolution === "shipped") {
+    pillClass =
+      "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]";
+    iconName = "check-circle-2";
+    label = "已自动交付";
+  } else if (resolution === "dismissed") {
+    pillClass =
+      "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-zinc-500/20";
+    iconName = triagedBy === "server_ai" ? "shield-check" : "filter";
+    label = triagedBy === "server_ai" ? "AI 预筛归档" : "已过滤归档";
+  } else {
+    pillClass =
+      "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/25";
+    iconName = "git-merge";
+    label = "已合并去重";
+  }
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center font-medium border whitespace-nowrap select-none rounded-full",
+        compact
+          ? "px-1.5 py-0.5 text-[11px] leading-none gap-1"
+          : "px-2 py-0.5 text-xs leading-4 gap-1.5",
+        pillClass,
+        className,
+      )}
+    >
+      <Icon name={iconName} size={iconSize} />
+      <span>{label}</span>
+    </span>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* DeliveryModeBadge                                                          */
+/* -------------------------------------------------------------------------- */
+
+export interface DeliveryModeBadgeProps {
+  mode: DeliveryMode;
+  compact?: boolean;
+  className?: string;
+}
+
+const DELIVERY_MODE_VISUALS: Record<
+  DeliveryMode,
+  { pill: string; icon: "zap" | "git-pull-request" | "eye" }
+> = {
+  direct_push: {
+    pill: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25",
+    icon: "zap",
+  },
+  pr_automerge: {
+    pill: "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/25",
+    icon: "git-pull-request",
+  },
+  review_only: {
+    pill: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-zinc-500/20",
+    icon: "eye",
+  },
+};
+
+// Inline Lucide git-pull-request icon so DeliveryModeBadge makes zero CDN requests.
+function GitPullRequestGlyph({ size }: { size: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="shrink-0"
+      aria-hidden="true"
+    >
+      <circle cx="18" cy="18" r="3" />
+      <circle cx="6" cy="6" r="3" />
+      <path d="M13 6h3a2 2 0 0 1 2 2v7" />
+      <line x1="6" x2="6" y1="9" y2="21" />
+    </svg>
+  );
+}
+
+export function DeliveryModeBadge({
+  mode,
+  compact = false,
+  className,
+}: DeliveryModeBadgeProps) {
+  const visual = DELIVERY_MODE_VISUALS[mode];
+  const label = DELIVERY_MODE_LABELS[mode];
+  const description = DELIVERY_MODE_DESCRIPTIONS[mode];
+  const iconSize = compact ? 11 : 12;
+
+  return (
+    <span
+      title={description}
+      className={cn(
+        "inline-flex items-center font-medium border whitespace-nowrap select-none rounded-full",
+        compact
+          ? "px-1.5 py-0.5 text-[11px] leading-none gap-1"
+          : "px-2 py-0.5 text-xs leading-4 gap-1.5",
+        visual.pill,
+        className,
+      )}
+    >
+      {visual.icon === "git-pull-request" ? (
+        <GitPullRequestGlyph size={iconSize} />
+      ) : (
+        <Icon name={visual.icon} size={iconSize} />
+      )}
       <span>{label}</span>
     </span>
   );

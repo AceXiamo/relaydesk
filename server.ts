@@ -158,9 +158,19 @@ export async function startRelaydeskServer(
 
     const method = (req.method ?? "GET").toUpperCase();
 
-    // Always serve widget.js & local fonts directly from public/
+    // Always serve widget.js, widget-capture.js & local fonts directly from public/
     if ((method === "GET" || method === "HEAD") && pathname === "/widget.js") {
       if (serveStaticFile(req, res, join(publicDir, "widget.js"), { corsAny: true })) {
+        return;
+      }
+    }
+    if ((method === "GET" || method === "HEAD") && pathname === "/widget-capture.js") {
+      if (
+        serveStaticFile(req, res, join(publicDir, "widget-capture.js"), {
+          corsAny: true,
+          immutable: true,
+        })
+      ) {
         return;
       }
     }

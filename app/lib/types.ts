@@ -13,6 +13,10 @@ export type TaskOwner = "none" | "human" | "agent";
 
 export type TaskSource = "widget" | "bot" | "console";
 
+export type DeliveryMode = "direct_push" | "pr_automerge" | "review_only";
+
+export type TaskResolution = "shipped" | "dismissed" | "merged" | null;
+
 export type WorkspaceView =
   | "queue"
   | "triage"
@@ -27,6 +31,9 @@ export interface ProjectSummary {
   name: string;
   repo: string;
   repos: string[];
+  automation_paused: boolean;
+  delivery_mode: DeliveryMode;
+  widget_code_context: boolean;
   created_at: string;
 }
 
@@ -43,7 +50,28 @@ export interface AgentProjectInfo {
   name: string;
   repo: string;
   repos: string[];
+  automation_paused: boolean;
+  delivery_mode: DeliveryMode;
+  widget_code_context: boolean;
   agent_instructions: string;
+}
+
+export interface AgentQueueItem {
+  id: string;
+  number: number;
+  title: string;
+  priority: TaskPriority;
+  status: TaskStatus;
+  owner: TaskOwner;
+  attempts: number;
+  updated_at: string;
+}
+
+export interface AgentQueuePayload {
+  paused: boolean;
+  active: AgentQueueItem | null;
+  pending: AgentQueueItem[];
+  project: AgentProjectInfo;
 }
 
 export interface TaskRecord {
@@ -59,6 +87,10 @@ export interface TaskRecord {
   status: TaskStatus;
   owner: TaskOwner;
   version: number;
+  attempts: number;
+  resolution: TaskResolution;
+  delivery_ref: string;
+  triaged_by: string;
   merged_into: string | null;
   created_at: string;
   updated_at: string;
@@ -106,6 +138,56 @@ export interface AiTestResult {
   latency_ms: number;
   model: string;
   reply_preview: string;
+}
+
+export interface R2ConfigStatus {
+  configured: boolean;
+  source: "workspace" | "env" | "none";
+  account_id: string;
+  bucket: string;
+  public_url: string;
+  endpoint: string;
+  has_credentials: boolean;
+  access_key_preview: string;
+}
+
+export interface R2TestResult {
+  ok: boolean;
+  latency_ms: number;
+  bucket: string;
+  public_url: string;
+}
+
+export interface UploadedAttachment {
+  url: string;
+  key: string;
+  content_type: string;
+  size: number;
+}
+
+export interface RepoMirrorEntry {
+  repo: string;
+  ready: boolean;
+  commit: string;
+  updated_at: string | null;
+  error?: string;
+}
+
+export interface ProjectReposSyncStatus {
+  project_id: string;
+  enabled: boolean;
+  syncing: boolean;
+  synced_at: string | null;
+  repos: RepoMirrorEntry[];
+}
+
+export interface WidgetConfigPayload {
+  project_id: string;
+  project_name: string;
+  ai_enabled: boolean;
+  code_context_enabled: boolean;
+  upload_enabled: boolean;
+  max_upload_bytes: number;
 }
 
 export type GithubTokenType = "fine_grained" | "classic" | "other";

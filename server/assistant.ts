@@ -9,8 +9,28 @@ import type {
   AgentProjectInfo,
   AiTestResult,
   TaskMessage,
+  TaskPriority,
   TaskRecord,
 } from "../app/lib/types.ts";
+
+export interface PrescreenResult {
+  verdict: "noise" | "valid" | "uncertain";
+  reason: string;
+  priority?: TaskPriority;
+}
+
+const PRESCREEN_VERDICTS = new Set<PrescreenResult["verdict"]>([
+  "noise",
+  "valid",
+  "uncertain",
+]);
+
+const PRESCREEN_PRIORITIES = new Set<TaskPriority>([
+  "low",
+  "normal",
+  "high",
+  "urgent",
+]);
 
 const STATUS_ZH: Record<string, string> = {
   triage: "待整理",
@@ -268,4 +288,87 @@ export async function testAiConnection(
     model,
     reply_preview: reply.slice(0, 80),
   };
+}
+
+function parsePrescreenJson(raw: string): PrescreenResult | null {
+  const cleaned = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start === -1 || end <= start) return null;
+    try {
+      parsed = JSON.parse(cleaned.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  const verdict = obj.verdict;
+  if (typeof verdict !== "string" || !PRESCREEN_VERDICTS.has(verdict as PrescreenResult["verdict"])) {
+    return null;
+  }
+  const reason = typeof obj.reason === "string" ? clip(obj.reason, 500) : "";
+  const rawPriority = obj.priority;
+  const priority =
+    typeof rawPriority === "string" && PRESCREEN_PRIORITIES.has(rawPriority as TaskPriority)
+      ? (rawPriority as TaskPriority)
+      : undefined;
+
+  return {
+    verdict: verdict as PrescreenResult["verdict"],
+    reason,
+    ...(priority ? { priority } : {}),
+  };
+}
+
+export async function prescreenFeedback(
+  dbPath: string,
+  project: AgentProjectInfo,
+  task: TaskRecord,
+): Promise<PrescreenResult | null> {
+  const config = getEffectiveAiConfig(dbPath);
+  if (!config.base_url || !config.model) {
+    return null;
+  }
+
+  const instruction =
+    "You are a strict, conservative pre-screening classifier for incoming product feedback (产品反馈预筛分类器).\n" +
+    'Return JSON ONLY with no extra text: {"verdict":"noise"|"valid"|"uncertain","reason":"short explanation in user language","priority":"low"|"normal"|"high"|"urgent"}.\n' +
+    "Rules:\n" +
+    '- Classify as "noise" ONLY when the submission is unmistakably a connectivity test (e.g. "test", "这是一次测试", "测试一下", "hello", "123"), empty/gibberish/random characters, or spam with ZERO actionable product feedback.\n' +
+    '- Any real bug report, feature request, UX complaint, performance issue, question about product behavior, or ambiguous/borderline report MUST be classified as "valid" or "uncertain". Never drop real user feedback.\n' +
+    '- Write "reason" briefly in the same language as the user submission.';
+
+  const context = {
+    project: clip(project.name, 120),
+    project_instructions: clip(project.agent_instructions, 2000),
+    title: clip(task.title, 300),
+    body: clip(task.body, 4000),
+    source: clip(task.source, 32),
+    source_url: clip(task.source_url, 500),
+  };
+
+  try {
+    const { reply } = await callOpenAiCompatible(
+      config,
+      instruction,
+      JSON.stringify(context),
+      220,
+    );
+    return parsePrescreenJson(reply);
+  } catch {
+    return null;
+  }
 }

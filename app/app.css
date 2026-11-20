@@ -213,7 +213,100 @@
   }
 }
 
+@keyframes rd-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(220%);
+  }
+}
+
+@keyframes rd-pixel-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+@layer components {
+  .rd-md {
+    color: var(--text-primary);
+    word-break: break-word;
+  }
+
+  .rd-md ul.contains-task-list {
+    list-style: none;
+    padding-left: 0;
+  }
+
+  .rd-md li.task-list-item {
+    list-style: none;
+  }
+
+  .rd-md li.task-list-item > p {
+    display: inline;
+    margin: 0;
+  }
+
+  .rd-md li.task-list-item[data-checked="true"] > .rd-md-task-text,
+  .rd-md li.task-list-item[data-checked="true"] > p {
+    color: var(--text-muted);
+    text-decoration: line-through;
+    text-decoration-color: var(--border-strong);
+  }
+
+  .rd-md ul ul,
+  .rd-md ol ul,
+  .rd-md ul ol,
+  .rd-md ol ol {
+    margin-top: 0.25rem;
+    margin-bottom: 0.25rem;
+  }
+}
+
 @layer utilities {
+  .rd-card-glass {
+    background-color: color-mix(in srgb, var(--rd-surface) 82%, transparent);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.7),
+      var(--rd-shadow-sm);
+  }
+
+  .dark .rd-card-glass {
+    background-color: color-mix(in srgb, var(--rd-elevated) 78%, transparent);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      var(--rd-shadow-sm);
+  }
+
+  .rd-hairline-glow {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.65),
+      var(--rd-shadow-sm);
+  }
+
+  .dark .rd-hairline-glow {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      var(--rd-shadow-sm);
+  }
+
+  .animate-rd-shimmer {
+    animation: rd-shimmer 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
+  .animate-rd-pixel-pulse {
+    animation: rd-pixel-pulse 1.8s ease-in-out infinite;
+  }
+
   .tabular-nums {
     font-variant-numeric: tabular-nums;
   }
@@ -306,7 +399,11 @@
   .animate-modal-in,
   .animate-drawer-in,
   .animate-drawer-in-left,
-  .animate-toast-in {
+  .animate-toast-in,
+  .animate-rd-shimmer,
+  .animate-rd-pixel-pulse,
+  [data-rd-pulse="true"] {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
   }
 }

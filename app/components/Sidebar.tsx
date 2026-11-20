@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icon.tsx";
-import { Kbd } from "./ui.tsx";
+import { Kbd, LivePulseDot } from "./ui.tsx";
 import type {
   AiConfigStatus,
   AuthStatusPayload,
@@ -62,6 +62,9 @@ export function Sidebar({
   }, [switcherOpen]);
 
   const openTasks = tasks.filter((t) => !t.merged_into);
+  const waitingCount = openTasks.filter(
+    (t) => t.status === "waiting" || t.status === "handoff",
+  ).length;
   const counts: Record<WorkspaceView, number> = {
     queue: openTasks.filter((t) => t.status !== "done").length,
     triage: openTasks.filter((t) => t.status === "triage").length,
@@ -78,6 +81,8 @@ export function Sidebar({
     icon: string;
     count?: number;
     pulse?: boolean;
+    alertCount?: number;
+    alertTitle?: string;
   }> = [
     { id: "queue", label: "全部任务", icon: "layers", count: counts.queue },
     { id: "triage", label: "待整理", icon: "inbox", count: counts.triage },
@@ -89,7 +94,14 @@ export function Sidebar({
       count: counts.agents,
       pulse: counts.agents > 0,
     },
-    { id: "review", label: "待验收", icon: "file-check-2", count: counts.review },
+    {
+      id: "review",
+      label: "待验收",
+      icon: "file-check-2",
+      count: counts.review,
+      alertCount: waitingCount,
+      alertTitle: `${waitingCount} 条待补充或交接异常`,
+    },
   ];
 
   const configItems: Array<{
@@ -166,15 +178,37 @@ export function Sidebar({
           <button
             type="button"
             onClick={() => setSwitcherOpen((o) => !o)}
-            className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] hover:border-[var(--border-strong)] transition text-left cursor-pointer shadow-2xs"
+            className="group w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] hover:border-[var(--border-strong)] hover:shadow-xs transition-all duration-150 text-left cursor-pointer shadow-2xs"
           >
-            <div className="flex items-center gap-2 min-w-0">
-              <div className="w-6 h-6 rounded-md bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="relative w-6 h-6 rounded-md bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
                 <Icon name="folder-git-2" size={14} />
               </div>
-              <div className="min-w-0">
-                <div className="text-[13px] font-medium text-[var(--text-primary)] truncate leading-tight">
-                  {currentProject ? currentProject.name : "选择或创建项目"}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-[13px] font-medium text-[var(--text-primary)] truncate leading-tight">
+                    {currentProject ? currentProject.name : "选择或创建项目"}
+                  </span>
+                  {currentProject && (
+                    <span
+                      title={
+                        currentProject.automation_paused
+                          ? "全自动迭代已暂停"
+                          : "全自动迭代运行中"
+                      }
+                      className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium leading-none border ${
+                        currentProject.automation_paused
+                          ? "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20"
+                          : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20"
+                      }`}
+                    >
+                      <LivePulseDot
+                        tone={currentProject.automation_paused ? "amber" : "emerald"}
+                        active={!currentProject.automation_paused}
+                      />
+                      {currentProject.automation_paused ? "暂停" : "自动"}
+                    </span>
+                  )}
                 </div>
                 <div
                   className="text-[11px] font-mono text-[var(--text-muted)] truncate leading-tight mt-0.5"
@@ -200,7 +234,7 @@ export function Sidebar({
             <Icon
               name="chevrons-up-down"
               size={14}
-              className="text-[var(--text-muted)] shrink-0"
+              className="text-[var(--text-muted)] group-hover:text-[var(--text-primary)] transition-colors shrink-0"
             />
           </button>
 
@@ -209,7 +243,7 @@ export function Sidebar({
               <div className="px-2.5 py-1 text-[11px] font-medium text-[var(--text-muted)]">
                 项目列表 ({projects.length})
               </div>
-              <div className="max-h-56 overflow-y-auto px-1">
+              <div className="max-h-56 overflow-y-auto px-1 space-y-0.5">
                 {projects.length === 0 ? (
                   <div className="px-2.5 py-3 text-xs text-[var(--text-muted)] text-center">
                     还没有项目
@@ -226,14 +260,30 @@ export function Sidebar({
                           setSwitcherOpen(false);
                           onCloseMobile();
                         }}
-                        className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-left transition cursor-pointer ${
+                        className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-left transition-colors duration-150 cursor-pointer ${
                           active
                             ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-300"
                             : "text-[var(--text-primary)] hover:bg-[var(--surface-hover)]"
                         }`}
                       >
-                        <div className="min-w-0">
-                          <div className="text-[13px] font-medium truncate">{p.name}</div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="text-[13px] font-medium truncate">{p.name}</span>
+                            <span
+                              title={p.automation_paused ? "自动执行已暂停" : "全自动运行中"}
+                              className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9.5px] font-medium leading-none ${
+                                p.automation_paused
+                                  ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                  : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                              }`}
+                            >
+                              <LivePulseDot
+                                tone={p.automation_paused ? "amber" : "emerald"}
+                                active={!p.automation_paused}
+                              />
+                              {p.automation_paused ? "暂停" : "自动"}
+                            </span>
+                          </div>
                           <div
                             className="text-[11px] font-mono text-[var(--text-muted)] truncate"
                             title={(p.repos?.length ? p.repos : [p.repo]).join(", ")}
@@ -255,7 +305,7 @@ export function Sidebar({
                     setSwitcherOpen(false);
                     onNewProject();
                   }}
-                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[13px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition cursor-pointer"
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[13px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors duration-150 cursor-pointer"
                 >
                   <Icon name="plus" size={14} />
                   新建项目
@@ -280,36 +330,57 @@ export function Sidebar({
                   key={item.id}
                   type="button"
                   onClick={() => selectView(item.id)}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition cursor-pointer ${
+                  className={`group relative w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition-all duration-150 cursor-pointer ${
                     active
                       ? "bg-[var(--surface-active)] text-[var(--text-primary)] font-medium shadow-2xs"
                       : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
                   }`}
                 >
+                  <span
+                    aria-hidden="true"
+                    className={`absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-r-full transition-opacity duration-150 ${
+                      active
+                        ? "bg-indigo-500 opacity-100"
+                        : "bg-[var(--border-strong)] opacity-0 group-hover:opacity-60"
+                    }`}
+                  />
                   <span className="flex items-center gap-2.5 min-w-0">
                     <Icon
                       name={item.icon}
                       size={15}
-                      className={active ? "text-indigo-500" : "text-[var(--text-muted)]"}
+                      className={`transition-colors duration-150 ${
+                        active
+                          ? "text-indigo-500"
+                          : "text-[var(--text-muted)] group-hover:text-[var(--text-primary)]"
+                      }`}
                     />
                     <span className="truncate">{item.label}</span>
                   </span>
-                  {(item.count ?? 0) > 0 && (
-                    <span
-                      className={`inline-flex items-center gap-1 text-[11px] font-mono tabular-nums px-1.5 py-0.5 rounded-md ${
-                        item.pulse
-                          ? "bg-amber-500/15 text-amber-600 dark:text-amber-400 font-medium"
-                          : active
-                            ? "bg-[var(--surface-card)] text-[var(--text-primary)]"
-                            : "text-[var(--text-muted)]"
-                      }`}
-                    >
-                      {item.pulse && (
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                      )}
-                      {item.count}
-                    </span>
-                  )}
+                  <span className="flex items-center gap-1 shrink-0">
+                    {(item.alertCount ?? 0) > 0 && (
+                      <span
+                        title={item.alertTitle}
+                        className="inline-flex items-center gap-0.5 text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded-md bg-rose-500/12 text-rose-600 dark:text-rose-400 font-medium"
+                      >
+                        <Icon name="alert-triangle" size={10} />
+                        {item.alertCount}
+                      </span>
+                    )}
+                    {(item.count ?? 0) > 0 && (
+                      <span
+                        className={`inline-flex items-center gap-1 text-[11px] font-mono tabular-nums px-1.5 py-0.5 rounded-md transition-colors duration-150 ${
+                          item.pulse
+                            ? "bg-amber-500/15 text-amber-600 dark:text-amber-400 font-medium"
+                            : active
+                              ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-2xs"
+                              : "text-[var(--text-muted)]"
+                        }`}
+                      >
+                        {item.pulse && <LivePulseDot tone="amber" active />}
+                        {item.count}
+                      </span>
+                    )}
+                  </span>
                 </button>
               );
             })}
@@ -328,17 +399,29 @@ export function Sidebar({
                   key={item.id}
                   type="button"
                   onClick={() => selectView(item.id)}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition cursor-pointer ${
+                  className={`group relative w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition-all duration-150 cursor-pointer ${
                     active
                       ? "bg-[var(--surface-active)] text-[var(--text-primary)] font-medium shadow-2xs"
                       : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
                   }`}
                 >
+                  <span
+                    aria-hidden="true"
+                    className={`absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-r-full transition-opacity duration-150 ${
+                      active
+                        ? "bg-indigo-500 opacity-100"
+                        : "bg-[var(--border-strong)] opacity-0 group-hover:opacity-60"
+                    }`}
+                  />
                   <span className="flex items-center gap-2.5 min-w-0">
                     <Icon
                       name={item.icon}
                       size={15}
-                      className={active ? "text-indigo-500" : "text-[var(--text-muted)]"}
+                      className={`transition-colors duration-150 ${
+                        active
+                          ? "text-indigo-500"
+                          : "text-[var(--text-muted)] group-hover:text-[var(--text-primary)]"
+                      }`}
                     />
                     <span className="truncate">{item.label}</span>
                   </span>
