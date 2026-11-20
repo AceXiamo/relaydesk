@@ -484,7 +484,6 @@ export class ApiRouter {
           const catalog = await fetchGithubRepositories(target.token, { page: 1 });
           const saved = upsertGithubConnection(this.store.dbPath, {
             id: target.id,
-            label: target.id === "legacy" ? undefined : target.label,
             token: target.token,
             viewer: catalog.viewer,
             owners: catalog.owners,
@@ -505,7 +504,6 @@ export class ApiRouter {
           const catalog = await fetchGithubRepositories(conn.token, { page: 1 });
           const saved = upsertGithubConnection(this.store.dbPath, {
             id: conn.id,
-            label: conn.id === "legacy" ? undefined : conn.label,
             token: conn.token,
             viewer: catalog.viewer,
             owners: catalog.owners,

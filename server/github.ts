@@ -300,9 +300,14 @@ export function upsertGithubConnection(
   if (targetIdx >= 0) {
     const prev = existing[targetIdx];
     const nextId = prev.id === "legacy" ? `gh_${randomBytes(6).toString("hex")}` : prev.id;
+    const explicitLabel = (input.label ?? "").trim().slice(0, 80);
+    const prevWasAutoLabel =
+      prev.id === "legacy" ||
+      !prev.label ||
+      prev.label === inferConnectionLabel(prev.viewer, prev.owners);
     saved = {
       id: nextId,
-      label: (input.label ?? "").trim().slice(0, 80) || (prev.id === "legacy" ? resolvedLabel : prev.label || resolvedLabel),
+      label: explicitLabel || (prevWasAutoLabel ? resolvedLabel : prev.label),
       token,
       token_type: tokenType,
       viewer: input.viewer,
@@ -499,7 +504,10 @@ function mergeOwners(
   viewer: GithubOwnerInfo | null,
   orgList: GithubOwnerInfo[],
   repos: GithubRepoItem[],
-  options: { includeViewerOnlyIfPresent?: boolean } = {},
+  options: {
+    includeViewerOnlyIfPresent?: boolean;
+    strictRepoOwners?: boolean;
+  } = {},
 ): GithubOwnerInfo[] {
   const map = new Map<string, GithubOwnerInfo>();
 
@@ -527,26 +535,42 @@ function mergeOwners(
   const hasOrgScopedReposOrOrgs =
     repos.some((r) => r.owner_type === "Organization") || orgList.length > 0;
 
-  if (viewer) {
-    // For Fine-grained PATs scoped exclusively to an organization, /user still returns
-    // the creator's personal account even though the token has zero access to personal repos.
-    // Only include viewer as an accessible owner if they own at least one returned repo,
-    // or if no org scope was detected.
-    const shouldIncludeViewer =
-      !options.includeViewerOnlyIfPresent ||
-      hasViewerRepo ||
-      !hasOrgScopedReposOrOrgs;
-    if (shouldIncludeViewer) {
+  if (options.strictRepoOwners) {
+    // For Fine-grained PATs, a token is strictly scoped to a single Resource Owner
+    // (either the user or one organization). Derive owners strictly from the repos
+    // returned by /user/repos so unrelated orgs from /user/orgs never leak in.
+    for (const repo of repos) {
+      upsert({
+        login: repo.owner,
+        type: repo.owner_type,
+        ...(repo.owner_avatar ? { avatar_url: repo.owner_avatar } : {}),
+      });
+    }
+    if (viewer && hasViewerRepo) {
       upsert(viewer);
     }
-  }
-  for (const org of orgList) upsert(org);
-  for (const repo of repos) {
-    upsert({
-      login: repo.owner,
-      type: repo.owner_type,
-      ...(repo.owner_avatar ? { avatar_url: repo.owner_avatar } : {}),
-    });
+  } else {
+    if (viewer) {
+      // For Fine-grained PATs scoped exclusively to an organization, /user still returns
+      // the creator's personal account even though the token has zero access to personal repos.
+      // Only include viewer as an accessible owner if they own at least one returned repo,
+      // or if no org scope was detected.
+      const shouldIncludeViewer =
+        !options.includeViewerOnlyIfPresent ||
+        hasViewerRepo ||
+        !hasOrgScopedReposOrOrgs;
+      if (shouldIncludeViewer) {
+        upsert(viewer);
+      }
+    }
+    for (const org of orgList) upsert(org);
+    for (const repo of repos) {
+      upsert({
+        login: repo.owner,
+        type: repo.owner_type,
+        ...(repo.owner_avatar ? { avatar_url: repo.owner_avatar } : {}),
+      });
+    }
   }
 
   return Array.from(map.values()).sort((a, b) => {
@@ -560,12 +584,16 @@ function mergeOwners(
 async function fetchViewerAndOrgs(
   token: string,
   apiBase: string,
+  options: { includeOrgs?: boolean } = {},
 ): Promise<{ viewer: GithubOwnerInfo | null; orgs: GithubOwnerInfo[] }> {
+  const includeOrgs = options.includeOrgs ?? true;
   const [userRes, orgsRes] = await Promise.all([
     githubRequest<RawGithubUser>(token, "/user", apiBase).catch(() => null),
-    githubRequest<RawGithubUser[]>(token, "/user/orgs?per_page=100", apiBase).catch(
-      () => null,
-    ),
+    includeOrgs
+      ? githubRequest<RawGithubUser[]>(token, "/user/orgs?per_page=100", apiBase).catch(
+          () => null,
+        )
+      : Promise.resolve(null),
   ]);
 
   let viewer: GithubOwnerInfo | null = null;
@@ -607,16 +635,19 @@ export async function fetchGithubRepositories(
   const apiBase = getGithubApiBase(opts.apiBase);
   const isFineGrained = detectGithubTokenType(token) === "fine_grained";
 
-  // Best-effort fetch of viewer & org list on page 1 so the UI always knows available orgs
+  // Best-effort fetch of viewer (& org list for classic PATs) on page 1.
+  // For Fine-grained PATs, /user/orgs returns all of the user's public org memberships
+  // regardless of the token's single Resource Owner, so we must NOT use /user/orgs.
   const metaPromise =
     page === 1
-      ? fetchViewerAndOrgs(token, apiBase)
+      ? fetchViewerAndOrgs(token, apiBase, { includeOrgs: !isFineGrained })
       : Promise.resolve({ viewer: null, orgs: [] as GithubOwnerInfo[] });
 
-  // Specific organization selected -> query /orgs/{org}/repos directly,
-  // with fallback to /user/repos filtered by owner for Fine-grained PATs
-  // that allow repository metadata on an org without /orgs/{org}/repos access.
-  if (owner !== "all" && opts.ownerType === "Organization") {
+  // Specific organization selected (Classic / non-fine-grained PAT) -> query /orgs/{org}/repos
+  // directly, with fallback to /user/repos filtered by owner.
+  // Fine-grained PATs skip /orgs/{org}/repos because that endpoint returns public repos for ANY
+  // org on GitHub regardless of token scope; /user/repos strictly honors Fine-grained PAT scope.
+  if (!isFineGrained && owner !== "all" && opts.ownerType === "Organization") {
     const [orgRes, meta] = await Promise.all([
       githubRequest<RawGithubRepo[]>(
         token,
@@ -725,16 +756,12 @@ export async function fetchGithubRepositories(
 
   let more = userReposRes.link.includes('rel="next"');
 
-  // If filtering specifically for a personal user, keep matching owner entries
-  if (owner !== "all" && opts.ownerType === "User") {
-    const targetLower = owner.toLowerCase();
-    items = items.filter((r) => r.owner.toLowerCase() === targetLower);
-  }
-
-  // On page 1 of "all", also pull first page of each org's repos (up to 6 orgs)
+  // On page 1 of "all" for Classic PATs, also pull first page of each org's repos (up to 6 orgs)
   // so organization repositories appear immediately even if the user has many personal repos
   // or org visibility requires /orgs/{org}/repos.
-  if (owner === "all" && page === 1 && meta.orgs.length > 0) {
+  // Never prefetch /orgs/{org}/repos for Fine-grained PATs because /orgs/{org}/repos returns
+  // public repos of unrelated orgs that the Fine-grained PAT is not scoped to.
+  if (!isFineGrained && owner === "all" && page === 1 && meta.orgs.length > 0) {
     const orgsToPrefetch = meta.orgs.slice(0, 6);
     const orgResponses = await Promise.all(
       orgsToPrefetch.map((org) =>
@@ -755,15 +782,20 @@ export async function fetchGithubRepositories(
     }
   }
 
-  // When a specific non-typed owner is passed, fallback to filtering by owner name
-  if (owner !== "all" && !opts.ownerType) {
+  // Filter by specific owner when requested (personal user, fine-grained org, or untyped owner)
+  if (owner !== "all") {
+    const rawCount = items.length;
     const targetLower = owner.toLowerCase();
     items = items.filter((r) => r.owner.toLowerCase() === targetLower);
+    if (isFineGrained && rawCount > 0 && items.length === 0) {
+      more = false;
+    }
   }
 
   items = dedupeAndSortRepos(items);
   const owners = mergeOwners(meta.viewer, meta.orgs, items, {
     includeViewerOnlyIfPresent: isFineGrained,
+    strictRepoOwners: isFineGrained,
   });
 
   return {
@@ -834,9 +866,12 @@ export async function fetchGithubRepositoriesAcrossConnections(
     const only = connections[0];
     const res = await fetchGithubRepositories(only.token, opts);
     const items = annotateItems(res.items, only);
-    const owners = mergeOwners(res.viewer ?? only.viewer, [...allCachedOwners, ...res.owners], items, {
-      includeViewerOnlyIfPresent: only.token_type === "fine_grained",
-    });
+    const useFreshOwnersOnly = owner === "all" && page === 1;
+    const owners = useFreshOwnersOnly
+      ? res.owners
+      : mergeOwners(res.viewer ?? only.viewer, [...allCachedOwners, ...res.owners], items, {
+          includeViewerOnlyIfPresent: only.token_type === "fine_grained",
+        });
     return {
       ...res,
       items,
@@ -915,9 +950,15 @@ export async function fetchGithubRepositoriesAcrossConnections(
   );
   const fetchedOwners = ok.flatMap((entry) => entry.payload.owners);
   const viewer = ok.find((entry) => entry.payload.viewer)?.payload.viewer ?? primaryViewer;
-  const mergedOwners = mergeOwners(viewer, [...allCachedOwners, ...fetchedOwners], mergedItems, {
-    includeViewerOnlyIfPresent: true,
-  });
+  const includeCached = owner !== "all" || page > 1 || warnings.length > 0;
+  const mergedOwners = mergeOwners(
+    viewer,
+    includeCached ? [...allCachedOwners, ...fetchedOwners] : fetchedOwners,
+    mergedItems,
+    {
+      includeViewerOnlyIfPresent: true,
+    },
+  );
   const more = ok.some((entry) => entry.payload.more);
 
   // When searching a specific owner across multiple keys (e.g. a custom org),

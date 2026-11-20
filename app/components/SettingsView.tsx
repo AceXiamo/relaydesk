@@ -738,6 +738,10 @@ export function SettingsView({
                                     )}
                                   </span>
                                 ))
+                              ) : conn.token_type === "fine_grained" && conn.id !== "legacy" ? (
+                                <span className="text-[11.5px] text-amber-600 dark:text-amber-400">
+                                  当前可访问 0 个仓库（请确认已勾选仓库范围、授予 Metadata: Read-only 且组织已批准）
+                                </span>
                               ) : (
                                 <span className="text-[11.5px] text-[var(--text-muted)]">
                                   点击右侧刷新以同步账号与组织信息

@@ -702,4 +702,173 @@ describe("GitHub Personal & Organization Repository Listing", () => {
       conn1.id,
     ]);
   });
+
+  it("ignores unrelated /user/orgs and /orgs/*/repos for Fine-grained PATs scoped to a specific organization", async () => {
+    const requestedPaths: string[] = [];
+    let repoOwnerName = "zeta-org";
+    const mockGh = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const auth = req.headers.authorization ?? "";
+      requestedPaths.push(`${auth === "Bearer github_pat_zero_repos_0000" ? "zero" : "zeta"}:${url.pathname}`);
+      res.setHeader("Content-Type", "application/json");
+
+      if (url.pathname === "/user") {
+        res.end(
+          JSON.stringify({
+            login: "AceXiamo",
+            type: "User",
+            avatar_url: "https://avatars.githubusercontent.com/u/1001?v=4",
+          }),
+        );
+        return;
+      }
+
+      // GitHub returns all public org memberships on /user/orgs even for a Fine-grained PAT
+      // scoped to a completely different org. Relaydesk must ignore /user/orgs for Fine-grained PATs.
+      if (url.pathname === "/user/orgs") {
+        res.end(
+          JSON.stringify([
+            {
+              login: "alpha-org",
+              type: "Organization",
+              avatar_url: "https://avatars.githubusercontent.com/u/3001?v=4",
+            },
+            {
+              login: "beta-org",
+              type: "Organization",
+              avatar_url: "https://avatars.githubusercontent.com/u/3002?v=4",
+            },
+          ]),
+        );
+        return;
+      }
+
+      // /orgs/{org}/repos returns public repos for ANY org even if the Fine-grained PAT is not scoped to it
+      if (url.pathname === "/orgs/alpha-org/repos") {
+        res.end(
+          JSON.stringify([
+            {
+              full_name: "alpha-org/public-site",
+              name: "public-site",
+              private: false,
+              archived: false,
+              description: "Unrelated org public repo",
+              pushed_at: "2026-11-20T18:00:00Z",
+              owner: {
+                login: "alpha-org",
+                type: "Organization",
+                avatar_url: "https://avatars.githubusercontent.com/u/3001?v=4",
+              },
+            },
+          ]),
+        );
+        return;
+      }
+
+      if (url.pathname === "/user/repos") {
+        if (auth === "Bearer github_pat_zero_repos_0000") {
+          res.end(JSON.stringify([]));
+          return;
+        }
+        res.end(
+          JSON.stringify([
+            {
+              full_name: `${repoOwnerName}/relay-private`,
+              name: "relay-private",
+              private: true,
+              archived: false,
+              description: "Target org repo actually granted to the Fine-grained PAT",
+              pushed_at: "2026-11-20T16:00:00Z",
+              owner: {
+                login: repoOwnerName,
+                type: "Organization",
+                avatar_url: "https://avatars.githubusercontent.com/u/4001?v=4",
+              },
+            },
+          ]),
+        );
+        return;
+      }
+
+      res.statusCode = 404;
+      res.end(JSON.stringify({ message: "Not Found" }));
+    });
+
+    await new Promise<void>((r) => mockGh.listen(0, "127.0.0.1", r));
+    cleanups.push(() => new Promise<void>((r) => mockGh.close(() => r())));
+    const ghPort = (mockGh.address() as { port: number }).port;
+    const prevBase = process.env.RELAYDESK_GITHUB_API_BASE;
+    process.env.RELAYDESK_GITHUB_API_BASE = `http://127.0.0.1:${ghPort}`;
+    cleanups.push(() => {
+      if (prevBase === undefined) delete process.env.RELAYDESK_GITHUB_API_BASE;
+      else process.env.RELAYDESK_GITHUB_API_BASE = prevBase;
+    });
+
+    const srv = await startApiServer();
+
+    // 1. Connecting the zeta-org Fine-grained PAT must bind ONLY to zeta-org (never alpha-org)
+    const connectRes = await jsonReq(`${srv.url}/api/github/connect`, "POST", {
+      token: "github_pat_zeta_only_9999",
+    });
+    expect(connectRes.status).toBe(200);
+    const conn = connectRes.json.connection as {
+      id: string;
+      label: string;
+      owners: Array<{ login: string; type: string }>;
+      repo_count: number;
+    };
+    expect(conn.label).toBe("zeta-org");
+    expect(conn.owners.map((o) => `${o.type}:${o.login}`)).toEqual(["Organization:zeta-org"]);
+    expect(conn.repo_count).toBe(1);
+    expect(requestedPaths.some((p) => p.endsWith(":/user/orgs"))).toBe(false);
+    expect(requestedPaths.some((p) => p.includes("/orgs/"))).toBe(false);
+
+    // 2. Listing all repos returns only zeta-org repos (no alpha-org public repo leakage)
+    const allRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "all",
+    });
+    expect(allRes.status).toBe(200);
+    expect(allRes.json.repos).toEqual(["zeta-org/relay-private"]);
+    expect(
+      (allRes.json.owners as Array<{ login: string; type: string }>).map(
+        (o) => `${o.type}:${o.login}`,
+      ),
+    ).toEqual(["Organization:zeta-org"]);
+
+    // 3. Filtering by alpha-org does NOT fall back to /orgs/alpha-org/repos
+    const alphaRes = await jsonReq(`${srv.url}/api/github/repos`, "POST", {
+      page: 1,
+      owner: "alpha-org",
+      owner_type: "Organization",
+    });
+    expect(alphaRes.status).toBe(200);
+    expect(alphaRes.json.repos).toEqual([]);
+    expect(requestedPaths.some((p) => p.includes("/orgs/alpha-org/repos"))).toBe(false);
+
+    // 4. Refresh recomputes auto-inferred label when org changes (e.g. after fixing stale metadata)
+    repoOwnerName = "omega-org";
+    const refreshRes = await jsonReq(`${srv.url}/api/github/refresh`, "POST", {
+      id: conn.id,
+    });
+    expect(refreshRes.status).toBe(200);
+    expect((refreshRes.json.connection as { label: string }).label).toBe("omega-org");
+    expect(
+      ((refreshRes.json.connection as { owners: Array<{ login: string }> }).owners).map(
+        (o) => o.login,
+      ),
+    ).toEqual(["omega-org"]);
+
+    // 5. Fine-grained PAT with 0 accessible repos stores owners: [] instead of misattributing to alpha-org or viewer
+    const zeroRes = await jsonReq(`${srv.url}/api/github/connect`, "POST", {
+      token: "github_pat_zero_repos_0000",
+    });
+    expect(zeroRes.status).toBe(200);
+    const zeroConn = zeroRes.json.connection as {
+      owners: Array<{ login: string }>;
+      repo_count: number;
+    };
+    expect(zeroConn.owners).toEqual([]);
+    expect(zeroConn.repo_count).toBe(0);
+  });
 });
