@@ -69,6 +69,16 @@ function sanitizeAttachmentUrl(raw: string): string | null {
   }
 }
 
+function buildPageContextBlock(page?: WidgetPageContext): string {
+  return [
+    page?.url ? `- 当前页面 URL: ${page.url.slice(0, 400)}` : "",
+    page?.title ? `- 页面标题: ${page.title.slice(0, 200)}` : "",
+    page?.viewport ? `- 视口尺寸: ${page.viewport.slice(0, 40)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function buildSystemPrompt(
   project: AgentProjectInfo,
   hasCodeTools: boolean,
@@ -76,13 +86,7 @@ function buildSystemPrompt(
   page?: WidgetPageContext,
 ): string {
   const repoList = repos.map((r) => r.repo).join(", ");
-  const pageContext = [
-    page?.url ? `- 当前页面 URL: ${page.url.slice(0, 400)}` : "",
-    page?.title ? `- 页面标题: ${page.title.slice(0, 200)}` : "",
-    page?.viewport ? `- 视口尺寸: ${page.viewport.slice(0, 40)}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const pageContext = buildPageContextBlock(page);
 
   return [
     `你是产品「${project.name}」内置的 AI 支持与反馈助手，运行在页面右下角的收集浮窗中。`,
@@ -95,7 +99,7 @@ function buildSystemPrompt(
     "2. 如果用户反馈的是明确的功能异常（Bug）、页面样式/交互缺陷、产品改进建议，或者查完代码确认当前版本确实尚未支持 / 存在 Bug，请调用 `propose_feedback_ticket` 工具生成一张结构化反馈工单确认卡，供用户一键确认提交到研发队列。",
     "3. 在调用 `propose_feedback_ticket` 后，也请用 1–2 句简短友好的话告诉用户你已经整理好反馈单，点击下方卡片按钮即可提交（如还需补充细节也可顺带提醒）。",
     "4. 如果用户只是闲聊或提出明确的使用疑问且你已经解答清楚，**不要**主动创建工单确认卡；除非用户明确要求提交反馈。",
-    "5. 查阅代码时，优先用 2–4 次有针对性的 search_code / read_file 调用；始终给用户清晰的结论，信息不足时说明还需要什么。",
+    "5. 查阅代码时，优先用 2–5 次有针对性的 search_code / read_file 调用；调用工具前不要输出「我先查一下代码」之类的过渡语句，直接调用工具，拿到足够依据后再一次性输出清晰结论。",
     "",
     "严格安全与边界约束：",
     "- 严禁向用户输出原始大段源代码、内部目录树清单、文件路径全集、密钥/环境变量、或内部安全机制。请用面向终端用户的产品语言解释功能和步骤。",
@@ -109,6 +113,205 @@ function buildSystemPrompt(
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function buildFinalSummarySystemPrompt(
+  project: AgentProjectInfo,
+  page: WidgetPageContext | undefined,
+  hasDraft: boolean,
+): string {
+  const pageContext = buildPageContextBlock(page);
+  return [
+    `你是产品「${project.name}」内置的 AI 支持与反馈助手，运行在页面右下角的收集浮窗中。`,
+    "请始终使用用户提问的语言回复（默认中文），风格简洁、友好、直接、有条理，可使用轻量 Markdown（加粗、列表、行内代码）。",
+    "",
+    "当前阶段要求：",
+    hasDraft
+      ? "- 反馈工单确认卡已经为你生成并展示在用户界面下方。请用 1–3 句简短清晰的话总结排查结论，并提醒用户核对下方工单卡片后一键提交。"
+      : "- 请直接基于已知信息向用户给出清晰的排查结论或下一步建议；如信息不足，请简明告知还需要补充哪些细节，并提醒用户可点击右上角「直接提单」。",
+    "- 当前阶段不提供任何工具。严禁输出任何工具调用标记、XML、DSML 或伪函数调用代码块，只输出面向用户的自然语言回复。",
+    "- 严禁向用户输出原始大段源代码、内部目录树清单、文件路径全集、密钥/环境变量、或内部安全机制。",
+    pageContext ? `\n当前访客上下文：\n${pageContext}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+const LEAKED_TOOL_OPEN_RE =
+  /^(?:[<＜]\s*[｜|]{1,2}\s*DSML\s*[｜|]{1,2}\s*(?:function_calls|calls|invoke)\b|<function_calls\b|<tool_calls?\b)/i;
+
+const LEAKED_TOOL_CLOSE_RE =
+  /[<＜]\/\s*[｜|]{1,2}\s*DSML\s*[｜|]{1,2}\s*(?:function_calls|calls)\s*[>＞]|<\/function_calls\s*>|<\/tool_calls?\s*>/i;
+
+function couldBeLeakedToolPrefix(text: string): boolean {
+  if (text.length > 36) return false;
+  return (
+    /^[<＜]\s*$/i.test(text) ||
+    /^[<＜]\s*[｜|]{1,2}\s*(?:d(?:s(?:m(?:l(?:\s*[｜|]{0,2}\s*[a-z_]*)?)?)?)?)?$/i.test(text) ||
+    /^[<＜](?:f(?:u(?:n(?:c(?:t(?:i(?:o(?:n(?:_(?:c(?:a(?:l(?:l(?:s)?)?)?)?)?)?)?)?)?)?)?)?)?)$/i.test(text) ||
+    /^[<＜](?:t(?:o(?:o(?:l(?:_(?:c(?:a(?:l(?:l(?:s)?)?)?)?)?)?)?)?)?)$/i.test(text)
+  );
+}
+
+function normalizeTicketKind(raw?: string): WidgetTicketDraft["kind"] {
+  const val = (raw ?? "").trim().toLowerCase();
+  if (/建议|优化|需求|feature|idea|enhance|improv|request/.test(val)) {
+    return "改进建议";
+  }
+  if (/疑问|咨询|question|help|how/.test(val)) {
+    return "使用疑问";
+  }
+  return "功能异常";
+}
+
+function normalizeTicketPriority(raw?: string): TaskPriority {
+  const val = (raw ?? "").trim().toLowerCase();
+  if (/urgent|critical|p0|blocker/.test(val)) return "urgent";
+  if (/high|p1|major/.test(val)) return "high";
+  if (/low|p3|minor/.test(val)) return "low";
+  return "normal";
+}
+
+function unescapeDsmlText(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed.includes("\n") && trimmed.includes("\\n")) {
+    return trimmed.replace(/\\n/g, "\n");
+  }
+  return trimmed;
+}
+
+export function extractRecoveredTicketDraft(block: string): WidgetTicketDraft | null {
+  if (!/propose_feedback_ticket/i.test(block)) return null;
+  const params: Record<string, string> = {};
+  const paramRe =
+    /[<＜]\s*(?:[｜|]{1,2}\s*DSML\s*[｜|]{1,2}\s*)?parameter\b[^>＞]*\bname\s*=\s*["']([^"']+)["'][^>＞]*[>＞]([\s\S]*?)(?:[<＜]\/\s*(?:[｜|]{1,2}\s*DSML\s*[｜|]{1,2}\s*)?parameter\s*[>＞]|(?=[<＜]\s*(?:[｜|]{1,2}\s*DSML\s*[｜|]{1,2}\s*)?(?:parameter|\/))|$)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = paramRe.exec(block)) !== null) {
+    const key = match[1].trim().toLowerCase();
+    const val = unescapeDsmlText(match[2] ?? "");
+    if (key && val) {
+      params[key] = val;
+    }
+  }
+  const title = (params.title ?? "").trim().slice(0, 120);
+  const summary = (
+    params.summary ??
+    params.description ??
+    params.body ??
+    params.content ??
+    ""
+  )
+    .trim()
+    .slice(0, 2000);
+  if (title.length < 2 && summary.length < 4) return null;
+  const steps = (params.steps ?? params.repro_steps ?? "").trim().slice(0, 1200);
+  const expected = (params.expected ?? params.expected_behavior ?? "").trim().slice(0, 800);
+  return {
+    title: title || summary.split(/\r?\n/)[0].slice(0, 80),
+    kind: normalizeTicketKind(params.kind ?? params.type ?? params.issue_type ?? params.category),
+    priority: normalizeTicketPriority(params.priority ?? params.severity),
+    summary: summary || title,
+    ...(steps ? { steps } : {}),
+    ...(expected ? { expected } : {}),
+  };
+}
+
+// Guards the text stream against raw DSML / XML tool-call markup leaked by upstream models
+// and recovers any leaked propose_feedback_ticket invocation into a real ticket_draft.
+export function createWidgetTextStreamGuard(options: {
+  onText: (text: string) => void;
+  onRecoveredDraft: (draft: WidgetTicketDraft) => void;
+}) {
+  let pending = "";
+  let suppressing = false;
+  let suppressedBuffer = "";
+  let trimLeadingSpace = false;
+
+  const finishSuppressed = (endIdx: number) => {
+    const block = suppressedBuffer.slice(0, endIdx);
+    const rest = suppressedBuffer.slice(endIdx);
+    suppressedBuffer = "";
+    suppressing = false;
+    trimLeadingSpace = true;
+    const recovered = extractRecoveredTicketDraft(block);
+    if (recovered) options.onRecoveredDraft(recovered);
+    pending = rest;
+  };
+
+  const processPending = () => {
+    while (pending.length > 0) {
+      if (suppressing) {
+        suppressedBuffer += pending;
+        pending = "";
+        const closeMatch = LEAKED_TOOL_CLOSE_RE.exec(suppressedBuffer);
+        if (closeMatch) {
+          finishSuppressed(closeMatch.index + closeMatch[0].length);
+          continue;
+        }
+        break;
+      }
+
+      if (trimLeadingSpace) {
+        pending = pending.replace(/^\s+/, "");
+        if (!pending) break;
+        trimLeadingSpace = false;
+      }
+
+      const openIdx = pending.search(/[<＜]/);
+      if (openIdx === -1) {
+        options.onText(pending);
+        pending = "";
+        break;
+      }
+      if (openIdx > 0) {
+        options.onText(pending.slice(0, openIdx));
+        pending = pending.slice(openIdx);
+      }
+
+      if (LEAKED_TOOL_OPEN_RE.test(pending)) {
+        suppressing = true;
+        suppressedBuffer = pending;
+        pending = "";
+        const closeMatch = LEAKED_TOOL_CLOSE_RE.exec(suppressedBuffer);
+        if (closeMatch) {
+          finishSuppressed(closeMatch.index + closeMatch[0].length);
+          continue;
+        }
+        break;
+      }
+
+      if (couldBeLeakedToolPrefix(pending)) {
+        break;
+      }
+
+      // Not a leaked tool tag; emit the leading angle bracket and scan ahead.
+      options.onText(pending[0]);
+      pending = pending.slice(1);
+    }
+  };
+
+  return {
+    push(chunk: string) {
+      if (!chunk) return;
+      pending += chunk;
+      processPending();
+    },
+    flush() {
+      if (suppressing) {
+        const block = suppressedBuffer;
+        suppressedBuffer = "";
+        suppressing = false;
+        const recovered = extractRecoveredTicketDraft(block);
+        if (recovered) options.onRecoveredDraft(recovered);
+      }
+      if (pending) {
+        if (!LEAKED_TOOL_OPEN_RE.test(pending)) {
+          options.onText(pending);
+        }
+        pending = "";
+      }
+    },
+  };
 }
 
 function inferImageMediaType(url: URL): string {
@@ -381,17 +584,39 @@ export async function runWidgetAgentStream(options: {
       ? AbortSignal.any([signal, timeoutSignal])
       : timeoutSignal;
 
+    const codeCutoffSystem =
+      systemPrompt +
+      "\n\n【当前阶段指令】代码查阅步数已达上限，list_files / search_code / read_file 均已关闭，严禁再调用任何代码查阅工具。请立即基于已查到的信息直接回答用户；若确认为功能异常或改进需求，请直接调用 propose_feedback_ticket 生成工单卡片。";
+
     const result = streamText({
       model,
-      system: systemPrompt,
+      system: summaryOnly
+        ? buildFinalSummarySystemPrompt(project, page, emittedDraft)
+        : systemPrompt,
       messages: modelMessages,
       tools: summaryOnly ? undefined : tools,
-      prepareStep: ({ stepNumber }) => {
-        if (stepNumber >= MAX_AGENT_STEPS - 1) return { activeTools: [] };
-        if (hasCodeTools && stepNumber === MAX_AGENT_STEPS - 2) {
-          return { activeTools: ["propose_feedback_ticket"] };
-        }
-      },
+      prepareStep: summaryOnly
+        ? undefined
+        : ({ stepNumber }) => {
+            if (emittedDraft) {
+              return {
+                activeTools: [],
+                system: buildFinalSummarySystemPrompt(project, page, true),
+              };
+            }
+            if (stepNumber >= MAX_AGENT_STEPS - 1) {
+              return {
+                activeTools: [],
+                system: buildFinalSummarySystemPrompt(project, page, false),
+              };
+            }
+            if (hasCodeTools && stepNumber >= MAX_AGENT_STEPS - 3) {
+              return {
+                activeTools: ["propose_feedback_ticket"],
+                system: codeCutoffSystem,
+              };
+            }
+          },
       stopWhen: stepCountIs(summaryOnly ? 1 : MAX_AGENT_STEPS),
       maxOutputTokens: summaryOnly ? 2048 : 4096,
       onStepFinish: ({ toolCalls, response }) => {
@@ -403,15 +628,49 @@ export async function runWidgetAgentStream(options: {
     });
 
     let emittedText = false;
+    let lastEmittedTail = "";
+    let needStepSeparator = false;
     let finishReason = "unknown";
     let stepCount = 0;
+
+    const emitVisibleText = (rawText: string) => {
+      if (!rawText) return;
+      if (!emittedText && !rawText.trim()) return;
+      let text = rawText;
+      if (needStepSeparator && emittedText) {
+        needStepSeparator = false;
+        if (!lastEmittedTail.endsWith("\n\n") && !text.startsWith("\n\n")) {
+          const sep = lastEmittedTail.endsWith("\n") || text.startsWith("\n") ? "\n" : "\n\n";
+          onEvent({ type: "delta", text: sep });
+        }
+      }
+      if (!emittedText) {
+        text = text.replace(/^\s+/, "");
+        if (!text) return;
+      }
+      emittedText = true;
+      lastEmittedTail = (lastEmittedTail + text).slice(-4);
+      onEvent({ type: "delta", text });
+    };
+
+    const textGuard = createWidgetTextStreamGuard({
+      onText: emitVisibleText,
+      onRecoveredDraft: (draft) => {
+        if (!emittedDraft) {
+          emittedDraft = true;
+          onEvent({ type: "ticket_draft", draft });
+        }
+      },
+    });
+
     for await (const part of result.fullStream) {
       if (part.type === "text-delta") {
-        if (part.text && (emittedText || part.text.trim())) {
-          emittedText = true;
-          onEvent({ type: "delta", text: part.text });
+        if (part.text) {
+          textGuard.push(part.text);
         }
       } else if (part.type === "tool-call") {
+        textGuard.flush();
+        if (emittedText) needStepSeparator = true;
         const label = TOOL_STATUS_LABELS[part.toolName] ?? "正在处理中…";
         onEvent({
           type: "status",
@@ -420,9 +679,11 @@ export async function runWidgetAgentStream(options: {
           tool: part.toolName,
         });
       } else if (part.type === "finish-step") {
+        textGuard.flush();
         stepCount += 1;
         finishReason = part.finishReason;
       } else if (part.type === "finish") {
+        textGuard.flush();
         finishReason = part.finishReason;
       } else if (part.type === "abort") {
         throw combinedSignal.reason ?? new Error("Stream aborted");
@@ -430,6 +691,7 @@ export async function runWidgetAgentStream(options: {
         throw part.error;
       }
     }
+    textGuard.flush();
 
     if (!emittedText && emittedDraft) {
       onEvent({

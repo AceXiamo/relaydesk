@@ -52,6 +52,7 @@ function serveStaticFile(
     res.setHeader("X-Frame-Options", "DENY");
   } else {
     res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
   }
   if ((req.method ?? "GET").toUpperCase() === "HEAD") {
     res.end();
@@ -167,6 +168,18 @@ export async function startRelaydeskServer(
     if ((method === "GET" || method === "HEAD") && pathname === "/widget-capture.js") {
       if (
         serveStaticFile(req, res, join(publicDir, "widget-capture.js"), {
+          corsAny: true,
+          immutable: true,
+        })
+      ) {
+        return;
+      }
+    }
+    if ((method === "GET" || method === "HEAD") && pathname.startsWith("/widget/")) {
+      const widgetAssetPath = resolveInside(publicDir, pathname);
+      if (
+        widgetAssetPath &&
+        serveStaticFile(req, res, widgetAssetPath, {
           corsAny: true,
           immutable: true,
         })

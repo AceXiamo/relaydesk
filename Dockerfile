@@ -21,6 +21,7 @@ COPY server/ server/
 COPY app/lib/ app/lib/
 COPY public/widget.js public/widget.js
 COPY public/widget-capture.js public/widget-capture.js
+COPY public/widget/ public/widget/
 COPY public/fonts/ public/fonts/
 RUN mkdir -p /app/data && chown -R 10001:10001 /app/data
 USER 10001:10001

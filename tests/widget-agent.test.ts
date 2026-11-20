@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { saveStoredAiConfig } from "../server/ai-config.ts";
-import { runWidgetAgentStream, type WidgetChatMessage, type WidgetStreamEvent } from "../server/widget-agent.ts";
+import {
+  createWidgetTextStreamGuard,
+  extractRecoveredTicketDraft,
+  runWidgetAgentStream,
+  type WidgetChatMessage,
+  type WidgetStreamEvent,
+  type WidgetTicketDraft,
+} from "../server/widget-agent.ts";
 import { startRelaydeskServer, type RunningRelaydeskServer } from "../server.ts";
 import {
   isSensitivePath,
@@ -307,7 +314,7 @@ function sendCompletion(res: ServerResponse, delta: object, finishReason: string
 }
 
 describe("Widget agent with a local streaming model", () => {
-  it("reserves the last step for a user-facing answer after repeated tool calls", async () => {
+  it("cuts off code lookup before the final step and uses a tool-free summary prompt after drafting", async () => {
     const reply = "Use Export in Reports.";
     const { requests, events } = await mockWidgetAgent((body, i, res) => {
       const names = body.tools?.map((t) => t.function.name) ?? [];
@@ -316,12 +323,104 @@ describe("Widget agent with a local streaming model", () => {
       const args = name === "list_files" ? { dir: "." } : { title: "Export issue", summary: "Export failed", kind: "功能异常" };
       sendCompletion(res, { tool_calls: [{ index: 0, id: `call_${i}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, "tool_calls");
     }, { withRepo: true });
-    expect(requests).toHaveLength(10);
-    expect(requests.slice(0, 8).every((r) => r.tools?.some((t) => t.function.name === "list_files"))).toBe(true);
-    expect(requests[8].tools?.map((t) => t.function.name)).toEqual(["propose_feedback_ticket"]);
-    expect(requests[9].tools ?? []).toEqual([]);
+    expect(requests).toHaveLength(9);
+    expect(requests.slice(0, 7).every((r) => r.tools?.some((t) => t.function.name === "list_files"))).toBe(true);
+    expect(requests[7].tools?.map((t) => t.function.name)).toEqual(["propose_feedback_ticket"]);
+    expect(String(requests[7].messages[0]?.content ?? "")).toContain("代码查阅步数已达上限");
+    expect(requests[8].tools ?? []).toEqual([]);
+    expect(String(requests[8].messages[0]?.content ?? "")).not.toContain("propose_feedback_ticket");
     expect(requests.every((r) => r.max_tokens === 4096)).toBe(true);
+    expect(events.some((e) => e.type === "ticket_draft")).toBe(true);
     expect(events.slice(-2)).toEqual([{ type: "delta", text: reply }, { type: "done", ok: true }]);
+  });
+
+  it("suppresses leaked DSML tool-call markup from delta events and recovers ticket_draft", async () => {
+    const leaked =
+      "已完成代码核查，确认卡片在快照为空时缺少兜底提示。\n\n" +
+      "<｜｜DSML｜｜ calls>\n" +
+      "<｜｜DSML｜｜ invoke name=\"propose_feedback_ticket\">\n" +
+      "<｜｜DSML｜｜ parameter name=\"title\" string=\"true\">历史排期调整审批卡缺少明细展示</｜｜DSML｜｜ parameter>\n" +
+      "<｜｜DSML｜｜ parameter name=\"issue_type\" string=\"true\">功能缺失/体验问题</｜｜DSML｜｜ parameter>\n" +
+      "<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">审批中心卡片未展示调整前后排期明细。</｜｜DSML｜｜ parameter>\n" +
+      "</｜｜DSML｜｜ invoke>\n" +
+      "</｜｜DSML｜｜ calls>";
+    const { events } = await mockWidgetAgent((_body, _i, res) => {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      for (let idx = 0; idx < leaked.length; idx += 3) {
+        const piece = leaked.slice(idx, idx + 3);
+        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: piece }, finish_reason: null }] })}\n\n`);
+      }
+      res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
+      res.end("data: [DONE]\n\n");
+    });
+    const combinedText = events
+      .filter((e): e is Extract<WidgetStreamEvent, { type: "delta" }> => e.type === "delta")
+      .map((e) => e.text)
+      .join("");
+    expect(combinedText).toContain("已完成代码核查");
+    expect(combinedText).not.toContain("DSML");
+    expect(combinedText).not.toContain("propose_feedback_ticket");
+    const draftEvent = events.find(
+      (e): e is Extract<WidgetStreamEvent, { type: "ticket_draft" }> => e.type === "ticket_draft",
+    );
+    expect(draftEvent?.draft).toMatchObject({
+      title: "历史排期调整审批卡缺少明细展示",
+      kind: "功能异常",
+      summary: "审批中心卡片未展示调整前后排期明细。",
+    });
+    expect(events.at(-1)).toEqual({ type: "done", ok: true });
+  });
+
+  it("separates pre-tool narration and post-tool answer with a paragraph break", async () => {
+    const { events } = await mockWidgetAgent((_body, i, res) => {
+      if (i === 0) {
+        sendCompletion(res, {
+          content: "我先查一下文档。",
+          tool_calls: [{ index: 0, id: "call_0", type: "function", function: { name: "read_file", arguments: JSON.stringify({ path: "guide.md" }) } }],
+        }, "tool_calls");
+      } else {
+        sendCompletion(res, { content: "在报表页点击 Export 即可导出。" }, "stop");
+      }
+    }, { withRepo: true });
+    const combinedText = events
+      .filter((e): e is Extract<WidgetStreamEvent, { type: "delta" }> => e.type === "delta")
+      .map((e) => e.text)
+      .join("");
+    expect(combinedText).toBe("我先查一下文档。\n\n在报表页点击 Export 即可导出。");
+  });
+
+  it("keeps ordinary angle brackets intact while guarding single-bar DSML blocks", () => {
+    let out = "";
+    const drafts: WidgetTicketDraft[] = [];
+    const guard = createWidgetTextStreamGuard({
+      onText: (t) => {
+        out += t;
+      },
+      onRecoveredDraft: (d) => drafts.push(d),
+    });
+    const input =
+      "当 count < 5 且标签为 <span> 时触发。\n" +
+      "<｜DSML｜calls>\n" +
+      "<｜DSML｜invoke name=\"propose_feedback_ticket\">\n" +
+      "<｜DSML｜parameter name=\"title\" string=\"true\">优化筛选提示</｜DSML｜parameter>\n" +
+      "<｜DSML｜parameter name=\"type\" string=\"true\">feature</｜DSML｜parameter>\n" +
+      "<｜DSML｜parameter name=\"description\" string=\"true\">希望增加空状态提示\\n支持一键清空。</｜DSML｜parameter>\n" +
+      "</｜DSML｜calls>\n" +
+      "请核对下方工单。";
+    for (let i = 0; i < input.length; i += 2) {
+      guard.push(input.slice(i, i + 2));
+    }
+    guard.flush();
+    expect(out).toBe("当 count < 5 且标签为 <span> 时触发。\n请核对下方工单。");
+    expect(drafts).toEqual([
+      {
+        title: "优化筛选提示",
+        kind: "改进建议",
+        priority: "normal",
+        summary: "希望增加空状态提示\n支持一键清空。",
+      },
+    ]);
+    expect(extractRecoveredTicketDraft("<｜DSML｜calls><｜DSML｜invoke name=\"other\"></｜DSML｜calls>")).toBeNull();
   });
 
   it.each([true, false])("retries an empty length completion once (summary has text: %s)", async (hasText) => {
@@ -468,6 +567,28 @@ describe("Widget streaming chat endpoint", () => {
     } finally {
       controller.abort();
       upstream?.end();
+    }
+  });
+
+  it("serves public widget illustration and logo assets with cross-origin headers", async () => {
+    const { srv } = await startTempRelaydesk();
+    const paths = [
+      "/widget/logo.webp",
+      "/widget/hero-dark.webp",
+      "/widget/hero-light.webp",
+      "/widget/illus-bug.webp",
+      "/widget/illus-guide.webp",
+      "/widget/illus-idea.webp",
+      "/widget/illus-success.webp",
+    ];
+    for (const p of paths) {
+      const res = await fetch(`${srv.url}${p}`);
+      expect(res.status, p).toBe(200);
+      expect(res.headers.get("content-type"), p).toBe("image/webp");
+      expect(res.headers.get("access-control-allow-origin"), p).toBe("*");
+      expect(res.headers.get("cross-origin-resource-policy"), p).toBe("cross-origin");
+      const bytes = await res.arrayBuffer();
+      expect(bytes.byteLength, p).toBeGreaterThan(500);
     }
   });
 
