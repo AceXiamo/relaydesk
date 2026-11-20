@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "relaydesk",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "server.ts",
+        "--dev",
+        "--port",
+        "8787",
+        "--db",
+        "/tmp/relaydesk-preview.sqlite3"
+      ],
+      "port": 8787
+    }
+  ]
+}

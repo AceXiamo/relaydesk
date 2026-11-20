@@ -1,12 +1,26 @@
-FROM python:3.13-slim
+FROM node:24-slim AS builder
 WORKDIR /app
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-COPY server.py assistant_chat.py wallet_auth.py github_repos.py ./
+RUN corepack enable && corepack prepare pnpm@9.11.0 --activate
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY tsconfig.json react-router.config.ts vite.config.ts ./
+COPY app/ app/
 COPY public/ public/
-COPY integrations/telegram.py integrations/telegram.py
-RUN mkdir -p /app/data && chown 10001:10001 /app/data
+RUN pnpm build
+
+FROM node:24-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+RUN corepack enable && corepack prepare pnpm@9.11.0 --activate
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --prod --frozen-lockfile
+COPY --from=builder /app/build ./build
+COPY server.ts ./
+COPY server/ server/
+COPY app/lib/ app/lib/
+COPY public/widget.js public/widget.js
+COPY public/fonts/ public/fonts/
+RUN mkdir -p /app/data && chown -R 10001:10001 /app/data
 USER 10001:10001
 EXPOSE 8787
-CMD ["python", "server.py", "--host", "0.0.0.0"]
+CMD ["node", "server.ts", "--host", "0.0.0.0"]
