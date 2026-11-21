@@ -249,6 +249,7 @@ export function TaskDetailDrawer({
   const [reqDraft, setReqDraft] = useState("");
   const [comment, setComment] = useState("");
   const [autoReopen, setAutoReopen] = useState(true);
+  const [discussTarget, setDiscussTarget] = useState<string>("operator");
   const [expandedTraces, setExpandedTraces] = useState<Record<string, boolean>>(
     {},
   );
@@ -266,6 +267,7 @@ export function TaskDetailDrawer({
     setReqDraft(task?.requirements ?? "");
     setComment("");
     setAutoReopen(true);
+    setDiscussTarget("operator");
     setExpandedTraces({});
     setMergeOpen(false);
     setMergeTarget("");
@@ -313,8 +315,26 @@ export function TaskDetailDrawer({
   const isDeliveryUrl = Boolean(
     task?.delivery_ref && /^https?:\/\//i.test(task.delivery_ref.trim()),
   );
+  const hasGithubPrRef = Boolean(
+    task?.delivery_ref && /github\.com\/[^/]+\/[^/]+\/pull\/\d+/i.test(task.delivery_ref.trim()),
+  );
 
-  const promptSuggestions = task ? getPromptSuggestions(task.status) : [];
+  const operatorResolved = aiConfig?.resolved_nodes?.operator;
+  const prAuditResolved = aiConfig?.resolved_nodes?.pr_audit;
+  const aiProfiles = aiConfig?.profiles ?? [];
+
+  const promptSuggestions: PromptSuggestion[] = task
+    ? hasGithubPrRef
+      ? [
+          {
+            label: "AI 审计 PR",
+            text: "请结合任务需求与改动内容审计当前 PR，评估正确性、边界与回归风险，并给出是否建议合并的结论。",
+            mode: "assistant",
+          },
+          ...getPromptSuggestions(task.status),
+        ]
+      : getPromptSuggestions(task.status)
+    : [];
 
   const runAction = async (
     label: string,
@@ -353,8 +373,21 @@ export function TaskDetailDrawer({
     setBusyAction(askAssistant ? "discuss" : "comment");
     try {
       if (askAssistant) {
-        await api.discussTask(task.id, text);
-        toast.success("项目助手已回复");
+        const discussOpts =
+          discussTarget === "pr_audit"
+            ? { mode: "pr_audit" as const }
+            : discussTarget.startsWith("profile:")
+              ? {
+                  mode: "operator" as const,
+                  profile_id: discussTarget.slice("profile:".length),
+                }
+              : { mode: "operator" as const };
+        const res = await api.discussTask(task.id, text, discussOpts);
+        toast.success(
+          res.used_llm && res.model
+            ? `${res.node === "pr_audit" ? "PR 审计" : "AI 助手"}已回复（${res.model}）`
+            : "项目助手已回复",
+        );
       } else {
         const res = await api.addTaskMessage(
           task.id,
@@ -377,6 +410,9 @@ export function TaskDetailDrawer({
   };
 
   const handleApplySuggestion = (suggestion: PromptSuggestion) => {
+    if (suggestion.label === "AI 审计 PR") {
+      setDiscussTarget("pr_audit");
+    }
     setComment(suggestion.text);
     window.requestAnimationFrame(() => {
       const el = commentInputRef.current;
@@ -1009,20 +1045,40 @@ export function TaskDetailDrawer({
                     动态与讨论 ({detail?.messages.length ?? 0})
                   </h3>
                   {aiConfig && (
-                    <button
-                      type="button"
-                      onClick={onOpenAiSettings}
-                      className={`inline-flex items-center gap-1.5 text-[11.5px] px-2 py-0.5 rounded-full transition cursor-pointer ${
-                        aiConfig.configured
-                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/15"
-                          : "bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/15"
-                      }`}
-                    >
-                      <Icon name="sparkles" size={11} />
-                      {aiConfig.configured
-                        ? `AI 助手 · ${aiConfig.model}`
-                        : "未配置 LLM · 点此设置 API Key"}
-                    </button>
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                      {aiConfig.configured && (
+                        <select
+                          aria-label="选择对话模型或节点"
+                          value={discussTarget}
+                          onChange={(e) => setDiscussTarget(e.target.value)}
+                          className="h-6.5 max-w-[240px] px-2 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[11px] font-mono text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 cursor-pointer"
+                        >
+                          <option value="operator">
+                            对话节点 · {operatorResolved?.model || aiConfig.model}
+                          </option>
+                          <option value="pr_audit">
+                            PR 审计 · {prAuditResolved?.model || aiConfig.model}
+                          </option>
+                          {aiProfiles.map((p) => (
+                            <option key={p.id} value={`profile:${p.id}`}>
+                              {p.name} · {p.model}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <button
+                        type="button"
+                        onClick={onOpenAiSettings}
+                        className={`inline-flex items-center gap-1.5 text-[11.5px] px-2 py-0.5 rounded-full transition cursor-pointer ${
+                          aiConfig.configured
+                            ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/15"
+                            : "bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/15"
+                        }`}
+                      >
+                        <Icon name="sparkles" size={11} />
+                        {aiConfig.configured ? "模型设置" : "未配置 LLM · 点此设置"}
+                      </button>
+                    </div>
                   )}
                 </div>
 
@@ -1349,12 +1405,12 @@ export function TaskDetailDrawer({
                           canReopenTask && autoReopen ? "secondary" : "primary"
                         }
                         size="xs"
-                        icon="sparkles"
+                        icon={discussTarget === "pr_audit" ? "git-pull-request" : "sparkles"}
                         disabled={!comment.trim() || busyAction !== null}
                         loading={busyAction === "discuss"}
                         onClick={() => void handleSendMessage(true)}
                       >
-                        问项目助手
+                        {discussTarget === "pr_audit" ? "发起 PR 审计" : "问项目助手"}
                       </Button>
                     </div>
                   </div>

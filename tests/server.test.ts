@@ -301,6 +301,188 @@ describe("Workspace LLM API Key Configuration & Assistant Chat", () => {
     expect(cleared.json.configured).toBe(false);
     expect(cleared.json.has_api_key).toBe(false);
   });
+
+  it("supports multiple model profiles, switching defaults, independent node routes, PR audit override, and max_completion_tokens", async () => {
+    const captured: Array<{
+      path: string;
+      auth: string;
+      model: string;
+      hasMaxTokens: boolean;
+      hasMaxCompletionTokens: boolean;
+    }> = [];
+
+    const multiMock = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<
+          string,
+          unknown
+        >;
+        const model = String(parsed.model ?? "");
+        captured.push({
+          path: req.url ?? "",
+          auth: String(req.headers.authorization ?? ""),
+          model,
+          hasMaxTokens: "max_tokens" in parsed,
+          hasMaxCompletionTokens: "max_completion_tokens" in parsed,
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            choices: [{ message: { content: `REPLY_FROM_${model}` } }],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => multiMock.listen(0, "127.0.0.1", resolve));
+    const port = (multiMock.address() as { port: number }).port;
+    const baseDeepseek = `http://127.0.0.1:${port}/deepseek/v1`;
+    const baseOpenai = `http://127.0.0.1:${port}/openai/v1`;
+
+    try {
+      const { dbPath } = makeTempDb();
+      const srv = await startApiServer({ dbPath });
+
+      // 1. Add first profile (DeepSeek) -> auto active
+      const add1 = await jsonReq(`${srv.url}/api/ai/profiles`, "POST", {
+        name: "DeepSeek 日常",
+        base_url: baseDeepseek,
+        model: "deepseek-chat",
+        api_key: "test-key-deepseek-1111",
+        intake_enabled: true,
+      });
+      expect(add1.status).toBe(200);
+      const profiles1 = add1.json.profiles as Array<Record<string, unknown>>;
+      expect(profiles1).toHaveLength(1);
+      const dsId = String(profiles1[0]!.id);
+      expect(add1.json.active_profile_id).toBe(dsId);
+      expect(add1.json.model).toBe("deepseek-chat");
+
+      // 2. Add second profile (OpenAI Official Pro credits) without switching default yet
+      const add2 = await jsonReq(`${srv.url}/api/ai/profiles`, "POST", {
+        name: "OpenAI 官方",
+        base_url: baseOpenai,
+        model: "gpt-5.4",
+        api_key: "test-key-openai-2222",
+        set_active: false,
+      });
+      expect(add2.status).toBe(200);
+      const profiles2 = add2.json.profiles as Array<Record<string, unknown>>;
+      expect(profiles2).toHaveLength(2);
+      const oaiId = String(profiles2.find((p) => p.name === "OpenAI 官方")!.id);
+      expect(add2.json.active_profile_id).toBe(dsId);
+
+      // 3. Configure per-node routes: PR audit uses OpenAI Official with independent model name override
+      const routesRes = await jsonReq(`${srv.url}/api/ai/routes`, "POST", {
+        intake_enabled: true,
+        node_routes: {
+          prescreen: { profile_id: dsId, model: "" },
+          widget: { profile_id: dsId, model: "" },
+          operator: { profile_id: "", model: "" },
+          pr_audit: { profile_id: oaiId, model: "gpt-6.2-astra" },
+        },
+      });
+      expect(routesRes.status).toBe(200);
+      const resolvedNodes = routesRes.json.resolved_nodes as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(resolvedNodes.pr_audit.profile_id).toBe(oaiId);
+      expect(resolvedNodes.pr_audit.model).toBe("gpt-6.2-astra");
+      expect(resolvedNodes.pr_audit.overrides_model).toBe(true);
+      expect(resolvedNodes.operator.model).toBe("deepseek-chat");
+
+      // 4. Create project & task and verify discuss routing
+      const pRes = await jsonReq(`${srv.url}/api/projects`, "POST", {
+        name: "Multi Model Project",
+        repo: "acexiamo/multi-proj",
+      });
+      const projId = (pRes.json.project as Record<string, string>).id;
+      const tRes = await jsonReq(`${srv.url}/api/projects/${projId}/tasks`, "POST", {
+        title: "检查 PR 改动",
+        body: "测试多模型与审计节点",
+        priority: "high",
+        skip_prescreen: true,
+      });
+      const taskId = (tRes.json.task as Record<string, string>).id;
+
+      // 4a. Default operator chat uses active DeepSeek profile (max_tokens)
+      const d1 = await jsonReq(`${srv.url}/api/tasks/${taskId}/discuss`, "POST", {
+        body: "先看下需求",
+      });
+      expect(d1.status).toBe(200);
+      expect(d1.json.reply).toBe("REPLY_FROM_deepseek-chat");
+      expect(captured[captured.length - 1]).toMatchObject({
+        path: "/deepseek/v1/chat/completions",
+        auth: "Bearer test-key-deepseek-1111",
+        model: "deepseek-chat",
+        hasMaxTokens: true,
+        hasMaxCompletionTokens: false,
+      });
+
+      // 4b. Mid-conversation switch to OpenAI profile -> uses gpt-5.4 & max_completion_tokens
+      const d2 = await jsonReq(`${srv.url}/api/tasks/${taskId}/discuss`, "POST", {
+        body: "用 GPT 分析下架构方案",
+        profile_id: oaiId,
+      });
+      expect(d2.status).toBe(200);
+      expect(d2.json.reply).toBe("REPLY_FROM_gpt-5.4");
+      expect(captured[captured.length - 1]).toMatchObject({
+        path: "/openai/v1/chat/completions",
+        auth: "Bearer test-key-openai-2222",
+        model: "gpt-5.4",
+        hasMaxTokens: false,
+        hasMaxCompletionTokens: true,
+      });
+
+      // 4c. PR audit node -> uses independent model name override gpt-6.2-astra
+      const d3 = await jsonReq(`${srv.url}/api/tasks/${taskId}/discuss`, "POST", {
+        body: "请审计当前 PR",
+        mode: "pr_audit",
+      });
+      expect(d3.status).toBe(200);
+      expect(d3.json.reply).toBe("REPLY_FROM_gpt-6.2-astra");
+      expect(d3.json.node).toBe("pr_audit");
+      expect(captured[captured.length - 1]).toMatchObject({
+        path: "/openai/v1/chat/completions",
+        auth: "Bearer test-key-openai-2222",
+        model: "gpt-6.2-astra",
+        hasMaxTokens: false,
+        hasMaxCompletionTokens: true,
+      });
+
+      // 5. Test node connectivity directly via /api/ai/test with node="pr_audit"
+      const testNode = await jsonReq(`${srv.url}/api/ai/test`, "POST", {
+        node: "pr_audit",
+      });
+      expect(testNode.status).toBe(200);
+      expect(testNode.json.model).toBe("gpt-6.2-astra");
+
+      // 6. Switch active default profile to OpenAI Official
+      const switched = await jsonReq(`${srv.url}/api/ai/profiles/select`, "POST", {
+        profile_id: oaiId,
+      });
+      expect(switched.status).toBe(200);
+      expect(switched.json.active_profile_id).toBe(oaiId);
+      expect(switched.json.model).toBe("gpt-5.4");
+
+      // 7. Delete OpenAI profile -> falls back cleanly to DeepSeek and resets pr_audit profile_id
+      const deleted = await jsonReq(`${srv.url}/api/ai/profiles/delete`, "POST", {
+        profile_id: oaiId,
+      });
+      expect(deleted.status).toBe(200);
+      expect(deleted.json.active_profile_id).toBe(dsId);
+      expect((deleted.json.profiles as unknown[]).length).toBe(1);
+      const afterRoutes = deleted.json.node_routes as Record<
+        string,
+        Record<string, string>
+      >;
+      expect(afterRoutes.pr_audit.profile_id).toBe("");
+    } finally {
+      await new Promise<void>((resolve) => multiMock.close(() => resolve()));
+    }
+  });
 });
 
 describe("Ethereum Wallet SIWE Authentication (viem)", () => {

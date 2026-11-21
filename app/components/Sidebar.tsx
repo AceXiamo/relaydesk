@@ -116,7 +116,13 @@ export function Sidebar({
       id: "settings",
       label: "设置与 LLM",
       icon: "settings",
-      badge: aiConfig ? (aiConfig.configured ? "LLM" : "未配 AI") : undefined,
+      badge: aiConfig
+        ? aiConfig.configured
+          ? aiConfig.profiles && aiConfig.profiles.length > 1
+            ? `${aiConfig.profiles.length} 模型`
+            : "LLM"
+          : "未配 AI"
+        : undefined,
       badgeTone: aiConfig?.configured ? "emerald" : "amber",
     },
   ];

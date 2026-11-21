@@ -28,17 +28,22 @@ import {
   upsertGithubConnection,
 } from "./github.ts";
 import {
+  deleteAiProfile,
   deleteStoredAiConfig,
   getEffectiveAiConfig,
+  isAiNodeId,
   isLoopbackHost,
   readStoredAiConfig,
-  saveStoredAiConfig,
+  resolveAiConfigForNode,
+  selectActiveAiProfile,
   toAiConfigStatus,
+  updateAiNodeRoutes,
+  upsertAiProfile,
   validateAiBaseUrl,
 } from "./ai-config.ts";
 import {
   intakeReply,
-  operatorReply,
+  operatorDiscuss,
   prescreenFeedback,
   testAiConnection,
 } from "./assistant.ts";
@@ -802,12 +807,71 @@ export class ApiRouter {
       const clearApiKey = data.clear_api_key === true;
       const intakeEnabled = Boolean(data.intake_enabled);
       const existing = readStoredAiConfig(this.store.dbPath);
-      const nextKey = clearApiKey ? "" : rawKey || existing?.api_key || "";
-      saveStoredAiConfig(this.store.dbPath, {
+      const targetId =
+        typeof data.id === "string" && data.id.trim()
+          ? data.id.trim()
+          : existing?.active_profile_id || undefined;
+      const name = typeof data.name === "string" ? data.name.trim() : undefined;
+      upsertAiProfile(this.store.dbPath, {
+        id: targetId,
+        name,
         base_url: baseUrl,
         model,
-        api_key: nextKey,
+        api_key: rawKey,
+        clear_api_key: clearApiKey,
+        set_active: true,
         intake_enabled: intakeEnabled,
+      });
+      if (data.node_routes && typeof data.node_routes === "object") {
+        updateAiNodeRoutes(this.store.dbPath, {
+          intake_enabled: intakeEnabled,
+          node_routes: data.node_routes as Record<string, { profile_id?: string; model?: string }>,
+        });
+      }
+      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
+    }
+
+    if (subparts.length === 1 && subparts[0] === "profiles") {
+      const baseUrl = validateAiBaseUrl(field(data, "base_url", 512));
+      const model = field(data, "model", 160);
+      const rawKey = typeof data.api_key === "string" ? data.api_key.trim() : "";
+      if (rawKey.length > 512) {
+        throw new ApiError(400, "API Key 过长");
+      }
+      upsertAiProfile(this.store.dbPath, {
+        id: typeof data.id === "string" ? data.id.trim() : undefined,
+        name: typeof data.name === "string" ? data.name.trim() : undefined,
+        base_url: baseUrl,
+        model,
+        api_key: rawKey,
+        clear_api_key: data.clear_api_key === true,
+        set_active: data.set_active === true,
+        intake_enabled:
+          typeof data.intake_enabled === "boolean" ? data.intake_enabled : undefined,
+      });
+      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
+    }
+
+    if (subparts.length === 2 && subparts[0] === "profiles" && subparts[1] === "select") {
+      const profileId = field(data, "profile_id", 64);
+      selectActiveAiProfile(this.store.dbPath, profileId);
+      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
+    }
+
+    if (subparts.length === 2 && subparts[0] === "profiles" && subparts[1] === "delete") {
+      const profileId = field(data, "profile_id", 64);
+      deleteAiProfile(this.store.dbPath, profileId);
+      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
+    }
+
+    if (subparts.length === 1 && subparts[0] === "routes") {
+      updateAiNodeRoutes(this.store.dbPath, {
+        intake_enabled:
+          typeof data.intake_enabled === "boolean" ? data.intake_enabled : undefined,
+        node_routes:
+          data.node_routes && typeof data.node_routes === "object"
+            ? (data.node_routes as Record<string, { profile_id?: string; model?: string }>)
+            : undefined,
       });
       return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
     }
@@ -818,10 +882,15 @@ export class ApiRouter {
     }
 
     if (subparts.length === 1 && subparts[0] === "test") {
+      const profileId =
+        typeof data.profile_id === "string" ? data.profile_id.trim() : undefined;
+      const node = isAiNodeId(data.node) ? data.node : undefined;
       const baseUrl = typeof data.base_url === "string" ? data.base_url.trim() : undefined;
       const model = typeof data.model === "string" ? data.model.trim() : undefined;
       const apiKey = typeof data.api_key === "string" ? data.api_key.trim() : undefined;
       return await testAiConnection(this.store.dbPath, {
+        profile_id: profileId,
+        node,
         base_url: baseUrl,
         model,
         api_key: apiKey,
@@ -931,7 +1000,7 @@ export class ApiRouter {
       this.checkBearer(req, row.intake_key);
       return toAgentProject(row);
     });
-    const aiCfg = getEffectiveAiConfig(this.store.dbPath);
+    const aiCfg = resolveAiConfigForNode(this.store.dbPath, "widget");
     const r2Cfg = getEffectiveR2Config(this.store.dbPath);
     const aiEnabled = Boolean(aiCfg.intake_enabled && aiCfg.base_url && aiCfg.model);
     return {
@@ -1092,7 +1161,13 @@ export class ApiRouter {
     parts: string[],
     data: Record<string, unknown>,
     meta: { corsOrigin?: string },
-  ): Promise<{ reply: string }> {
+  ): Promise<{
+    reply: string;
+    model?: string;
+    profile_name?: string;
+    node?: string;
+    used_llm?: boolean;
+  }> {
     const body = field(data, "body", 8000);
     const clarify = parts[0] === "projects";
 
@@ -1124,18 +1199,32 @@ export class ApiRouter {
         const reply = await intakeReply(this.store.dbPath, body, expected);
         return { reply };
       }
-      const reply = await operatorReply(
+      const profileId =
+        typeof data.profile_id === "string" && data.profile_id.trim()
+          ? data.profile_id.trim()
+          : undefined;
+      const modelOverride =
+        typeof data.model === "string" && data.model.trim()
+          ? data.model.trim().slice(0, 160)
+          : undefined;
+      const mode = data.mode === "pr_audit" ? "pr_audit" : "operator";
+      const result = await operatorDiscuss(
         this.store.dbPath,
         project!,
         task!,
         messages,
         body,
+        {
+          profile_id: profileId,
+          model: modelOverride,
+          mode,
+        },
       );
       this.store.transaction(true, () => {
         this.store.addMessage(task!.id, "comment", "human", body);
-        this.store.addMessage(task!.id, "comment", "assistant", reply);
+        this.store.addMessage(task!.id, "comment", "assistant", result.reply);
       });
-      return { reply };
+      return result;
     } finally {
       this.assistantInFlight -= 1;
     }

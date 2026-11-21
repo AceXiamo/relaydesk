@@ -123,6 +123,37 @@ export interface AuthStatusPayload {
   address?: string;
 }
 
+export type AiNodeId = "prescreen" | "widget" | "operator" | "pr_audit";
+
+export interface AiProfileSummary {
+  id: string;
+  name: string;
+  base_url: string;
+  model: string;
+  has_api_key: boolean;
+  api_key_preview: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AiNodeRoute {
+  profile_id: string;
+  model: string;
+}
+
+export interface AiResolvedNodeSummary {
+  node: AiNodeId;
+  configured: boolean;
+  source: "workspace" | "env" | "none";
+  profile_id: string;
+  profile_name: string;
+  base_url: string;
+  model: string;
+  has_api_key: boolean;
+  overrides_profile: boolean;
+  overrides_model: boolean;
+}
+
 export interface AiConfigStatus {
   configured: boolean;
   source: "workspace" | "env" | "none";
@@ -131,6 +162,10 @@ export interface AiConfigStatus {
   has_api_key: boolean;
   api_key_preview: string;
   intake_enabled: boolean;
+  active_profile_id: string;
+  profiles: AiProfileSummary[];
+  node_routes: Record<AiNodeId, AiNodeRoute>;
+  resolved_nodes: Record<AiNodeId, AiResolvedNodeSummary>;
 }
 
 export interface AiTestResult {
@@ -138,6 +173,8 @@ export interface AiTestResult {
   latency_ms: number;
   model: string;
   reply_preview: string;
+  profile_id?: string;
+  node?: AiNodeId;
 }
 
 export interface R2ConfigStatus {

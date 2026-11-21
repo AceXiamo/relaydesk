@@ -1,7 +1,7 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError, stepCountIs, streamText, tool, type FilePart, type ModelMessage, type ToolSet } from "ai";
 import { z } from "zod";
-import { getEffectiveAiConfig } from "./ai-config.ts";
+import { resolveAiConfigForNode } from "./ai-config.ts";
 import {
   ensureProjectRepos,
   listRepoFiles,
@@ -397,7 +397,7 @@ export async function runWidgetAgentStream(options: {
 }): Promise<void> {
   const { dbPath, project, messages, page, signal, onEvent } = options;
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
-  const aiConfig = getEffectiveAiConfig(dbPath);
+  const aiConfig = resolveAiConfigForNode(dbPath, "widget");
 
   // Graceful fallback when workspace LLM is not configured or intake AI is disabled
   if (!aiConfig.intake_enabled || !aiConfig.base_url || !aiConfig.model) {
