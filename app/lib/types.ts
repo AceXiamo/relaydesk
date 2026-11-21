@@ -34,7 +34,6 @@ export interface ProjectSummary {
   automation_paused: boolean;
   delivery_mode: DeliveryMode;
   widget_code_context: boolean;
-  cli_enabled: boolean;
   created_at: string;
 }
 
@@ -54,7 +53,6 @@ export interface AgentProjectInfo {
   automation_paused: boolean;
   delivery_mode: DeliveryMode;
   widget_code_context: boolean;
-  cli_enabled?: boolean;
   agent_instructions: string;
 }
 
@@ -119,7 +117,14 @@ export interface TaskDetailPayload {
 
 export type DiscussMode = "operator" | "pr_audit";
 
-export interface CodexRunnerStatus {
+export interface ProjectCliSettings {
+  runtime: "codex" | "claude";
+  endpoint: string;
+  model: string;
+  public_ai_enabled: boolean;
+}
+
+export interface ProjectCliStatus extends ProjectCliSettings {
   configured: boolean;
   github_configured: boolean;
   online: boolean;
@@ -128,7 +133,7 @@ export interface CodexRunnerStatus {
   last_seen_at: string | null;
 }
 
-export interface CodexRunnerCredentials {
+export interface ProjectCliPatch extends ProjectCliSettings {
   api_key?: string;
   github_token?: string;
 }
@@ -141,16 +146,11 @@ export interface CliRun {
   sha: string;
 }
 
-export type DiscussResult =
-  | { queued: true; run: CliRun; node: DiscussMode }
-  | {
-      queued?: false;
-      reply: string;
-      model?: string;
-      profile_name?: string;
-      node?: AiNodeId;
-      used_llm?: boolean;
-    };
+export interface DiscussResult {
+  queued: true;
+  run: CliRun;
+  node: DiscussMode;
+}
 
 export type AuthMode = "none" | "token" | "wallet";
 
@@ -158,60 +158,6 @@ export interface AuthStatusPayload {
   mode: AuthMode;
   authenticated: boolean;
   address?: string;
-}
-
-export type AiNodeId = "prescreen" | "widget" | "operator" | "pr_audit";
-
-export interface AiProfileSummary {
-  id: string;
-  name: string;
-  base_url: string;
-  model: string;
-  has_api_key: boolean;
-  api_key_preview: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface AiNodeRoute {
-  profile_id: string;
-  model: string;
-}
-
-export interface AiResolvedNodeSummary {
-  node: AiNodeId;
-  configured: boolean;
-  source: "workspace" | "env" | "none";
-  profile_id: string;
-  profile_name: string;
-  base_url: string;
-  model: string;
-  has_api_key: boolean;
-  overrides_profile: boolean;
-  overrides_model: boolean;
-}
-
-export interface AiConfigStatus {
-  configured: boolean;
-  source: "workspace" | "env" | "none";
-  base_url: string;
-  model: string;
-  has_api_key: boolean;
-  api_key_preview: string;
-  intake_enabled: boolean;
-  active_profile_id: string;
-  profiles: AiProfileSummary[];
-  node_routes: Record<AiNodeId, AiNodeRoute>;
-  resolved_nodes: Record<AiNodeId, AiResolvedNodeSummary>;
-}
-
-export interface AiTestResult {
-  ok: boolean;
-  latency_ms: number;
-  model: string;
-  reply_preview: string;
-  profile_id?: string;
-  node?: AiNodeId;
 }
 
 export interface R2ConfigStatus {

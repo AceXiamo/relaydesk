@@ -1,27 +1,20 @@
-# 项目助手与 LLM 配置
+# Project CLI settings
 
-任务讨论使用当前项目名、项目级 Agent 指令、任务内容、要求、状态、负责人和最近 12 条讨论作为上下文。点击「询问项目助手」时，回答会写入该任务的讨论串。只有维护者主动修改任务要求或执行认领等操作时，队列状态才会变化。
+Open the project's settings, select Codex CLI or Claude Code, and enter the API key for that project. A custom API endpoint and model name are optional. The runner reads the saved settings before each claim. The provider key and optional read-only GitHub token are write-only in the console.
 
-## 方式一：在工作台直接配置（推荐）
+| Runtime | Gateway protocol | Example API base URL |
+| --- | --- | --- |
+| Codex CLI | OpenAI Responses API with tool support | `https://api.openai.com/v1` |
+| Claude Code | Anthropic Messages API with tool support | `https://api.anthropic.com` |
 
-进入左侧菜单 **设置与 LLM → AI 助手与 LLM 配置**，选择服务商预设（OpenAI、OpenRouter、DeepSeek、Ollama 本地或任意 OpenAI 兼容端点），填写：
+Use the HTTPS base URL supplied by the gateway. The CLI appends the resource path. Leave the address or model empty to use the CLI default. When changing runtime or endpoint, enter the key for the new destination or explicitly clear it. Upgrading from a previous release requires entering the project settings again.
 
-- **API Base URL**：例如 `https://api.openai.com/v1` 或 `http://127.0.0.1:11434/v1`
-- **模型名称 (Model)**：例如 `gpt-4o-mini`、`deepseek-chat`、`qwen3:8b`
-- **API Key**：点击「测试连接」验证延迟与可用性后点击「保存 AI 配置」
-- **允许反馈组件使用 LLM 追问**：按需开启或关闭
+## Ask the CLI
 
-配置以 `0600` 权限保存在服务端数据目录的 `.ai-config.json` 中，API Key 不会下发到浏览器。
+Open a task and choose **询问项目 CLI**. The question is queued for the runner bound to that project. It checks out the repository, uses the thread as context, and posts its result in the discussion. **发起 PR 审计** queues an audit of the task's linked pull request. **发送评论** adds a human comment. A queued request waits while the runner is offline. A completed model-backed job verifies the key, model access and gateway protocol together.
 
-## 方式二：通过环境变量配置（回退默认）
+## Public feedback
 
-如果工作区未在 UI 中保存配置，服务端会自动回退读取环境变量，例如连接本机模型：
+Public AI is off by default. The project switch enables widget conversations, intake clarification and feedback prescreening for the selected runtime's official API address. Custom gateway addresses are available to the CLI. With an empty model field, the Web service uses `gpt-4.1-mini` for OpenAI Responses or `claude-sonnet-5-5` for Anthropic Messages. The CLI uses its own default. Visitors can still submit feedback manually while public AI is off or unavailable. Public requests cannot dispatch CLI jobs.
 
-```sh
-export RELAYDESK_AI_BASE_URL=http://127.0.0.1:11434/v1
-export RELAYDESK_AI_MODEL=qwen3:8b
-export RELAYDESK_AI_KEY=sk-...
-export RELAYDESK_AI_INTAKE=1
-```
-
-远程服务必须使用 HTTPS；仅回环地址支持 HTTP。服务端向指定地址的 `/chat/completions` 路由发送请求。请求超时或模型出错时会自动退回本地规则，不影响正常整理工作流。
+For runner provisioning and verification, see [Project CLI runner](project-runner.md).

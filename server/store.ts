@@ -52,7 +52,6 @@ CREATE TABLE IF NOT EXISTS projects (
     allowed_origins TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,
     agent_instructions TEXT NOT NULL DEFAULT '',
     automation_paused INTEGER NOT NULL DEFAULT 0,
-    cli_enabled INTEGER NOT NULL DEFAULT 0,
     delivery_mode TEXT NOT NULL DEFAULT 'direct_push',
     widget_code_context INTEGER NOT NULL DEFAULT 1
 );
@@ -130,12 +129,6 @@ export function field(
     throw new ApiError(400, `Invalid ${name} (maximum ${limit} characters)`);
   }
   return raw.trim();
-}
-
-function cliEnabledFlag(data: Record<string, unknown>, fallback: number): number {
-  if (data.cli_enabled === undefined) return fallback;
-  if (typeof data.cli_enabled !== "boolean") throw new ApiError(400, "cli_enabled must be a boolean");
-  return data.cli_enabled ? 1 : 0;
 }
 
 export const MAX_PROJECT_REPOS = 20;
@@ -265,7 +258,6 @@ export interface RawProjectRow {
   allowed_origins: string;
   created_at: string;
   agent_instructions: string;
-  cli_enabled?: number;
   automation_paused?: number;
   delivery_mode?: string;
   widget_code_context?: number;
@@ -339,7 +331,6 @@ export function toProjectView(row: RawProjectRow): ProjectDetail {
     name: row.name,
     repo: repos[0] ?? row.repo,
     repos,
-    cli_enabled: Boolean(row.cli_enabled),
     automation_paused: Boolean(row.automation_paused),
     delivery_mode: normalizeDeliveryMode(row.delivery_mode),
     widget_code_context: row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
@@ -359,7 +350,6 @@ export function toAgentProject(row: RawProjectRow): AgentProjectInfo {
     name: row.name,
     repo: repos[0] ?? row.repo,
     repos,
-    cli_enabled: Boolean(row.cli_enabled),
     automation_paused: Boolean(row.automation_paused),
     delivery_mode: normalizeDeliveryMode(row.delivery_mode),
     widget_code_context: row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
@@ -431,9 +421,7 @@ export class Store {
         "ALTER TABLE projects ADD COLUMN automation_paused INTEGER NOT NULL DEFAULT 0",
       );
     }
-    if (!cols.some((c) => c.name === "cli_enabled")) {
-      this.db.exec("ALTER TABLE projects ADD COLUMN cli_enabled INTEGER NOT NULL DEFAULT 0");
-    }
+
     if (!cols.some((c) => c.name === "delivery_mode")) {
       this.db.exec(
         "ALTER TABLE projects ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'direct_push'",
@@ -499,14 +487,13 @@ export class Store {
   listProjects(): ProjectSummary[] {
     const rows = this.db
       .prepare(
-        "SELECT id, name, repo, repos, cli_enabled, automation_paused, delivery_mode, widget_code_context, created_at FROM projects ORDER BY created_at",
+        "SELECT id, name, repo, repos, automation_paused, delivery_mode, widget_code_context, created_at FROM projects ORDER BY created_at",
       )
       .all() as unknown as Array<{
       id: string;
       name: string;
       repo: string;
       repos?: string;
-      cli_enabled?: number;
       automation_paused?: number;
       delivery_mode?: string;
       widget_code_context?: number;
@@ -519,7 +506,6 @@ export class Store {
         name: row.name,
         repo: repos[0] ?? row.repo,
         repos,
-        cli_enabled: Boolean(row.cli_enabled),
         automation_paused: Boolean(row.automation_paused),
         delivery_mode: normalizeDeliveryMode(row.delivery_mode),
         widget_code_context:
@@ -577,8 +563,8 @@ export class Store {
     const created = nowIso();
     this.db
       .prepare(
-        `INSERT INTO projects(id, name, repo, repos, intake_key, bot_key, agent_key, allowed_origins, created_at, agent_instructions, automation_paused, delivery_mode, widget_code_context, cli_enabled)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO projects(id, name, repo, repos, intake_key, bot_key, agent_key, allowed_origins, created_at, agent_instructions, automation_paused, delivery_mode, widget_code_context)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         projectId,
@@ -594,7 +580,6 @@ export class Store {
         automationPaused,
         deliveryMode,
         widgetCodeContext,
-        cliEnabledFlag(data, 0),
       );
     return toProjectView(this.getProjectRow(projectId));
   }
@@ -647,7 +632,7 @@ export class Store {
     }
     this.db
       .prepare(
-        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ?, automation_paused = ?, delivery_mode = ?, widget_code_context = ?, cli_enabled = ? WHERE id = ?",
+        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ?, automation_paused = ?, delivery_mode = ?, widget_code_context = ? WHERE id = ?",
       )
       .run(
         name,
@@ -658,7 +643,6 @@ export class Store {
         automationPaused,
         deliveryMode,
         widgetCodeContext,
-        cliEnabledFlag(data, project.cli_enabled ?? 0),
         projectId,
       );
     return toProjectView(this.getProjectRow(projectId));
@@ -746,7 +730,6 @@ export class Store {
     return this.transaction(true, () => {
       this.cliTask(projectId, taskId);
       const project = this.getProjectRow(projectId);
-      if (!project.cli_enabled) throw new ApiError(409, "CLI is disabled for this project");
       if (project.automation_paused) throw new ApiError(409, "Automation is paused");
       this.expireCliRuns(projectId);
       if (this.db.prepare("SELECT 1 FROM cli_runs WHERE task_id = ? AND status IN ('queued','running')").get(taskId)) {
@@ -774,7 +757,7 @@ export class Store {
     return this.transaction(true, () => {
       const project = this.getProjectRow(projectId);
       this.expireCliRuns(projectId);
-      if (!project.cli_enabled || project.automation_paused) return null;
+      if (project.automation_paused) return null;
       const lease = tokenUrlSafe();
       const now = nowIso();
       const run = this.db.prepare(`UPDATE cli_runs SET status = 'running', lease = ?, started_at = ?, updated_at = ?

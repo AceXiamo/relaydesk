@@ -14,6 +14,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 PORT = 18787
 URL = f'http://127.0.0.1:{PORT}'
 COMMAND = 'cat repo/probe.txt'
+MODELS = {'codex': 'gpt-5.5', 'claude': 'claude-sonnet-4-6'}
+KEYS = {'codex': 'fixture-only-codex', 'claude': 'fixture-only-claude'}
 
 
 class Fixture(BaseHTTPRequestHandler):
@@ -26,11 +28,21 @@ class Fixture(BaseHTTPRequestHandler):
 
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
-        codex = self.path.endswith('/responses')
-        claude = self.path.split('?')[0].endswith('/messages')
-        if not (codex or claude):
+        path = self.path.partition('?')[0]
+        if path == '/codex/v1/responses':
+            cli = 'codex'
+            authenticated = self.headers.get('Authorization') == 'Bearer ' + KEYS[cli]
+        elif path == '/claude/v1/messages':
+            cli = 'claude'
+            authenticated = self.headers.get('x-api-key') == KEYS[cli]
+        else:
             self.send_error(404)
             return
+        if not authenticated or data.get('model') != MODELS[cli]:
+            print(f'{cli}: incorrect provider auth or model', flush=True)
+            self.send_error(403)
+            return
+        codex = cli == 'codex'
         tool = 'exec_command' if codex else 'Bash'
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
@@ -44,7 +56,7 @@ class Fixture(BaseHTTPRequestHandler):
         found = re.search(r'CLI_PROOF_[0-9a-f]{32}', incoming)
         answer = found.group() if found else None
         if codex:
-            resp = {'id': 'resp_fixture', 'object': 'response', 'created_at': 1, 'model': 'fixture', 'output': []}
+            resp = {'id': 'resp_fixture', 'object': 'response', 'created_at': 1, 'model': MODELS[cli], 'output': []}
             emit('response.created', response=dict(resp, status='in_progress'))
             if answer:
                 item = {'id': 'msg_1', 'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': answer, 'annotations': []}]}
@@ -89,13 +101,17 @@ def proof():
             probe = work / 'repo/probe.txt'
             probe.write_text(marker)
             probe.chmod(0o444)
-            args, env = runner.cli_command(cli, runner.work_env(work), 'fixture-only')
-            if cli == 'codex':
-                # Set only the test provider; preserve the runner's real tool/sandbox flags.
-                env['OPENAI_BASE_URL'] = URL + '/v1'
-                args[-1:-1] = ['-c', 'model_provider="fixture"', '-m', 'gpt-5.5', '-c', 'model_providers.fixture.name="fixture"', '-c', f'model_providers.fixture.base_url="{URL}/v1"', '-c', 'model_providers.fixture.wire_api="responses"']
-            else:
-                env['ANTHROPIC_BASE_URL'] = URL
+            settings_file = Path(root) / 'settings.json'
+            settings_file.touch(mode=0o600)
+            settings_file.write_text(json.dumps({
+                'project_id': 'fixture', 'runtime': cli, 'model': MODELS[cli],
+                'endpoint': URL + ('/codex/v1' if cli == 'codex' else '/claude'),
+                'api_key': KEYS[cli], 'github_token': '',
+            }))
+            settings = runner.read_settings(settings_file, 'fixture')
+            if settings is None:
+                raise RuntimeError(f'{cli}: fixture settings rejected')
+            args, env = runner.cli_command(settings, runner.work_env(work))
             started = time.monotonic()
 
             def timeout():
@@ -105,7 +121,7 @@ def proof():
             reply = runner.run_command(args, work, env, work, timeout, prompt=b'Read repo/probe.txt with the shell and report its contents.', stage=cli)
             if marker not in reply:
                 raise RuntimeError(f'{cli}: missing shell observation in final reply')
-            print(f'OK: {cli} ran its shell tool and returned the fixture.', flush=True)
+            print(f'OK: {cli} used the managed endpoint, model and key and returned the shell fixture.', flush=True)
 
 
 if __name__ == '__main__':

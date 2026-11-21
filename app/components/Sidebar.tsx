@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icon.tsx";
 import { Kbd, LivePulseDot } from "./ui.tsx";
 import type {
-  AiConfigStatus,
   AuthStatusPayload,
   ProjectDetail,
   ProjectSummary,
@@ -15,7 +14,6 @@ interface SidebarProps {
   currentProject: ProjectDetail | null;
   tasks: TaskRecord[];
   view: WorkspaceView;
-  aiConfig: AiConfigStatus | null;
   authStatus: AuthStatusPayload | null;
   online: boolean;
   dark: boolean;
@@ -34,7 +32,6 @@ export function Sidebar({
   currentProject,
   tasks,
   view,
-  aiConfig,
   authStatus,
   online,
   dark,
@@ -108,22 +105,12 @@ export function Sidebar({
     id: WorkspaceView;
     label: string;
     icon: string;
-    badge?: string;
-    badgeTone?: "emerald" | "amber";
   }> = [
     { id: "sources", label: "收集入口", icon: "plug" },
     {
       id: "settings",
-      label: "设置与 LLM",
+      label: "设置",
       icon: "settings",
-      badge: aiConfig
-        ? aiConfig.configured
-          ? aiConfig.profiles && aiConfig.profiles.length > 1
-            ? `${aiConfig.profiles.length} 模型`
-            : "LLM"
-          : "未配 AI"
-        : undefined,
-      badgeTone: aiConfig?.configured ? "emerald" : "amber",
     },
   ];
 
@@ -431,17 +418,6 @@ export function Sidebar({
                     />
                     <span className="truncate">{item.label}</span>
                   </span>
-                  {item.badge && (
-                    <span
-                      className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${
-                        item.badgeTone === "emerald"
-                          ? "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400"
-                          : "bg-amber-500/12 text-amber-600 dark:text-amber-400"
-                      }`}
-                    >
-                      {item.badge}
-                    </span>
-                  )}
                 </button>
               );
             })}

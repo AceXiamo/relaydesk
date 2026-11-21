@@ -1,7 +1,6 @@
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError, stepCountIs, streamText, tool, type FilePart, type ModelMessage, type ToolSet } from "ai";
 import { z } from "zod";
-import { resolveAiConfigForNode } from "./ai-config.ts";
+import { projectPublicAiModel } from "./project-ai-provider.ts";
 import {
   ensureProjectRepos,
   listRepoFiles,
@@ -397,10 +396,9 @@ export async function runWidgetAgentStream(options: {
 }): Promise<void> {
   const { dbPath, project, messages, page, signal, onEvent } = options;
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
-  const aiConfig = resolveAiConfigForNode(dbPath, "widget");
+  const model = projectPublicAiModel(dbPath, project.id);
 
-  // Graceful fallback when workspace LLM is not configured or intake AI is disabled
-  if (!aiConfig.intake_enabled || !aiConfig.base_url || !aiConfig.model) {
+  if (!model) {
     const rawText = lastUser?.text?.trim() ?? "";
     const isBug = /报错|失败|崩溃|卡住|错误|异常|bug|crash|error|fail|无法/i.test(rawText);
     const isIdea = /希望|建议|新增|需求|能不能|支持|优化|feature|idea/i.test(rawText);
@@ -444,15 +442,6 @@ export async function runWidgetAgentStream(options: {
   }
 
   const hasCodeTools = readyRepos.length > 0;
-  const provider = createOpenAICompatible({
-    name: "relaydesk-widget",
-    baseURL: aiConfig.base_url,
-    // Forward screenshot URLs as image_url instead of downloading them on the server.
-    supportedUrls: () => ({ "image/*": [/^https?:\/\//i] }),
-    apiKey: aiConfig.api_key || "not-needed",
-  });
-  const model = provider.chatModel(aiConfig.model);
-
   const systemPrompt = buildSystemPrompt(project, hasCodeTools, readyRepos, page);
   let emittedDraft = false;
 
@@ -590,6 +579,9 @@ export async function runWidgetAgentStream(options: {
 
     const result = streamText({
       model,
+      providerOptions: { openai: { store: false } },
+      // Both official protocols accept image URLs. Never fetch a visitor-provided URL locally.
+      experimental_download: async (assets) => assets.map(() => null),
       system: summaryOnly
         ? buildFinalSummarySystemPrompt(project, page, emittedDraft)
         : systemPrompt,
@@ -702,7 +694,7 @@ export async function runWidgetAgentStream(options: {
     return { emittedText: emittedText || emittedDraft, emittedDraft, finishReason, stepCount };
   };
 
-  const logContext = { projectId: project.id, model: aiConfig.model };
+  const logContext = { projectId: project.id, model: model.modelId };
   try {
     let includeImages = hasAnyImages;
     let pass;

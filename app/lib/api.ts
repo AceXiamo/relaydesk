@@ -1,12 +1,8 @@
 import type {
-  AiConfigStatus,
-  AiNodeId,
-  AiNodeRoute,
-  AiTestResult,
   AuthStatusPayload,
   CliRun,
-  CodexRunnerCredentials,
-  CodexRunnerStatus,
+  ProjectCliPatch,
+  ProjectCliStatus,
   DeliveryMode,
   DiscussMode,
   DiscussResult,
@@ -98,7 +94,6 @@ export const api = {
       automation_paused?: boolean;
       delivery_mode?: DeliveryMode;
       widget_code_context?: boolean;
-      cli_enabled?: boolean;
     },
   ) =>
     request<{ project: ProjectDetail }>(
@@ -107,13 +102,13 @@ export const api = {
       payload,
     ),
 
-  getCodexRunner: (projectId: string) =>
-    request<CodexRunnerStatus>(`/api/projects/${encodeURIComponent(projectId)}/codex-runner`),
-  updateCodexRunner: (projectId: string, credentials: CodexRunnerCredentials) =>
-    request<CodexRunnerStatus>(
-      `/api/projects/${encodeURIComponent(projectId)}/codex-runner`,
+  getProjectCliConfig: (projectId: string) =>
+    request<ProjectCliStatus>(`/api/projects/${encodeURIComponent(projectId)}/cli-config`),
+  updateProjectCliConfig: (projectId: string, settings: ProjectCliPatch) =>
+    request<ProjectCliStatus>(
+      `/api/projects/${encodeURIComponent(projectId)}/cli-config`,
       "PATCH",
-      credentials,
+      settings,
     ),
 
   listTasks: (projectId: string) =>
@@ -144,17 +139,11 @@ export const api = {
   discussTask: (
     taskId: string,
     body: string,
-    options?: {
-      profile_id?: string;
-      model?: string;
-      mode?: DiscussMode;
-    },
+    mode: DiscussMode,
   ) =>
     request<DiscussResult>(`/api/tasks/${encodeURIComponent(taskId)}/discuss`, "POST", {
       body,
-      ...(options?.profile_id ? { profile_id: options.profile_id } : {}),
-      ...(options?.model ? { model: options.model } : {}),
-      ...(options?.mode ? { mode: options.mode } : {}),
+      mode,
     }),
   taskAction: (
     taskId: string,
@@ -239,45 +228,6 @@ export const api = {
       "POST",
       typeof params === "number" ? { page: params } : params,
     ),
-
-  getAiConfig: () => request<AiConfigStatus>("/api/ai"),
-  saveAiConfig: (payload: {
-    id?: string;
-    name?: string;
-    base_url: string;
-    model: string;
-    api_key?: string;
-    clear_api_key?: boolean;
-    intake_enabled: boolean;
-    node_routes?: Partial<Record<AiNodeId, Partial<AiNodeRoute>>>;
-  }) => request<AiConfigStatus>("/api/ai", "POST", payload),
-  saveAiProfile: (payload: {
-    id?: string;
-    name?: string;
-    base_url: string;
-    model: string;
-    api_key?: string;
-    clear_api_key?: boolean;
-    set_active?: boolean;
-    intake_enabled?: boolean;
-  }) => request<AiConfigStatus>("/api/ai/profiles", "POST", payload),
-  selectAiProfile: (profile_id: string) =>
-    request<AiConfigStatus>("/api/ai/profiles/select", "POST", { profile_id }),
-  deleteAiProfile: (profile_id: string) =>
-    request<AiConfigStatus>("/api/ai/profiles/delete", "POST", { profile_id }),
-  saveAiRoutes: (payload: {
-    intake_enabled?: boolean;
-    node_routes?: Partial<Record<AiNodeId, Partial<AiNodeRoute>>>;
-  }) => request<AiConfigStatus>("/api/ai/routes", "POST", payload),
-  testAiConfig: (payload?: {
-    profile_id?: string;
-    node?: AiNodeId;
-    base_url?: string;
-    model?: string;
-    api_key?: string;
-  }) => request<AiTestResult>("/api/ai/test", "POST", payload ?? {}),
-  disconnectAiConfig: () =>
-    request<AiConfigStatus>("/api/ai/disconnect", "POST", {}),
 
   getR2Config: () => request<R2ConfigStatus>("/api/r2"),
   saveR2Config: (payload: {

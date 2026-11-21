@@ -25,7 +25,7 @@ function open(path = ":memory:") {
 }
 
 function fixture(store = open()) {
-  const project = store.createProject({ name: "CLI", repos: ["org/one", "org/two"], cli_enabled: true });
+  const project = store.createProject({ name: "CLI", repos: ["org/one", "org/two"] });
   const task = store.createTask(project.id, { body: "Bug report" }, "widget");
   return { store, project, task };
 }
@@ -111,40 +111,34 @@ it.each(["claim", "list", "late event"])("expires without replay or duplicate th
   expect(replies()).toHaveLength(1);
 });
 
-it("honors project opt-in and pause without losing an in-flight result", () => {
+it("honors project pause without losing an in-flight result", () => {
   const store = open();
   const { id } = store.createProject({ name: "Default", repo: "org/demo" });
   const task = store.createTask(id, { body: "Question" }, "console");
   const enqueue = () => store.enqueueCliRun(id, task.id, "operator", "Why?");
-  expect(store.listProjects()[0].cli_enabled).toBe(false);
-  expect(() => store.updateProject(id, { cli_enabled: 1 })).toThrow(/boolean/);
-  expect(enqueue).toThrow(/disabled/);
-  expect(store.updateProject(id, { cli_enabled: true }).cli_enabled).toBe(true);
   store.updateProject(id, { automation_paused: true });
   expect(enqueue).toThrow(/paused/);
   store.updateProject(id, { automation_paused: false });
   const run = enqueue();
-  for (const flags of [{ cli_enabled: false }, { cli_enabled: true, automation_paused: true }]) {
-    store.updateProject(id, flags);
-    expect(store.claimCliRun(id)).toBeNull();
-    expect(store.listCliRuns(id, task.id)[0].status).toBe("queued");
-  }
+  store.updateProject(id, { automation_paused: true });
+  expect(store.claimCliRun(id)).toBeNull();
+  expect(store.listCliRuns(id, task.id)[0].status).toBe("queued");
   store.updateProject(id, { automation_paused: false });
   const { lease } = store.claimCliRun(id)!;
   store.updateProject(id, { automation_paused: true });
   expect(store.eventCliRun(id, run.id, { event: "finish", body: "done", lease }).status).toBe("succeeded");
 });
 
-it("migrates existing projects without opting them in", () => {
+it("opens a legacy database and preserves its tasks", () => {
   const path = tempDb();
   const original = new Store(path);
   const { project, task } = fixture(original);
   original.close();
   const legacy = new DatabaseSync(path);
-  legacy.exec("DROP TABLE cli_runs; ALTER TABLE projects DROP COLUMN cli_enabled");
+  legacy.exec("DROP TABLE cli_runs; ALTER TABLE projects ADD COLUMN cli_enabled INTEGER NOT NULL DEFAULT 0");
   legacy.close();
   const migrated = open(path);
-  expect(migrated.listProjects()[0].cli_enabled).toBe(false);
+  expect(migrated.getTaskRow(task.id).project_id).toBe(project.id);
   expect(migrated.listCliRuns(project.id, task.id)).toEqual([]);
 });
 

@@ -15,7 +15,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@ai-sdk/openai-compatible": "^3.0.94",
+    "@ai-sdk/anthropic": "4",
+    "@ai-sdk/openai": "4",
     "@iconify/react": "^6.0.0",
     "@react-router/node": "^7.6.2",
     "ai": "^7.0.178",

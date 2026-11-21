@@ -10,7 +10,7 @@ import {
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ApiError } from "./errors.ts";
-import { isLoopbackHost } from "./ai-config.ts";
+import { isLoopbackHost } from "./loopback.ts";
 import type { R2ConfigStatus } from "../app/lib/types.ts";
 
 export interface StoredR2Config {

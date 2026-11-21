@@ -18,7 +18,6 @@ import {
 import { Button, ToastProvider, useToast } from "~/components/ui.tsx";
 import { api } from "~/lib/api.ts";
 import type {
-  AiConfigStatus,
   AuthStatusPayload,
   GithubConnectionSummary,
   ProjectDetail,
@@ -60,7 +59,6 @@ function ConsoleWorkspace() {
   const [currentProject, setCurrentProject] = useState<ProjectDetail | null>(null);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [view, setView] = useState<WorkspaceView>("queue");
-  const [aiConfig, setAiConfig] = useState<AiConfigStatus | null>(null);
   const [githubConnections, setGithubConnections] = useState<GithubConnectionSummary[]>([]);
   const githubConfigured = githubConnections.length > 0;
   const [authStatus, setAuthStatus] = useState<AuthStatusPayload | null>(null);
@@ -154,7 +152,6 @@ function ConsoleWorkspace() {
               repos: project.repos,
               automation_paused: project.automation_paused,
               delivery_mode: project.delivery_mode,
-              cli_enabled: project.cli_enabled ?? false,
             }
           : p,
       ),
@@ -171,17 +168,15 @@ function ConsoleWorkspace() {
     async (preferredProjectId?: string) => {
       setBootError(null);
       try {
-        const [auth, projRes, aiRes, ghRes] = await Promise.all([
+        const [auth, projRes, ghRes] = await Promise.all([
           api.getAuthStatus(),
           api.listProjects(),
-          api.getAiConfig().catch(() => null),
           api
             .getGithubStatus()
             .catch(() => ({ configured: false, connections: [] as GithubConnectionSummary[] })),
         ]);
         setAuthStatus(auth);
         setProjects(projRes.projects);
-        setAiConfig(aiRes);
         setGithubConnections(ghRes.connections ?? []);
         setOnline(true);
 
@@ -490,7 +485,6 @@ function ConsoleWorkspace() {
         currentProject={currentProject}
         tasks={tasks}
         view={view}
-        aiConfig={aiConfig}
         authStatus={authStatus}
         online={online}
         dark={dark}
@@ -546,9 +540,7 @@ function ConsoleWorkspace() {
           <SettingsView
             mode={view}
             project={currentProject}
-            aiConfig={aiConfig}
             githubConnections={githubConnections}
-            onAiConfigUpdated={setAiConfig}
             onGithubConnectionsUpdated={setGithubConnections}
             onProjectUpdated={(updated) => {
               setCurrentProject((current) => current?.id === updated.id ? updated : current);
@@ -562,7 +554,6 @@ function ConsoleWorkspace() {
                         repos: updated.repos,
                         automation_paused: updated.automation_paused,
                         delivery_mode: updated.delivery_mode,
-                        cli_enabled: updated.cli_enabled ?? false,
                       }
                     : p,
                 ),
@@ -617,7 +608,6 @@ function ConsoleWorkspace() {
         detail={detail}
         loading={detailLoading}
         allTasks={tasks}
-        aiConfig={aiConfig}
         canGoBack={detailStack.length > 0}
         onGoBack={() => {
           const prev = detailStack[detailStack.length - 1];
@@ -630,7 +620,7 @@ function ConsoleWorkspace() {
         }}
         onOpenRelated={(id) => void openTaskDetail(id, true)}
         onRefreshTask={handleRefreshTask}
-        onOpenAiSettings={() => {
+        onOpenCliSettings={() => {
           setDetail(null);
           setDetailStack([]);
           changeView("settings");
@@ -655,7 +645,6 @@ function ConsoleWorkspace() {
               automation_paused: proj.automation_paused,
               delivery_mode: proj.delivery_mode,
               widget_code_context: proj.widget_code_context,
-              cli_enabled: proj.cli_enabled ?? false,
               created_at: proj.created_at,
             },
           ]);

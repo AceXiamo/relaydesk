@@ -1,4 +1,4 @@
-# Independent Compose project. No access to the web container or its data volume.
+# One runner per project. Mount only its managed settings directory.
 services:
   runner:
     image: ghcr.io/acexiamo/relaydesk-runner:${IMAGE_TAG:?Set the matching full release SHA}
@@ -15,6 +15,12 @@ services:
     tmpfs:
       - /tmp:rw,exec,nosuid,nodev,mode=1777,size=1g
     volumes:
+      - type: bind
+        source: ${CLI_PROJECT_CONFIG_DIR:?Set the absolute path to the project settings directory}
+        target: /run/relaydesk/cli
+        read_only: true
+        bind:
+          create_host_path: false
       - type: bind
         source: ./runner-handbook.md
         target: /run/relaydesk/handbook.md

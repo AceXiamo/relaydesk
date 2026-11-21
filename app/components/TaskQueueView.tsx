@@ -299,7 +299,7 @@ export function TaskQueueView({
                   icon="sparkles"
                   onClick={() => onNavigateView("settings")}
                 >
-                  配置 LLM 与 GitHub
+                  配置 GitHub 连接
                 </Button>
               </div>
             }

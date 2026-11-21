@@ -31,7 +31,7 @@ class Queue:
 
     def post(self, route, **payload):
         if route == 'claim':
-            assert payload == {}
+            assert payload == heartbeat()
             return self.claim
         assert route == 'runs/job/events'
         assert payload['lease'] == 'fake-lease'
@@ -39,9 +39,13 @@ class Queue:
         return {'run': {}}
 
 
+def heartbeat(runtime='codex', ready=True):
+    return {'runtime': runtime, 'managed': True, 'ready': ready, 'protocol': 2}
+
+
 def opts():
-    return SimpleNamespace(project='p', repo='org/example', key='WEB_AGENT', github_token='GH_TOKEN',
-                           model_key='MODEL_KEY', cli='codex', timeout=20, interval=1)
+    return SimpleNamespace(project='p', repo='org/example', key='WEB_AGENT', timeout=20, interval=1,
+                           settings=worker.CliSettings('codex', '', '', 'MODEL_KEY', 'GH_TOKEN'))
 
 
 class CliTest(unittest.TestCase):
@@ -76,22 +80,26 @@ class CliTest(unittest.TestCase):
             finally:
                 server.shutdown()
                 thread.join()
-        self.assertEqual(calls, [('/api/projects/p/agent/cli/claim', 'Bearer testkey', {}),
+        self.assertEqual(calls, [('/api/projects/p/agent/cli/claim', 'Bearer testkey', heartbeat()),
                                  ('/api/projects/p/agent/cli/runs/x/events', 'Bearer testkey',
                                   {'lease': 'fake', 'event': 'heartbeat'})])
         with self.assertRaises(ValueError):
             worker.Api('http://remote.invalid', 'p', 'testkey')
 
-    def test_managed_polls_reload_credentials_and_gate_jobs(self):
+    def test_managed_polls_reload_settings_and_gate_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'credentials.json'
+            path = Path(tmp) / 'settings.json'
             env = {'RELAYDESK_URL': 'http://localhost', 'RELAYDESK_PROJECT': 'p',
                    'RELAYDESK_REPO': 'org/example', 'RELAYDESK_AGENT_KEY': 'agent',
-                   'RELAYDESK_CODEX_CREDENTIALS_FILE': str(path), 'CODEX_API_KEY': 'env-key',
+                   'RELAYDESK_CLI_CONFIG_FILE': str(path), 'RELAYDESK_CLI': 'claude',
+                   'CODEX_API_KEY': 'env-key', 'ANTHROPIC_API_KEY': 'env-key',
                    'RELAYDESK_GITHUB_TOKEN': 'env-token'}
-            snapshots = [None, {'project_id': 'p', 'api_key': 'first-key', 'github_token': 'file-token'},
-                         {'project_id': 'p', 'api_key': 'second-key'}, None,
-                         {'project_id': 'P', 'api_key': 'misbound-key'}]
+            codex = dict(project_id='p', runtime='codex', endpoint='https://codex.invalid/v1',
+                         model='codex-model', api_key='first-key', github_token='file-token')
+            claude = dict(project_id='p', runtime='claude', endpoint='https://claude.invalid',
+                          model='claude-model', api_key='second-key', github_token='')
+            snapshots = [None, codex, claude, dict(claude, api_key='rotated-key'), None,
+                         dict(codex, project_id='P'), dict(claude, runtime='invalid'), dict(claude, api_key='')]
             polls, jobs = [], []
             queue = Queue()
             stderr = io.StringIO()
@@ -104,7 +112,7 @@ class CliTest(unittest.TestCase):
                 return {'run': None} if len(polls) == 1 else queue.claim
 
             def execute(claim, config, lease):
-                jobs.append((config.model_key, config.github_token))
+                jobs.append(config.settings)
                 return 'a' * 40, 'done'
 
             def next_poll(interval):
@@ -126,61 +134,69 @@ class CliTest(unittest.TestCase):
                 api.return_value.post.side_effect = post
                 with self.assertRaises(StopIteration):
                     worker.main()
-            self.assertEqual(polls, [{'runtime': 'codex', 'managed': True, 'ready': ready}
-                                     for ready in (False, True, True, False, False)])
-            self.assertEqual(jobs, [('first-key', 'file-token'), ('second-key', '')])
-            self.assertEqual([e['event'] for e in queue.events], ['heartbeat', 'finish'] * 2)
-            for secret in ('env-key', 'env-token', 'first-key', 'second-key', 'file-token', 'misbound-key'):
-                self.assertNotIn(secret, stderr.getvalue() + str(polls) + str(queue.events))
+            self.assertEqual(polls, [heartbeat(ready=False), heartbeat(), heartbeat('claude'),
+                                     heartbeat('claude'), *[heartbeat(ready=False)] * 3, heartbeat('claude', False)])
+            self.assertEqual(jobs, [worker.CliSettings(**{k: v for k, v in snap.items() if k != 'project_id'})
+                                    for snap in snapshots[1:4]])
+            self.assertEqual([e['event'] for e in queue.events], ['heartbeat', 'finish'] * 3)
+            for secret in ('env-key', 'env-token', 'first-key', 'second-key', 'rotated-key', 'file-token'):
+                self.assertNotIn(secret, stderr.getvalue() + str(polls) + str(queue.events) + repr(jobs))
 
-    def test_credentials_reject_invalid_files(self):
+    def test_settings_reject_invalid_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'credentials.json'
-            valid = {'project_id': 'p', 'api_key': 'key', 'github_token': 'token'}
+            path = Path(tmp) / 'settings.json'
+            valid = dict(project_id='p', runtime='codex', endpoint='', model='', api_key='key', github_token='token')
+            invalid = [[], {}, {k: v for k, v in valid.items() if k != 'runtime'},
+                       dict(valid, project_id=1), dict(valid, project_id='p '), dict(valid, runtime=[]),
+                       dict(valid, api_key=None), dict(valid, api_key='  '),
+                       dict(valid, api_key='key\x00'), dict(valid, github_token=42),
+                       dict(valid, github_token='first\r\nsecond'), dict(valid, endpoint=None),
+                       dict(valid, model=3), dict(valid, model='a\nb'), dict(valid, model='--help'),
+                       dict(valid, model='a-key'), dict(valid, endpoint='https://host/token')]
             for raw in (b'not json', b'\xff', b'[' * 2000 + b']' * 2000,
-                        json.dumps(valid).encode() + b' ' * worker.MAX_CREDENTIALS,
-                        *(json.dumps(obj).encode() for obj in (
-                            [], {}, {'api_key': 'key'}, dict(valid, project_id=1),
-                            dict(valid, project_id='p '), dict(valid, api_key=None),
-                            dict(valid, api_key=''), dict(valid, api_key='  '),
-                            dict(valid, api_key='key\x00'), dict(valid, github_token=42),
-                            dict(valid, github_token='first\r\nsecond')))):
+                        json.dumps(valid).encode() + b' ' * worker.MAX_SETTINGS,
+                        *(json.dumps(obj).encode() for obj in invalid)):
                 path.write_bytes(raw)
                 path.chmod(0o600)
-                self.assertEqual(worker.codex_credentials(path, 'p'), ('', ''))
-            path.write_text(json.dumps(valid))
+                self.assertIsNone(worker.read_settings(path, 'p'))
+            path.write_text(json.dumps(dict(valid, public_ai_enabled=False)))
             for mode in (0o600, 0o400):
                 path.chmod(mode)
-                self.assertEqual(worker.codex_credentials(path, 'p'), ('key', 'token'))
+                self.assertEqual(worker.read_settings(path, 'p'), worker.CliSettings('codex', '', '', 'key', 'token'))
             link = path.with_suffix('.link')
             link.symlink_to(path)
             fifo = path.with_suffix('.fifo')
             os.mkfifo(fifo, 0o600)
             for unsafe in (link, fifo, Path(tmp)):
-                self.assertEqual(worker.codex_credentials(unsafe, 'p'), ('', ''))
+                self.assertIsNone(worker.read_settings(unsafe, 'p'))
             for mode in (0o640, 0o604, 0o666):
                 path.chmod(mode)
-                self.assertEqual(worker.codex_credentials(path, 'p'), ('', ''))
+                self.assertIsNone(worker.read_settings(path, 'p'))
 
-    def test_env_only_codex_and_claude_claims(self):
+    def test_endpoint_validation(self):
+        for endpoint in ('', 'https://models.example/v1', 'http://localhost:8080/prefix',
+                         'http://127.43.2.1:4/v1', 'http://[::1]:1234/v1'):
+            self.assertTrue(worker.valid_endpoint(endpoint), endpoint)
+        for endpoint in ('http://example.com', 'http://localhost.example.com', '//localhost',
+                         'https://user@host', 'https://@host', 'https://user:password@host',
+                         'https://host?', 'https://host#', 'https://host/a?q=1', 'https://host/a#f',
+                         'https://host:99999', 'http://[::1]other', 'https://host\\other',
+                         'https://host/"\nmodel_provider="x', 'https://host/\x00', 'https:///v1'):
+            self.assertFalse(worker.valid_endpoint(endpoint), endpoint)
+
+    def test_missing_default_settings_ignores_all_legacy_credentials(self):
         env = {'RELAYDESK_URL': 'http://localhost', 'RELAYDESK_PROJECT': 'p',
                'RELAYDESK_REPO': 'org/example', 'RELAYDESK_AGENT_KEY': 'agent',
+               'RELAYDESK_CLI': 'claude', 'RELAYDESK_CODEX_CREDENTIALS_FILE': '/old/path',
                'CODEX_API_KEY': 'codex-key', 'ANTHROPIC_API_KEY': 'claude-key',
                'RELAYDESK_GITHUB_TOKEN': 'env-token'}
-        for cli in ('codex', 'claude'):
-            if cli == 'claude':
-                env['RELAYDESK_CODEX_CREDENTIALS_FILE'] = '/absent'
-            with self.subTest(cli=cli), patch.dict(os.environ, env, clear=True), \
-                    patch.object(sys, 'argv', ['runner', '--once', '--cli', cli]), \
-                    patch.object(worker.os, 'umask'), patch.object(worker.sandbox, 'enable_supervisor'), \
-                    patch.object(worker, 'Api') as api, patch.object(worker, 'execute') as execute:
-                api.return_value.post.return_value = Queue().claim
-                execute.return_value = 'a' * 40, 'done'
-                worker.main()
-                self.assertEqual(api.return_value.post.call_args_list[0].kwargs,
-                                 {'runtime': 'codex', 'managed': False, 'ready': True} if cli == 'codex' else {})
-                config = execute.call_args.args[1]
-                self.assertEqual((config.model_key, config.github_token), (cli + '-key', 'env-token'))
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, 'argv', ['runner', '--once']), \
+                patch.object(worker.os, 'umask'), patch.object(worker.sandbox, 'enable_supervisor'), \
+                patch.object(worker, 'read_settings', return_value=None) as load, patch.object(worker, 'Api') as api:
+            api.return_value.post.return_value = {'run': None}
+            worker.main()
+            load.assert_called_once_with('/run/relaydesk/cli/settings.json', 'p', 'agent')
+            api.return_value.post.assert_called_once_with('claim', **heartbeat(ready=False))
 
     def test_binding_and_strict_delivery_ref(self):
         for ref in ('other/repo#1', 'HEAD', 'https://github.com.evil/org/example/pull/3',
@@ -279,9 +295,13 @@ class CliTest(unittest.TestCase):
                                      'ANTHROPIC_BASE_URL': 'https://evil.invalid', 'PATH': '.'}):
             base = worker.work_env(Path('/tmp/job'))
             for name, flag in [('codex', 'exec'), ('claude', '-p')]:
-                args, env = worker.cli_command(name, base, 'test-model-key')
+                args, env = worker.cli_command(worker.CliSettings(name, '', '', 'test-model-key', ''), base)
                 self.assertTrue(args[0].startswith('/usr/local/bin/'))
                 self.assertIn(flag, args)
+                self.assertNotIn('-m', args)
+                self.assertNotIn('--model', args)
+                self.assertNotIn('model_provider=', ' '.join(args))
+                self.assertEqual(env['CODEX_API_KEY' if name == 'codex' else 'ANTHROPIC_API_KEY'], 'test-model-key')
                 self.assertNotIn('test-model-key', str(args))
                 for key in ('RELAYDESK_AGENT_KEY', 'AWS_SECRET_ACCESS_KEY', 'NODE_OPTIONS',
                             'GIT_CONFIG_COUNT', 'ANTHROPIC_BASE_URL', 'RELAYDESK_GITHUB_TOKEN'):
@@ -289,6 +309,28 @@ class CliTest(unittest.TestCase):
             auth = worker.git_env(base, 'fake-token')
             self.assertIn(base64.b64encode(b'x-access-token:fake-token').decode(), str(auth))
             self.assertNotIn('Authorization:', str(worker.git_env(base)))
+
+    def test_custom_providers_use_only_managed_key_and_literal_arguments(self):
+        model = 'provider/model" -c extra="$(true)'
+        endpoint = 'https://example.invalid/proxy/$model;v1'
+        for cli in ('codex', 'claude'):
+            settings = worker.CliSettings(cli, endpoint, model, 'provider-secret', 'github-secret')
+            args, env = worker.cli_command(settings, worker.work_env(Path('/tmp/job')))
+            self.assertNotIn(settings.api_key, ' '.join(args))
+            self.assertNotIn(settings.github_token, ' '.join(args) + str(env))
+            self.assertEqual(args[args.index('-m' if cli == 'codex' else '--model') + 1], model)
+            if cli == 'claude':
+                self.assertEqual(env['ANTHROPIC_BASE_URL'], endpoint)
+                self.assertEqual(env['ANTHROPIC_API_KEY'], settings.api_key)
+            else:
+                self.assertNotIn('CODEX_API_KEY', env)
+                overrides = dict(args[i + 1].split('=', 1) for i, flag in enumerate(args) if flag == '-c')
+                prefix = 'model_providers.' + json.loads(overrides['model_provider']) + '.'
+                self.assertEqual(json.loads(overrides[prefix + 'base_url']), endpoint)
+                self.assertEqual(json.loads(overrides[prefix + 'wire_api']), 'responses')
+                env_key = json.loads(overrides[prefix + 'env_key'])
+                self.assertEqual(env[env_key], settings.api_key)
+                self.assertNotIn(env_key, json.loads(overrides['shell_environment_policy.include_only']))
 
     def test_job_progress_final_and_context_allowlist(self):
         q = Queue('pr_audit')
@@ -317,7 +359,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(result['sha'], 'a' * 40)
         self.assertIn(worker.DISPOSABLE, result['body'])
         self.assertLess(len(result['body']), 24000)
-        for secret in (config.key, config.github_token, config.model_key, 'fake-lease'):
+        for secret in (config.key, config.settings.github_token, config.settings.api_key, 'fake-lease'):
             self.assertNotIn(secret, result['body'])
 
     def test_real_process_output_bounded_and_stderr_not_reported(self):

@@ -81,7 +81,7 @@ export const PRIORITY_WEIGHT: Record<TaskPriority, number> = {
 
 export const AUTHOR_LABELS: Record<string, string> = {
   human: "我",
-  assistant: "项目助手",
+  assistant: "助手",
   agent: "Local agent",
   system: "系统",
 };

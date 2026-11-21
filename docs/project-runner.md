@@ -1,6 +1,6 @@
 # Project CLI runner
 
-The authenticated operator's project assistant and PR audit can use Codex CLI or Claude Code instead of a synchronous model API call. The public widget, intake bot and LLM prescreen do not have access to the CLI. The web service never starts a shell on behalf of a task. Projects default to their existing model route until the operator enables the project CLI setting.
+Authenticated operators can queue discussions and PR audits for the project's selected CLI. Saving a project API key enables dispatch. The public widget, intake clarification and feedback prescreen use restricted HTTP model calls when enabled.
 
 ## Deployment layout
 
@@ -11,7 +11,7 @@ The current Pier deployment pattern uses a SHA-tagged Web image and `./data:/app
 ## Provision a runner
 
 1. Release the matching Web and runner images. On a Linux host with Docker, Compose v2 and Landlock ABI 3 or later, create a **separate deployment directory per project**. Copy `deploy/compose.runner.yml` there as `compose.yml`, `deploy/runner.env.example` as `runner.env`, and `deploy/runner-handbook.example.md` as `runner-handbook.md`. Put `IMAGE_TAG=<full release SHA>` in that directory's `.env`. Keep the runner environment private (`0600`). Do not overwrite the Web deployment's Compose or `.env`.
-2. In `runner.env`, set `RELAYDESK_URL` to the reachable HTTPS origin, the project ID and project agent key from its settings, the exact bound `owner/repository`, and `RELAYDESK_CLI=codex` or `claude`. Set only the corresponding provider credential. This is a dedicated non-interactive CLI installation; browser model profiles and desktop logins do not configure it. Private repositories need a dedicated GitHub token with read access to contents and pull requests. Do not use a token with merge, workflow or organization administration permissions. Treat any provider credential available to the CLI as potentially accessible to programs it starts. Use a revocable, budget-limited provider key, and do not run untrusted third-party PRs with that key; use a credential broker with policy-enforced egress for that threat model.
+2. In `runner.env`, set the reachable HTTPS origin, project ID, project agent key and bound `owner/repository`. In the Compose `.env`, set `CLI_PROJECT_CONFIG_DIR` to the absolute host path `<web data directory>/cli-runners/<project ID>`. Save the project configuration in the console to create the directory. To provision before the first save, create both `cli-runners` and its project directory with mode `0700`, owned by the Web runtime (UID/GID 10001 in the provided image). The runner mounts this project's directory read-only and rereads `settings.json` before every claim. Keep existing site-specific TLS ingress or host-gateway settings when replacing an old Compose override. Remove the old Codex mount and environment settings from the override.
 3. Edit the handbook with the environment, test commands and acceptance criteria. No credentials belong in the handbook. Configure no production database initially; only use synthetic fixtures. Local toolchains and build dependencies must be compatible with the image; bake additional system packages into an operator-maintained derivative image rather than granting the checkout root.
 4. From the runner deployment directory, run the self-test and then start the service:
 
@@ -23,15 +23,9 @@ docker compose run --rm runner --self-test
 docker compose up -d runner
 ```
 
-5. Enable CLI execution in **this project's settings**, not the global model settings. Run one small acceptance job before enabling it for more projects. The example limits execution to one runner process, 1 CPU, 2 GiB of memory, a bounded temporary filesystem, and no inbound traffic. Repository scripts may make outbound requests; enforce egress restrictions at the network layer where required. A project with a large dependency tree may need a larger tmpfs and memory limit.
+5. In project settings choose Codex CLI or Claude Code, an API base URL, a model, and a dedicated API key. Empty URL and model fields select the CLI defaults. For private repositories, save a repository-scoped GitHub token with read access to contents and pull requests. Use the acceptance check below to verify provider authentication and repository access. The example limits a runner to 1 CPU, 2 GiB of memory and a bounded tmpfs. Enforce network egress restrictions at the infrastructure layer where required.
 
-## Manage Codex credentials from the console (same-host deployment)
-
-The Codex card in project settings saves a dedicated OpenAI API key and an optional read-only GitHub token. The browser never receives saved values. This is independent of the workspace AI Endpoint and does not enable the project CLI switch automatically. A successful save does **not** authenticate against OpenAI; only an actual test job verifies the key, quota and repository access.
-
-One-time provisioning: deploy matching Web and runner versions. Use the normal project identity in `runner.env`, but leave the provider and repository credentials out of it. Copy `deploy/compose.runner-codex.override.yml` to the runner deployment directory as `compose.override.yml`. Set `CODEX_PROJECT_CONFIG_DIR` in the runner's Compose `.env` to the absolute host path `<web data directory>/codex-runners/<project ID>`. Only this single project's directory is mounted, read-only, outside the job sandbox. Saving credentials creates the directory automatically. To start a worker before the first save, create both `codex-runners` and its project ID subdirectory with mode `0700`, owned by the Web runtime UID/GID (10001:10001 in the provided image). Never mount the entire Web data directory. The template disables implicit host directory creation so a typo cannot silently create a root-owned directory.
-
-The web service stores plaintext credentials in a mode-0600 file replaced atomically. Protect the host volume and any backups; an SQLite-only backup does not include these files. A managed worker rereads credentials before each claim, so saving, rotating or clearing a key needs no restart. Clearing a key stops new claims, not a job already using the previous key; revoke at the provider for immediate invalidation. Offline and missing credentials are distinct statuses. A worker using environment credentials still works, but credentials saved in the console are not used until the read-only mount is configured. Remote-host workers can continue using the environment-based setup; the agent key does not authorize downloading any provider secret over HTTP.
+The Web service saves credentials in a mode-0600 file using atomic replacement. Protect the host volume and backups. Clearing the project API key stops new claims. A job already running retains its credentials until it exits. Claude Code shell commands can inherit the project model key. The supervisor keeps its project agent key and the repository token out of the model CLI environment; use a dedicated budget-limited key and only run authorized repository code. Worker presence and readiness describe polling and eligibility to claim a job. A successful model request verifies the credential.
 
 ## Acceptance check
 
@@ -44,4 +38,4 @@ The project assistant uses a fresh checkout and thread context for each question
 
 ## Rollback
 
-Stop the dedicated runner, review any in-flight or queued work, and turn off the project CLI setting to route new discussions back to the existing model API. Keep the Web database/backup in place. Do not restart a runner over unexplored pending work. Updating the Web service does not update an independent runner deployment: update its pinned SHA and rerun its self-test explicitly.
+Pause project automation and inspect queued and running work. Stop the dedicated runner before reverting both images and their Compose configurations to matching versions. Retain the Web data directory and a verified backup. Recheck the settings and self-test before resuming work. The new release reads only the new per-project settings path, so enter credentials in the console after upgrading.

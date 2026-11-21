@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ApiError } from "./errors.ts";
-import { codexConfiguration } from "./codex-runner-config.ts";
+import { projectCliConfiguration } from "./project-cli-config.ts";
+import { projectPublicAiEnabled } from "./project-ai-provider.ts";
 import {
   Store,
   field,
@@ -28,26 +29,8 @@ import {
   toGithubConnectionSummary,
   upsertGithubConnection,
 } from "./github.ts";
-import {
-  deleteAiProfile,
-  deleteStoredAiConfig,
-  getEffectiveAiConfig,
-  isAiNodeId,
-  isLoopbackHost,
-  readStoredAiConfig,
-  resolveAiConfigForNode,
-  selectActiveAiProfile,
-  toAiConfigStatus,
-  updateAiNodeRoutes,
-  upsertAiProfile,
-  validateAiBaseUrl,
-} from "./ai-config.ts";
-import {
-  intakeReply,
-  operatorDiscuss,
-  prescreenFeedback,
-  testAiConnection,
-} from "./assistant.ts";
+import { isLoopbackHost } from "./loopback.ts";
+import { intakeReply, prescreenFeedback } from "./assistant.ts";
 import {
   deleteStoredR2Config,
   getEffectiveR2Config,
@@ -94,7 +77,7 @@ export class ApiRouter {
   readonly wallet: WalletAuth | null;
   readonly bindHost: string;
   private traffic = new Map<string, number[]>();
-  private codexPresence = new Map<string, { seen: number; ready: boolean; managed: boolean; runId?: string }>();
+  private cliPresence = new Map<string, { seen: number; runtime: string; ready: boolean; managed: boolean; runId?: string }>();
   private assistantInFlight = 0;
   private prescreenInFlight = 0;
   private readonly maxAssistantSlots = 4;
@@ -344,12 +327,6 @@ export class ApiRouter {
         return;
       }
 
-      if (parts[0] === "ai") {
-        const result = await this.handleAi(req, method, parts.slice(1), meta);
-        this.sendJson(req, res, 200, result, meta);
-        return;
-      }
-
       if (parts[0] === "r2") {
         const result = await this.handleR2(req, method, parts.slice(1), meta);
         this.sendJson(req, res, 200, result, meta);
@@ -380,14 +357,14 @@ export class ApiRouter {
         this.checkOperator(req, meta);
       }
 
-      if (parts.length === 3 && parts[0] === "projects" && parts[2] === "codex-runner" && (method === "GET" || method === "PATCH")) {
+      if (parts.length === 3 && parts[0] === "projects" && parts[2] === "cli-config" && (method === "GET" || method === "PATCH")) {
         const project = this.store.getProjectRow(parts[1]);
         const patch = method === "PATCH" ? await this.readJson(req, 16384) : undefined;
-        const config = codexConfiguration(this.store.dbPath, project.id, patch);
-        const presence = this.codexPresence.get(project.id);
+        const config = projectCliConfiguration(this.store.dbPath, project.id, patch);
+        const presence = this.cliPresence.get(project.id);
         const online = !!presence && Date.now() - presence.seen < 90_000;
         this.sendJson(req, res, 200, { ...config, online, managed: presence?.managed ?? false,
-          ready: online && !!presence?.ready && (!presence.managed || config.configured),
+          ready: online && !!presence?.ready && config.configured && presence.runtime === config.runtime,
           last_seen_at: presence ? new Date(presence.seen).toISOString() : null }, meta);
         return;
       }
@@ -469,18 +446,19 @@ export class ApiRouter {
         const project = this.store.getProjectRow(parts[1]);
         this.checkBearer(req, project.agent_key);
         if (method === "POST" && parts.length === 5 && parts[4] === "claim") {
-          const codex = data.runtime === "codex";
-          if (codex && (typeof data.ready !== "boolean" || typeof data.managed !== "boolean")) {
-            throw new ApiError(400, "Invalid Codex runner status");
+          if (data.protocol !== 2 || data.managed !== true || !["codex", "claude"].includes(String(data.runtime)) || typeof data.ready !== "boolean") {
+            throw new ApiError(400, "Expected a managed project CLI runner (protocol 2)");
           }
-          const claim = codex && !data.ready ? null : this.store.claimCliRun(project.id);
-          if (codex) this.codexPresence.set(project.id, { seen: Date.now(), managed: data.managed === true, ready: data.ready === true, runId: claim?.run.id });
+          const config = projectCliConfiguration(this.store.dbPath, project.id);
+          const ready = data.ready && config.configured && data.runtime === config.runtime;
+          const claim = ready ? this.store.claimCliRun(project.id) : null;
+          this.cliPresence.set(project.id, { seen: Date.now(), runtime: String(data.runtime), managed: true, ready, runId: claim?.run.id });
           this.sendJson(req, res, 200, claim ?? { run: null }, meta);
           return;
         }
         if (method === "POST" && parts.length === 7 && parts[4] === "runs" && parts[6] === "events") {
           const run = this.store.eventCliRun(project.id, parts[5], data);
-          const presence = this.codexPresence.get(project.id);
+          const presence = this.cliPresence.get(project.id);
           if (presence?.runId === run.id) presence.seen = Date.now();
           this.sendJson(req, res, 200, { run }, meta);
           return;
@@ -825,124 +803,6 @@ export class ApiRouter {
     throw new ApiError(404, "Unknown GitHub endpoint");
   }
 
-  private async handleAi(
-    req: IncomingMessage,
-    method: string,
-    subparts: string[],
-    meta: { adminChallenge?: boolean },
-  ): Promise<unknown> {
-    this.checkOperator(req, meta);
-    if (subparts.length === 0 && method === "GET") {
-      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
-    }
-    if (method !== "POST") {
-      throw new ApiError(405, "Method not allowed");
-    }
-    const data = await this.readJson(req);
-
-    if (subparts.length === 0) {
-      const baseUrl = validateAiBaseUrl(field(data, "base_url", 512));
-      const model = field(data, "model", 160);
-      const rawKey = typeof data.api_key === "string" ? data.api_key.trim() : "";
-      if (rawKey.length > 512) {
-        throw new ApiError(400, "API Key 过长");
-      }
-      const clearApiKey = data.clear_api_key === true;
-      const intakeEnabled = Boolean(data.intake_enabled);
-      const existing = readStoredAiConfig(this.store.dbPath);
-      const targetId =
-        typeof data.id === "string" && data.id.trim()
-          ? data.id.trim()
-          : existing?.active_profile_id || undefined;
-      const name = typeof data.name === "string" ? data.name.trim() : undefined;
-      upsertAiProfile(this.store.dbPath, {
-        id: targetId,
-        name,
-        base_url: baseUrl,
-        model,
-        api_key: rawKey,
-        clear_api_key: clearApiKey,
-        set_active: true,
-        intake_enabled: intakeEnabled,
-      });
-      if (data.node_routes && typeof data.node_routes === "object") {
-        updateAiNodeRoutes(this.store.dbPath, {
-          intake_enabled: intakeEnabled,
-          node_routes: data.node_routes as Record<string, { profile_id?: string; model?: string }>,
-        });
-      }
-      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
-    }
-
-    if (subparts.length === 1 && subparts[0] === "profiles") {
-      const baseUrl = validateAiBaseUrl(field(data, "base_url", 512));
-      const model = field(data, "model", 160);
-      const rawKey = typeof data.api_key === "string" ? data.api_key.trim() : "";
-      if (rawKey.length > 512) {
-        throw new ApiError(400, "API Key 过长");
-      }
-      upsertAiProfile(this.store.dbPath, {
-        id: typeof data.id === "string" ? data.id.trim() : undefined,
-        name: typeof data.name === "string" ? data.name.trim() : undefined,
-        base_url: baseUrl,
-        model,
-        api_key: rawKey,
-        clear_api_key: data.clear_api_key === true,
-        set_active: data.set_active === true,
-        intake_enabled:
-          typeof data.intake_enabled === "boolean" ? data.intake_enabled : undefined,
-      });
-      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
-    }
-
-    if (subparts.length === 2 && subparts[0] === "profiles" && subparts[1] === "select") {
-      const profileId = field(data, "profile_id", 64);
-      selectActiveAiProfile(this.store.dbPath, profileId);
-      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
-    }
-
-    if (subparts.length === 2 && subparts[0] === "profiles" && subparts[1] === "delete") {
-      const profileId = field(data, "profile_id", 64);
-      deleteAiProfile(this.store.dbPath, profileId);
-      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
-    }
-
-    if (subparts.length === 1 && subparts[0] === "routes") {
-      updateAiNodeRoutes(this.store.dbPath, {
-        intake_enabled:
-          typeof data.intake_enabled === "boolean" ? data.intake_enabled : undefined,
-        node_routes:
-          data.node_routes && typeof data.node_routes === "object"
-            ? (data.node_routes as Record<string, { profile_id?: string; model?: string }>)
-            : undefined,
-      });
-      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
-    }
-
-    if (subparts.length === 1 && subparts[0] === "disconnect") {
-      deleteStoredAiConfig(this.store.dbPath);
-      return toAiConfigStatus(getEffectiveAiConfig(this.store.dbPath));
-    }
-
-    if (subparts.length === 1 && subparts[0] === "test") {
-      const profileId =
-        typeof data.profile_id === "string" ? data.profile_id.trim() : undefined;
-      const node = isAiNodeId(data.node) ? data.node : undefined;
-      const baseUrl = typeof data.base_url === "string" ? data.base_url.trim() : undefined;
-      const model = typeof data.model === "string" ? data.model.trim() : undefined;
-      const apiKey = typeof data.api_key === "string" ? data.api_key.trim() : undefined;
-      return await testAiConnection(this.store.dbPath, {
-        profile_id: profileId,
-        node,
-        base_url: baseUrl,
-        model,
-        api_key: apiKey,
-      });
-    }
-
-    throw new ApiError(404, "Unknown AI settings endpoint");
-  }
-
   private async handleR2(
     req: IncomingMessage,
     method: string,
@@ -1043,9 +903,8 @@ export class ApiRouter {
       this.checkBearer(req, row.intake_key);
       return toAgentProject(row);
     });
-    const aiCfg = resolveAiConfigForNode(this.store.dbPath, "widget");
     const r2Cfg = getEffectiveR2Config(this.store.dbPath);
-    const aiEnabled = Boolean(aiCfg.intake_enabled && aiCfg.base_url && aiCfg.model);
+    const aiEnabled = projectPublicAiEnabled(this.store.dbPath, project.id);
     return {
       project_id: project.id,
       project_name: project.name,
@@ -1204,79 +1063,25 @@ export class ApiRouter {
     parts: string[],
     data: Record<string, unknown>,
     meta: { corsOrigin?: string },
-  ): Promise<{
-    reply: string;
-    model?: string;
-    profile_name?: string;
-    node?: string;
-    used_llm?: boolean;
-  } | { queued: true; node: "operator" | "pr_audit"; run: ReturnType<Store["enqueueCliRun"]> }> {
+  ) {
     const body = field(data, "body", 8000);
-    const clarify = parts[0] === "projects";
-    // Only the authenticated operator discussion endpoint may dispatch shell-capable jobs.
-    if (!clarify) {
+    if (parts[0] === "tasks") {
+      // Only this authenticated operator endpoint can create a shell-capable job.
       const row = this.store.getTaskRow(parts[1]);
-      if (this.store.getProjectRow(row.project_id).cli_enabled) {
-        const node = data.mode === "pr_audit" ? "pr_audit" : "operator";
-        const run = this.store.enqueueCliRun(row.project_id, row.id, node, body);
-        return { queued: true, node, run };
-      }
+      const config = projectCliConfiguration(this.store.dbPath, row.project_id);
+      if (!config.configured) throw new ApiError(409, "请先在项目设置中配置 CLI 的 API Key。");
+      const node = data.mode === "pr_audit" ? "pr_audit" : "operator";
+      const run = this.store.enqueueCliRun(row.project_id, row.id, node, body);
+      return { queued: true, node, run };
     }
-
-    let task: ReturnType<typeof toTaskView> | undefined;
-    let project: ReturnType<typeof toAgentProject> | undefined;
-    let messages: ReturnType<Store["getTaskMessages"]> = [];
-
-    this.store.transaction(false, () => {
-      if (clarify) {
-        const row = this.store.getProjectRow(parts[1]);
-        this.checkWidgetOrigin(req, row.allowed_origins, meta);
-        this.checkBearer(req, row.intake_key);
-        this.rateLimit(`${row.id}:clarify`, 20);
-      } else {
-        const taskRow = this.store.getTaskRow(parts[1]);
-        task = toTaskView(taskRow);
-        project = toAgentProject(this.store.getProjectRow(task.project_id));
-        messages = this.store.getTaskMessages(task.id, 30);
-      }
-    });
-
-    if (this.assistantInFlight >= this.maxAssistantSlots) {
-      throw new ApiError(429, "Assistant is busy. Try again shortly.");
-    }
+    const row = this.store.getProjectRow(parts[1]);
+    this.checkWidgetOrigin(req, row.allowed_origins, meta);
+    this.checkBearer(req, row.intake_key);
+    this.rateLimit(`${row.id}:clarify`, 20);
+    if (this.assistantInFlight >= this.maxAssistantSlots) throw new ApiError(429, "Assistant is busy. Try again shortly.");
     this.assistantInFlight += 1;
     try {
-      if (clarify) {
-        const expected = field(data, "expected", 8000, false);
-        const reply = await intakeReply(this.store.dbPath, body, expected);
-        return { reply };
-      }
-      const profileId =
-        typeof data.profile_id === "string" && data.profile_id.trim()
-          ? data.profile_id.trim()
-          : undefined;
-      const modelOverride =
-        typeof data.model === "string" && data.model.trim()
-          ? data.model.trim().slice(0, 160)
-          : undefined;
-      const mode = data.mode === "pr_audit" ? "pr_audit" : "operator";
-      const result = await operatorDiscuss(
-        this.store.dbPath,
-        project!,
-        task!,
-        messages,
-        body,
-        {
-          profile_id: profileId,
-          model: modelOverride,
-          mode,
-        },
-      );
-      this.store.transaction(true, () => {
-        this.store.addMessage(task!.id, "comment", "human", body);
-        this.store.addMessage(task!.id, "comment", "assistant", result.reply);
-      });
-      return result;
+      return { reply: await intakeReply(this.store.dbPath, row.id, body, field(data, "expected", 8000, false)) };
     } finally {
       this.assistantInFlight -= 1;
     }

@@ -366,9 +366,9 @@ export function CommandPaletteModal({
       { id: "new-feedback", label: "新建反馈", icon: "plus", shortcut: "N", run: onNewFeedback },
       { id: "new-project", label: "新建项目", icon: "folder-git-2", run: onNewProject },
       {
-        id: "llm-settings",
-        label: "配置 LLM API Key 与模型",
-        icon: "sparkles",
+        id: "settings",
+        label: "打开设置",
+        icon: "settings",
         run: () => onSelectView("settings"),
       },
       { id: "sources", label: "查看收集入口与嵌入脚本", icon: "plug", run: () => onSelectView("sources") },

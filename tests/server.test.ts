@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -192,19 +192,19 @@ describe("Relaydesk Core Queue & Agent API", () => {
   });
 });
 
-describe("Codex project credentials", () => {
+describe("Project CLI configuration", () => {
   it("keeps secrets operator-write-only and distinguishes an idle runner from one ready to claim", async () => {
     const { dbPath, dir } = makeTempDb();
-    const srv = await startApiServer({ dbPath, adminToken: "admin-fixture" });
-    const operator = { Authorization: "Bearer admin-fixture" };
-    const create = async (name: string) => (await jsonReq(`${srv.url}/api/projects`, "POST", { name, repo: "example/fixture", cli_enabled: true }, operator)).json.project as Record<string, string>;
+    const srv = await startApiServer({ dbPath, adminToken: "operator-fixture" });
+    const operator = { Authorization: "Bearer operator-fixture" };
+    const create = async (name: string) => (await jsonReq(`${srv.url}/api/projects`, "POST", { name, repo: "example/fixture" }, operator)).json.project as Record<string, string>;
     const p = await create("first");
     const other = await create("second");
     const prefix = `${srv.url}/api/projects/${p.id}`;
-    const route = `${prefix}/codex-runner`;
+    const route = `${prefix}/cli-config`;
     const agent = { Authorization: `Bearer ${p.agent_key}` };
-    const claim = (ready: boolean) => jsonReq(`${prefix}/agent/cli/claim`, "POST", { runtime: "codex", managed: true, ready }, agent);
-    const initial = { configured: false, github_configured: false, online: false, ready: false, managed: false, last_seen_at: null };
+    const claim = (ready: boolean) => jsonReq(`${prefix}/agent/cli/claim`, "POST", { protocol: 2, runtime: "codex", managed: true, ready }, agent);
+    const initial = { runtime: "codex", endpoint: "", model: "", public_ai_enabled: false, configured: false, github_configured: false, online: false, ready: false, managed: false, last_seen_at: null };
     expect((await jsonReq(route, "GET", undefined, operator)).json).toEqual(initial);
     for (const token of [p.agent_key, p.intake_key, p.bot_key]) {
       const h = { Authorization: `Bearer ${token}` };
@@ -214,9 +214,9 @@ describe("Codex project credentials", () => {
     expect((await jsonReq(route, "PATCH", { api_key: "no\nnewlines" }, operator)).status).toBe(400);
     expect((await jsonReq(route, "PATCH", { api_key: "sk-test-fixture", github_token: "github-test-fixture" }, operator)).json)
       .toEqual({ ...initial, configured: true, github_configured: true });
-    const file = join(dir, "codex-runners", p.id, "credentials.json");
+    const file = join(dir, "cli-runners", p.id, "settings.json");
     expect(statSync(file).mode & 0o777).toBe(0o600);
-    expect(statSync(join(dir, "codex-runners", p.id)).mode & 0o777).toBe(0o700);
+    expect(statSync(join(dir, "cli-runners", p.id)).mode & 0o777).toBe(0o700);
     const task = (await jsonReq(`${prefix}/tasks`, "POST", { title: "Fixture", body: "Fixture", skip_prescreen: true }, operator)).json.task as {id:string};
     expect((await jsonReq(`${srv.url}/api/tasks/${task.id}/discuss`, "POST", { body: "question" }, operator)).status).toBe(202);
     expect((await claim(false)).json).toEqual({ run: null });
@@ -226,16 +226,16 @@ describe("Codex project credentials", () => {
     expect(JSON.stringify(accepted.json)).not.toMatch(/sk-test-fixture|github-test-fixture/);
     expect((await jsonReq(route, "GET", undefined, operator)).json.ready).toBe(true);
     expect((await jsonReq(route, "PATCH", { api_key: "" }, operator)).json).toMatchObject({ configured: false, github_configured: true, ready: false });
-    expect((await jsonReq(`${srv.url}/api/projects/${other.id}/codex-runner`, "GET", undefined, operator)).json).toEqual(initial);
+    expect((await jsonReq(`${srv.url}/api/projects/${other.id}/cli-config`, "GET", undefined, operator)).json).toEqual(initial);
   });
 });
 
 describe("Project CLI dispatch", () => {
   it("keeps CLI jobs operator-only and returns a leased result to the originating thread", async () => {
-    const srv = await startApiServer({ adminToken: "operator-test" });
-    const operator = { Authorization: "Bearer operator-test" };
+    const srv = await startApiServer({ adminToken: "operator-fixture" });
+    const operator = { Authorization: "Bearer operator-fixture" };
     const project = (await jsonReq(`${srv.url}/api/projects`, "POST", {
-      name: "CLI fixture", repo: "example/fixture", cli_enabled: true,
+      name: "CLI fixture", repo: "example/fixture",
     }, operator)).json.project as Record<string, string>;
     const prefix = `${srv.url}/api/projects/${project.id}`;
     const agent = { Authorization: `Bearer ${project.agent_key}` };
@@ -247,10 +247,15 @@ describe("Project CLI dispatch", () => {
     const ask = { mode: "operator", body: "Run fixture verification" };
     expect((await jsonReq(`${taskUrl}/discuss`, "POST", ask, widget)).status).toBe(401);
     expect((await jsonReq(`${prefix}/agent/cli/claim`, "POST", {}, widget)).status).toBe(401);
+    expect((await jsonReq(`${taskUrl}/discuss`, "POST", ask, operator)).status).toBe(409);
+    expect((await jsonReq(`${prefix}/cli-config`, "PATCH", { runtime: "claude", api_key: "test-provider-key" }, operator)).status).toBe(200);
+    const claim = { protocol: 2, runtime: "claude", managed: true, ready: true };
     const queued = await jsonReq(`${taskUrl}/discuss`, "POST", ask, operator);
     expect(queued.status).toBe(202);
     expect(queued.json).toMatchObject({ queued: true, run: { status: "queued" } });
-    const claimed = await jsonReq(`${prefix}/agent/cli/claim`, "POST", {}, agent);
+    expect((await jsonReq(`${prefix}/agent/cli/claim`, "POST", {}, agent)).status).toBe(400);
+    expect((await jsonReq(`${prefix}/agent/cli/claim`, "POST", { ...claim, runtime: "codex" }, agent)).json).toEqual({ run: null });
+    const claimed = await jsonReq(`${prefix}/agent/cli/claim`, "POST", claim, agent);
     expect(claimed.json).toMatchObject({ run: { mode: "operator", status: "running" }, context: { task: { id: task.id } } });
     expect(JSON.stringify(claimed.json)).not.toContain(project.agent_key);
     const { id } = claimed.json.run as { id: string };
@@ -269,299 +274,16 @@ describe("Project CLI dispatch", () => {
       expect.objectContaining({ author: "assistant", body: expect.stringContaining("Fixture passed") }),
     ]));
     expect(detail.json.task).toMatchObject({ status: task.status, owner: task.owner });
-    expect((await jsonReq(`${prefix}/agent/cli/claim`, "POST", {}, agent)).json).toEqual({ run: null });
+    expect((await jsonReq(`${prefix}/agent/cli/claim`, "POST", claim, agent)).json).toEqual({ run: null });
   });
 });
 
-describe("Workspace LLM API Key Configuration & Assistant Chat", () => {
-  it("saves, masks, tests, and uses workspace LLM config with OpenAI-compatible mock", async () => {
-    // Spin up a local loopback mock OpenAI Chat Completions server
-    let receivedAuth = "";
-    let receivedModel = "";
-    const mockAi = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", () => {
-        receivedAuth = req.headers.authorization ?? "";
-        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
-          model: string;
-        };
-        receivedModel = body.model;
-        res.statusCode = 200;
-        res.setHeader("Content-Type", "application/json");
-        res.end(
-          JSON.stringify({
-            choices: [{ message: { content: "MOCK_LLM_REPLY_OK" } }],
-          }),
-        );
-      });
-    });
-    await new Promise<void>((r) => mockAi.listen(0, "127.0.0.1", r));
-    cleanups.push(
-      () => new Promise<void>((r) => mockAi.close(() => r())),
-    );
-    const mockPort = (mockAi.address() as { port: number }).port;
-    const mockBaseUrl = `http://127.0.0.1:${mockPort}/v1`;
-
-    const { dir, dbPath } = makeTempDb();
-    const srv = await startApiServer({ dbPath });
-
-    // Initially unconfigured
-    const initial = await jsonReq(`${srv.url}/api/ai`);
-    expect(initial.status).toBe(200);
-    expect(initial.json.configured).toBe(false);
-    expect(initial.json.has_api_key).toBe(false);
-
-    // Rejects non-HTTPS remote URL
-    const badUrl = await jsonReq(`${srv.url}/api/ai`, "POST", {
-      base_url: "http://api.openai.com/v1",
-      model: "gpt-4o-mini",
-      api_key: "sk-test-1234567890",
-      intake_enabled: false,
-    });
-    expect(badUrl.status).toBe(400);
-
-    // Save valid loopback LLM config with API key
-    const saved = await jsonReq(`${srv.url}/api/ai`, "POST", {
-      base_url: mockBaseUrl,
-      model: "gpt-4o-mini",
-      api_key: "sk-secret-9876543210",
-      intake_enabled: true,
-    });
-    expect(saved.status).toBe(200);
-    expect(saved.json.configured).toBe(true);
-    expect(saved.json.source).toBe("workspace");
-    expect(saved.json.has_api_key).toBe(true);
-    expect(saved.json.api_key_preview).toBe("sk-s••••3210");
-    expect(JSON.stringify(saved.json)).not.toContain("sk-secret-9876543210");
-
-    // Verify 0600 file permissions
-    const mode = statSync(join(dir, ".ai-config.json")).mode & 0o777;
-    expect(mode).toBe(0o600);
-
-    // Update model without re-sending API key -> preserves saved key
-    const updated = await jsonReq(`${srv.url}/api/ai`, "POST", {
-      base_url: mockBaseUrl,
-      model: "deepseek-chat",
-      intake_enabled: true,
-    });
-    expect(updated.status).toBe(200);
-    expect(updated.json.model).toBe("deepseek-chat");
-    expect(updated.json.has_api_key).toBe(true);
-
-    // Test connection endpoint hits mock server with stored key
-    const testRes = await jsonReq(`${srv.url}/api/ai/test`, "POST", {});
-    expect(testRes.status).toBe(200);
-    expect(testRes.json.ok).toBe(true);
-    expect(testRes.json.reply_preview).toContain("MOCK_LLM_REPLY_OK");
-    expect(receivedAuth).toBe("Bearer sk-secret-9876543210");
-    expect(receivedModel).toBe("deepseek-chat");
-
-    // Operator discuss uses configured LLM and persists reply
-    const pRes = await jsonReq(`${srv.url}/api/projects`, "POST", {
-      name: "AI Project",
-      repo: "acexiamo/ai-proj",
-    });
-    const projId = (pRes.json.project as Record<string, string>).id;
-    const tRes = await jsonReq(`${srv.url}/api/projects/${projId}/tasks`, "POST", {
-      title: "测试 AI 讨论",
-      body: "页面切换慢",
-      priority: "high",
-    });
-    const taskId = (tRes.json.task as Record<string, string>).id;
-
-    const discuss = await jsonReq(`${srv.url}/api/tasks/${taskId}/discuss`, "POST", {
-      body: "帮我总结验收条件",
-    });
-    expect(discuss.status).toBe(200);
-    expect(discuss.json.reply).toBe("MOCK_LLM_REPLY_OK");
-
-    // Clear workspace AI config
-    const cleared = await jsonReq(`${srv.url}/api/ai/disconnect`, "POST", {});
-    expect(cleared.status).toBe(200);
-    expect(cleared.json.configured).toBe(false);
-    expect(cleared.json.has_api_key).toBe(false);
-  });
-
-  it("supports multiple model profiles, switching defaults, independent node routes, PR audit override, and max_completion_tokens", async () => {
-    const captured: Array<{
-      path: string;
-      auth: string;
-      model: string;
-      hasMaxTokens: boolean;
-      hasMaxCompletionTokens: boolean;
-    }> = [];
-
-    const multiMock = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", () => {
-        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<
-          string,
-          unknown
-        >;
-        const model = String(parsed.model ?? "");
-        captured.push({
-          path: req.url ?? "",
-          auth: String(req.headers.authorization ?? ""),
-          model,
-          hasMaxTokens: "max_tokens" in parsed,
-          hasMaxCompletionTokens: "max_completion_tokens" in parsed,
-        });
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            choices: [{ message: { content: `REPLY_FROM_${model}` } }],
-          }),
-        );
-      });
-    });
-    await new Promise<void>((resolve) => multiMock.listen(0, "127.0.0.1", resolve));
-    const port = (multiMock.address() as { port: number }).port;
-    const baseDeepseek = `http://127.0.0.1:${port}/deepseek/v1`;
-    const baseOpenai = `http://127.0.0.1:${port}/openai/v1`;
-
-    try {
-      const { dbPath } = makeTempDb();
-      const srv = await startApiServer({ dbPath });
-
-      // 1. Add first profile (DeepSeek) -> auto active
-      const add1 = await jsonReq(`${srv.url}/api/ai/profiles`, "POST", {
-        name: "DeepSeek 日常",
-        base_url: baseDeepseek,
-        model: "deepseek-chat",
-        api_key: "test-key-deepseek-1111",
-        intake_enabled: true,
-      });
-      expect(add1.status).toBe(200);
-      const profiles1 = add1.json.profiles as Array<Record<string, unknown>>;
-      expect(profiles1).toHaveLength(1);
-      const dsId = String(profiles1[0]!.id);
-      expect(add1.json.active_profile_id).toBe(dsId);
-      expect(add1.json.model).toBe("deepseek-chat");
-
-      // 2. Add second profile (OpenAI Official Pro credits) without switching default yet
-      const add2 = await jsonReq(`${srv.url}/api/ai/profiles`, "POST", {
-        name: "OpenAI 官方",
-        base_url: baseOpenai,
-        model: "gpt-5.4",
-        api_key: "test-key-openai-2222",
-        set_active: false,
-      });
-      expect(add2.status).toBe(200);
-      const profiles2 = add2.json.profiles as Array<Record<string, unknown>>;
-      expect(profiles2).toHaveLength(2);
-      const oaiId = String(profiles2.find((p) => p.name === "OpenAI 官方")!.id);
-      expect(add2.json.active_profile_id).toBe(dsId);
-
-      // 3. Configure per-node routes: PR audit uses OpenAI Official with independent model name override
-      const routesRes = await jsonReq(`${srv.url}/api/ai/routes`, "POST", {
-        intake_enabled: true,
-        node_routes: {
-          prescreen: { profile_id: dsId, model: "" },
-          widget: { profile_id: dsId, model: "" },
-          operator: { profile_id: "", model: "" },
-          pr_audit: { profile_id: oaiId, model: "gpt-6.2-astra" },
-        },
-      });
-      expect(routesRes.status).toBe(200);
-      const resolvedNodes = routesRes.json.resolved_nodes as Record<
-        string,
-        Record<string, unknown>
-      >;
-      expect(resolvedNodes.pr_audit.profile_id).toBe(oaiId);
-      expect(resolvedNodes.pr_audit.model).toBe("gpt-6.2-astra");
-      expect(resolvedNodes.pr_audit.overrides_model).toBe(true);
-      expect(resolvedNodes.operator.model).toBe("deepseek-chat");
-
-      // 4. Create project & task and verify discuss routing
-      const pRes = await jsonReq(`${srv.url}/api/projects`, "POST", {
-        name: "Multi Model Project",
-        repo: "acexiamo/multi-proj",
-      });
-      const projId = (pRes.json.project as Record<string, string>).id;
-      const tRes = await jsonReq(`${srv.url}/api/projects/${projId}/tasks`, "POST", {
-        title: "检查 PR 改动",
-        body: "测试多模型与审计节点",
-        priority: "high",
-        skip_prescreen: true,
-      });
-      const taskId = (tRes.json.task as Record<string, string>).id;
-
-      // 4a. Default operator chat uses active DeepSeek profile (max_tokens)
-      const d1 = await jsonReq(`${srv.url}/api/tasks/${taskId}/discuss`, "POST", {
-        body: "先看下需求",
-      });
-      expect(d1.status).toBe(200);
-      expect(d1.json.reply).toBe("REPLY_FROM_deepseek-chat");
-      expect(captured[captured.length - 1]).toMatchObject({
-        path: "/deepseek/v1/chat/completions",
-        auth: "Bearer test-key-deepseek-1111",
-        model: "deepseek-chat",
-        hasMaxTokens: true,
-        hasMaxCompletionTokens: false,
-      });
-
-      // 4b. Mid-conversation switch to OpenAI profile -> uses gpt-5.4 & max_completion_tokens
-      const d2 = await jsonReq(`${srv.url}/api/tasks/${taskId}/discuss`, "POST", {
-        body: "用 GPT 分析下架构方案",
-        profile_id: oaiId,
-      });
-      expect(d2.status).toBe(200);
-      expect(d2.json.reply).toBe("REPLY_FROM_gpt-5.4");
-      expect(captured[captured.length - 1]).toMatchObject({
-        path: "/openai/v1/chat/completions",
-        auth: "Bearer test-key-openai-2222",
-        model: "gpt-5.4",
-        hasMaxTokens: false,
-        hasMaxCompletionTokens: true,
-      });
-
-      // 4c. PR audit node -> uses independent model name override gpt-6.2-astra
-      const d3 = await jsonReq(`${srv.url}/api/tasks/${taskId}/discuss`, "POST", {
-        body: "请审计当前 PR",
-        mode: "pr_audit",
-      });
-      expect(d3.status).toBe(200);
-      expect(d3.json.reply).toBe("REPLY_FROM_gpt-6.2-astra");
-      expect(d3.json.node).toBe("pr_audit");
-      expect(captured[captured.length - 1]).toMatchObject({
-        path: "/openai/v1/chat/completions",
-        auth: "Bearer test-key-openai-2222",
-        model: "gpt-6.2-astra",
-        hasMaxTokens: false,
-        hasMaxCompletionTokens: true,
-      });
-
-      // 5. Test node connectivity directly via /api/ai/test with node="pr_audit"
-      const testNode = await jsonReq(`${srv.url}/api/ai/test`, "POST", {
-        node: "pr_audit",
-      });
-      expect(testNode.status).toBe(200);
-      expect(testNode.json.model).toBe("gpt-6.2-astra");
-
-      // 6. Switch active default profile to OpenAI Official
-      const switched = await jsonReq(`${srv.url}/api/ai/profiles/select`, "POST", {
-        profile_id: oaiId,
-      });
-      expect(switched.status).toBe(200);
-      expect(switched.json.active_profile_id).toBe(oaiId);
-      expect(switched.json.model).toBe("gpt-5.4");
-
-      // 7. Delete OpenAI profile -> falls back cleanly to DeepSeek and resets pr_audit profile_id
-      const deleted = await jsonReq(`${srv.url}/api/ai/profiles/delete`, "POST", {
-        profile_id: oaiId,
-      });
-      expect(deleted.status).toBe(200);
-      expect(deleted.json.active_profile_id).toBe(dsId);
-      expect((deleted.json.profiles as unknown[]).length).toBe(1);
-      const afterRoutes = deleted.json.node_routes as Record<
-        string,
-        Record<string, string>
-      >;
-      expect(afterRoutes.pr_audit.profile_id).toBe("");
-    } finally {
-      await new Promise<void>((resolve) => multiMock.close(() => resolve()));
+describe("Retired workspace configuration", () => {
+  it("has no settings, profiles, or provider test route", async () => {
+    const srv = await startApiServer();
+    for (const [method, path] of [["GET", ""], ["POST", ""], ["POST", "/test"], ["POST", "/profiles"]]) {
+      const result = await jsonReq(`${srv.url}/api/ai${path}`, method, method === "POST" ? {} : undefined);
+      expect(result.status).toBe(404);
     }
   });
 });
@@ -1996,77 +1718,14 @@ describe("Autonomous Execution Queue, Lease Reclamation & Agent Operations", () 
   });
 });
 
-describe("Two-Tier Server LLM Pre-screening (Plan A)", () => {
+describe("Feedback prescreening", () => {
   it("auto-archives noise, promotes valid feedback, fails open on errors, and honors skip_prescreen", async () => {
-    let callCount = 0;
-    const mockAi = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", () => {
-        callCount += 1;
-        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
-          messages: Array<{ role: string; content: string }>;
-        };
-        const userMsg = payload.messages.find((m) => m.role === "user")?.content ?? "";
-
-        if (userMsg.includes("TRIGGER_ERROR")) {
-          res.statusCode = 500;
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ error: "Upstream unavailable" }));
-          return;
-        }
-
-        res.statusCode = 200;
-        res.setHeader("Content-Type", "application/json");
-
-        if (userMsg.includes("这是一次测试")) {
-          res.end(
-            JSON.stringify({
-              choices: [
-                {
-                  message: {
-                    content: JSON.stringify({
-                      verdict: "noise",
-                      reason: "这是一条连通性测试消息，不包含产品问题",
-                      priority: "low",
-                    }),
-                  },
-                },
-              ],
-            }),
-          );
-          return;
-        }
-
-        res.end(
-          JSON.stringify({
-            choices: [
-              {
-                message: {
-                  content:
-                    '```json\n{"verdict":"valid","reason":"明确描述了结账页崩溃问题","priority":"high"}\n```',
-                },
-              },
-            ],
-          }),
-        );
-      });
-    });
-    await new Promise<void>((r) => mockAi.listen(0, "127.0.0.1", r));
-    cleanups.push(() => new Promise<void>((r) => mockAi.close(() => r())));
-    const mockPort = (mockAi.address() as { port: number }).port;
-
+    const prescreen = vi.spyOn(await import("../server/assistant.ts"), "prescreenFeedback")
+      .mockResolvedValueOnce({ verdict: "noise", reason: "Connectivity test" })
+      .mockResolvedValueOnce({ verdict: "valid", reason: "Checkout failure", priority: "high" })
+      .mockRejectedValueOnce(new Error("Upstream unavailable"));
+    cleanups.push(() => { prescreen.mockRestore(); });
     const srv = await startApiServer();
-
-    // Configure loopback LLM
-    const aiCfg = await jsonReq(`${srv.url}/api/ai`, "POST", {
-      base_url: `http://127.0.0.1:${mockPort}/v1`,
-      model: "gpt-4o-mini",
-      api_key: "{{SECRET_prescreen_test}}",
-      intake_enabled: false,
-    });
-    expect(aiCfg.status).toBe(200);
-
     const pRes = await jsonReq(`${srv.url}/api/projects`, "POST", {
       name: "Prescreen App",
       repo: "acexiamo/prescreen",
@@ -2124,7 +1783,7 @@ describe("Two-Tier Server LLM Pre-screening (Plan A)", () => {
     expect(validTask.triaged_by).toBe("server_ai");
 
     // 3. LLM error -> fails open (remains in triage)
-    const beforeErrCalls = callCount;
+    const beforeErrCalls = prescreen.mock.calls.length;
     const errRes = await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
       title: "Error case",
       body: "TRIGGER_ERROR real bug report",
@@ -2132,13 +1791,13 @@ describe("Two-Tier Server LLM Pre-screening (Plan A)", () => {
     });
     expect(errRes.status).toBe(200);
     const errId = (errRes.json.task as { id: string }).id;
-    await waitForCondition(async () => callCount > beforeErrCalls);
+    await waitForCondition(async () => prescreen.mock.calls.length > beforeErrCalls);
     await new Promise((r) => setTimeout(r, 60));
     const errDetail = await jsonReq(`${srv.url}/api/tasks/${errId}`);
     expect((errDetail.json.task as { status: string }).status).toBe("triage");
 
     // 4. skip_prescreen: true does not invoke LLM
-    const beforeSkipCalls = callCount;
+    const beforeSkipCalls = prescreen.mock.calls.length;
     const skipRes = await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
       title: "Skipped prescreen",
       body: "这是一次测试",
@@ -2147,7 +1806,7 @@ describe("Two-Tier Server LLM Pre-screening (Plan A)", () => {
     });
     expect(skipRes.status).toBe(200);
     await new Promise((r) => setTimeout(r, 80));
-    expect(callCount).toBe(beforeSkipCalls);
+    expect(prescreen.mock.calls.length).toBe(beforeSkipCalls);
     const skipDetail = await jsonReq(`${srv.url}/api/tasks/${(skipRes.json.task as { id: string }).id}`);
     expect((skipDetail.json.task as { status: string }).status).toBe("triage");
   });

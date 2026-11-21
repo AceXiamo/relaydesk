@@ -2,8 +2,10 @@
 """Process one project's CLI discussions and PR audits in disposable Linux workspaces."""
 import argparse
 import base64
+from dataclasses import dataclass, field
 import functools
 import http.client
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ import sys
 import tempfile
 import time
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler
 
 if __package__:
@@ -27,7 +30,8 @@ else:
 
 MAX_REPLY = 16000
 MAX_INPUT = 512 * 1024
-MAX_CREDENTIALS = 16 * 1024
+MAX_SETTINGS = 32 * 1024
+DEFAULT_SETTINGS_FILE = '/run/relaydesk/cli/settings.json'
 HANDBOOK = Path('/run/relaydesk/handbook.md')
 DISPOSABLE = '仅供讨论与验证；临时工作区已丢弃，没有交付代码改动。'
 
@@ -222,22 +226,47 @@ def prepare(work, repo, number, token, tick):
     return head, merge_base
 
 
-def cli_command(cli, env, key):
-    if cli == 'codex':
-        env = dict(env, CODEX_API_KEY=key, CODEX_HOME=str(Path(env['HOME']) / '.codex'))
+@dataclass(frozen=True)
+class CliSettings:
+    runtime: str
+    endpoint: str
+    model: str
+    api_key: str = field(repr=False)
+    github_token: str = field(repr=False)
+
+
+def cli_command(settings, env):
+    if settings.runtime == 'codex':
+        env = dict(env, CODEX_HOME=str(Path(env['HOME']) / '.codex'))
+        overrides = []
+        if settings.endpoint:
+            env['RELAYDESK_PROVIDER_API_KEY'] = settings.api_key
+            overrides.extend(['-c', 'model_provider="relaydesk"',
+                              '-c', 'model_providers.relaydesk.name="Relaydesk"',
+                              '-c', 'model_providers.relaydesk.env_key="RELAYDESK_PROVIDER_API_KEY"',
+                              '-c', 'model_providers.relaydesk.wire_api="responses"',
+                              '-c', 'model_providers.relaydesk.base_url=' + json.dumps(settings.endpoint)])
+        else:
+            env['CODEX_API_KEY'] = settings.api_key
+        if settings.model:
+            overrides.extend(['-m', settings.model])
         # Landlock is the external sandbox for both CLIs. Nested bwrap requires Docker
         # privileges not granted to this image. Do not execute this command outside it.
         return ['/usr/local/bin/codex', '-a', 'never', 'exec', '--sandbox', 'danger-full-access',
                 '--ephemeral', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check',
                 '-c', 'web_search="disabled"', '-c', 'shell_environment_policy.inherit="all"',
                 '-c', 'shell_environment_policy.include_only=["PATH","HOME","TMPDIR","LANG","CI","TERM"]',
-                '--color', 'never', '-'], env
+                *overrides, '--color', 'never', '-'], env
     tools = 'Read,Grep,Glob,Bash,Edit,Write'
+    env = dict(env, ANTHROPIC_API_KEY=settings.api_key,
+               CLAUDE_CODE_TMPDIR=env['TMPDIR'], DISABLE_NONESSENTIAL_TRAFFIC='1', DISABLE_AUTOUPDATER='1')
+    if settings.endpoint:
+        env['ANTHROPIC_BASE_URL'] = settings.endpoint
+    model = ['--model', settings.model] if settings.model else []
     return ['/usr/local/bin/claude', '--bare', '-p', '--no-session-persistence',
             '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
             '--permission-mode', 'dontAsk', '--tools', tools, '--allowedTools', tools,
-            '--output-format', 'text'], dict(env, ANTHROPIC_API_KEY=key,
-                                            DISABLE_NONESSENTIAL_TRAFFIC='1', DISABLE_AUTOUPDATER='1')
+            *model, '--output-format', 'text'], env
 
 
 def handbook(path=HANDBOOK):
@@ -309,48 +338,79 @@ def execute(claim, opts, lease):
     guide = handbook()
     with tempfile.TemporaryDirectory(prefix='relay-cli-', dir='/tmp') as temp:
         work = workspace(Path(temp))
-        head, merge_base = prepare(work, repo, number, opts.github_token, lease.check)
-        lease.event('progress', sha=head, body=f'已检出 {head}，正在运行 {opts.cli}。')
-        args, env = cli_command(opts.cli, work_env(work), opts.model_key)
+        settings = opts.settings
+        head, merge_base = prepare(work, repo, number, settings.github_token, lease.check)
+        lease.event('progress', sha=head, body=f'已检出 {head}，正在运行 {settings.runtime}。')
+        args, env = cli_command(settings, work_env(work))
         # Start outside the checkout: no project-supplied CLI settings, extensions,
         # .env files or shell startup files should run in the CLI bootstrap path.
         answer = run_command(args, work, env, work, lease.check,
-                             prompt=make_prompt(context, run, head, merge_base, guide), stage=opts.cli)
-    return head, result_body(answer, [opts.key, opts.model_key, opts.github_token, lease.token])
+                             prompt=make_prompt(context, run, head, merge_base, guide), stage=settings.runtime)
+    return head, result_body(answer, [opts.key, settings.api_key, settings.github_token, lease.token])
 
 
-def codex_credentials(path, project):
-    """Read one private credential snapshot. An unusable snapshot clears both keys."""
+def valid_endpoint(endpoint):
+    if not endpoint:
+        return True
+    # Reject ambiguous URL delimiters before different HTTP clients normalize them.
+    if not re.fullmatch(r"[A-Za-z0-9._~:/%\[\]!$&'()*+,;=@-]+", endpoint):
+        return False
+    try:
+        url = urlsplit(endpoint)
+        if not re.fullmatch(r'(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]+)?', url.netloc):
+            return False
+        if url.port == 0:  # Reading port also rejects out-of-range values.
+            return False
+        if url.scheme == 'https':
+            return True
+        if url.scheme == 'http':
+            return url.hostname == 'localhost' or ipaddress.ip_address(url.hostname).is_loopback
+    except ValueError:
+        pass
+    return False
+
+
+def read_settings(path, project, agent_key=''):
+    """Read a single private snapshot bound to this project, or fail closed."""
     def open_private(name, flags):
         return os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
 
     try:
         with open(path, 'rb', opener=open_private) as stream:
             info = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)
-                    or info.st_size > MAX_CREDENTIALS):
-                return '', ''
-            raw = stream.read(MAX_CREDENTIALS + 1)
-        if len(raw) > MAX_CREDENTIALS:
-            return '', ''
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) not in (0o400, 0o600) or info.st_size > MAX_SETTINGS):
+                return None
+            raw = stream.read(MAX_SETTINGS + 1)
+        if len(raw) > MAX_SETTINGS:
+            return None
         data = json.loads(raw.decode('utf-8'))
     except (OSError, ValueError, RecursionError):
-        return '', ''
+        return None
     if not isinstance(data, dict) or data.get('project_id') != project:
-        return '', ''
-    key = data.get('api_key')
-    token = data.get('github_token', '')
-    if not (isinstance(key, str) and re.fullmatch(r'[!-~]+', key)
+        return None
+    runtime, endpoint, model, key, token = (data.get(name) for name in
+                                            ('runtime', 'endpoint', 'model', 'api_key', 'github_token'))
+    if not (runtime in ('codex', 'claude') and isinstance(endpoint, str) and isinstance(model, str)
+            and isinstance(key, str) and re.fullmatch(r'[!-~]*', key)
             and isinstance(token, str) and re.fullmatch(r'[!-~]*', token)):
-        return '', ''
-    return key, token
+        return None
+    endpoint, model = endpoint.strip(' '), model.strip(' ')
+    if not valid_endpoint(endpoint) or (model and (model.startswith('-') or not model.isprintable())):
+        return None
+    if any(secret and (secret in endpoint or secret in model) for secret in (key, token, agent_key)):
+        return None
+    return CliSettings(runtime, endpoint, model, key, token)
 
 
-def cycle(api, opts, claim_payload=None):
-    claim = api.post('claim', **(claim_payload or {}))
+def cycle(api, opts):
+    settings = opts.settings
+    ready = bool(settings and settings.api_key)
+    claim = api.post('claim', runtime=settings.runtime if settings else 'codex',
+                     managed=True, ready=ready, protocol=2)
     if claim['run'] is None:
         return False
-    if claim_payload is not None and claim_payload.get('ready') is False:
+    if not ready:
         raise HttpFailure(0)
     lease = Lease(api, claim, opts.timeout, opts.interval)
     try:
@@ -397,42 +457,29 @@ print('ok')'''
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--cli', choices=('codex', 'claude'), default=os.getenv('RELAYDESK_CLI', 'codex'))
     parser.add_argument('--once', action='store_true', help='poll once and process at most one job')
     parser.add_argument('--interval', type=int, default=5, help='poll/heartbeat interval, 1..30 seconds')
     parser.add_argument('--timeout', type=int, default=900, help='job deadline in seconds (1..7200)')
     parser.add_argument('--self-test', action='store_true', help='check Linux sandbox and CLI startup offline')
     opts = parser.parse_args()
     os.umask(0o077)
-    if not 1 <= opts.interval <= 30 or not 1 <= opts.timeout <= 7200 or opts.cli not in ('codex', 'claude'):
-        parser.error('Invalid CLI or interval/timeout out of range')
+    if not 1 <= opts.interval <= 30 or not 1 <= opts.timeout <= 7200:
+        parser.error('Interval/timeout out of range')
     sandbox.enable_supervisor()
     if opts.self_test:
         self_test()
         return
     opts.project = os.getenv('RELAYDESK_PROJECT')
     opts.key = os.getenv('RELAYDESK_AGENT_KEY')
-    # Managed deployments set this to /run/relaydesk/codex/credentials.json.
-    credentials_file = os.getenv('RELAYDESK_CODEX_CREDENTIALS_FILE') if opts.cli == 'codex' else None
+    settings_file = os.getenv('RELAYDESK_CLI_CONFIG_FILE', DEFAULT_SETTINGS_FILE)
     if not all((os.getenv('RELAYDESK_URL'), opts.project, opts.key)):
         parser.error('Set RELAYDESK_URL, RELAYDESK_PROJECT and RELAYDESK_AGENT_KEY')
-    if not credentials_file:
-        key_env = 'CODEX_API_KEY' if opts.cli == 'codex' else 'ANTHROPIC_API_KEY'
-        opts.model_key = os.getenv(key_env)
-        opts.github_token = os.getenv('RELAYDESK_GITHUB_TOKEN', '')
-        if not opts.model_key or not opts.model_key.strip():
-            parser.error(f'Set a dedicated {key_env}')
     opts.repo = slug(os.getenv('RELAYDESK_REPO'))
     api = Api(os.environ['RELAYDESK_URL'], opts.project, opts.key)
     while True:
         try:
-            if credentials_file:
-                opts.model_key, opts.github_token = codex_credentials(credentials_file, opts.project)
-            claim_payload = None
-            if opts.cli == 'codex':
-                claim_payload = {'runtime': 'codex', 'managed': bool(credentials_file),
-                                 'ready': bool(opts.model_key)}
-            cycle(api, opts, claim_payload)
+            opts.settings = read_settings(settings_file, opts.project, opts.key)
+            cycle(api, opts)
         except HttpFailure as exc:
             # Never print bodies, prompts, model output, headers or credentials.
             print(f'CLI worker request stopped: {exc}.', file=sys.stderr, flush=True)

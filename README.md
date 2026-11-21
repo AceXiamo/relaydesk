@@ -24,15 +24,15 @@ pnpm start
 
 打开 <http://127.0.0.1:8787>，创建项目，填入仓库名（例如 `your-account/your-app`）。数据保存在 `data/relaydesk.sqlite3`，停止并重启后反馈、讨论和认领状态均会保留。
 
-## 配置 LLM API Key 与 GitHub
+## 配置项目 CLI 与 GitHub
 
-- **AI 助手与 LLM**：进入左侧 **设置与 LLM**，可直接配置 OpenAI / OpenRouter / DeepSeek / Ollama 或任意 OpenAI 兼容接口的 Base URL、Model 与 API Key，支持一键测试连接以及开关「反馈组件 AI 追问」。密钥以 `0600` 权限存于数据目录 `.ai-config.json`（也兼容环境变量回退）。
+- **项目 CLI**：在当前项目的设置里选择 Codex CLI 或 Claude Code，填写 API Key，可选填 API 基础地址和模型。工单讨论与 PR 审计使用这份配置。公开反馈的模型调用需单独开启。[配置与使用](docs/assistant.md)
 - **GitHub 连接**：在同页保存 fine-grained PAT（仅需 Metadata Read-only 权限），即可在创建/编辑项目时下拉选择仓库。Token 以 `0600` 权限存于 `.github-token`。
 
 ## 跑通第一条反馈
 
 1. 在工作台按 `N` 新建反馈，或在「收集入口」复制嵌入式 `<script>` 片段粘贴到你的应用页面；群聊可通过 Telegram Bot 的 `/feedback` 指令收录。
-2. 在任务详情抽屉中核对原话、编辑执行要求、切换状态/优先级，或使用「询问项目助手」起草验收标准。重复反馈可合并到主任务。
+2. 在任务详情抽屉中核对原话、编辑执行要求、切换状态/优先级，或使用「询问项目 CLI」起草验收标准。重复反馈可合并到主任务。
 3. 自己负责的任务点「我来处理」；交给本机 Coding Agent 的任务设为「待处理」并保持未认领。
 4. 在开发机运行 `agent/relay.py` 领取任务并在独立 Git worktree 中执行。
 5. Agent 执行期间可随时「请求接手」或「强制接手」；完成后进入「待验收」供本地检查验收。
@@ -42,7 +42,7 @@ pnpm start
 | 应用反馈组件、Telegram 群机器人 | [收集端接入说明](integrations/README.md) |
 | 本机 coding agent、工作树、交接与恢复 | [执行器说明](agent/README.md) |
 | Project CLI conversations and PR audits | [Runner setup, permissions and acceptance checks](docs/project-runner.md) |
-| 任务对话、LLM API Key 配置与收集端追问 | [对话助手配置](docs/assistant.md) |
+| 项目 CLI 配置、工单讨论与公开反馈 | [对话助手配置](docs/assistant.md) |
 
 ## 多台设备与钱包登录
 

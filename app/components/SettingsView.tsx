@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AiSettingsCard } from "./AiSettingsCard.tsx";
-import { CodexRunnerSettingsCard } from "./CodexRunnerSettingsCard.tsx";
+import { ProjectCliSettingsCard } from "./ProjectCliSettingsCard.tsx";
 import { Icon } from "./Icon.tsx";
 import {
   GithubOwnerAvatar,
@@ -22,7 +21,6 @@ import {
   DELIVERY_MODE_LABELS,
 } from "~/lib/format.ts";
 import type {
-  AiConfigStatus,
   DeliveryMode,
   GithubConnectionSummary,
   GithubInspectPayload,
@@ -36,9 +34,7 @@ import type {
 interface SettingsViewProps {
   mode: "settings" | "sources";
   project: ProjectDetail | null;
-  aiConfig: AiConfigStatus | null;
   githubConnections: GithubConnectionSummary[];
-  onAiConfigUpdated: (cfg: AiConfigStatus) => void;
   onGithubConnectionsUpdated: (connections: GithubConnectionSummary[]) => void;
   onProjectUpdated: (project: ProjectDetail) => void;
   onNewProject: () => void;
@@ -135,9 +131,7 @@ function buildSnippets(project: ProjectDetail) {
 export function SettingsView({
   mode,
   project,
-  aiConfig,
   githubConnections,
-  onAiConfigUpdated,
   onGithubConnectionsUpdated,
   onProjectUpdated,
   onNewProject,
@@ -174,7 +168,6 @@ export function SettingsView({
   const [projInstructions, setProjInstructions] = useState(
     project?.agent_instructions ?? "",
   );
-  const [projCliEnabled, setProjCliEnabled] = useState(project?.cli_enabled ?? false);
   const [projPaused, setProjPaused] = useState(project?.automation_paused ?? false);
   const [projDeliveryMode, setProjDeliveryMode] = useState<DeliveryMode>(
     project?.delivery_mode ?? "direct_push",
@@ -221,7 +214,6 @@ export function SettingsView({
       setProjRepoDraft("");
       setProjInstructions(project.agent_instructions);
       setProjPaused(project.automation_paused);
-      setProjCliEnabled(project.cli_enabled ?? false);
       setProjDeliveryMode(project.delivery_mode);
       setProjWidgetCodeContext(project.widget_code_context ?? true);
       setOriginsList(project.allowed_origins);
@@ -233,7 +225,6 @@ export function SettingsView({
     project?.repos,
     project?.agent_instructions,
     project?.automation_paused,
-    project?.cli_enabled,
     project?.delivery_mode,
     project?.widget_code_context,
     project?.allowed_origins,
@@ -533,7 +524,6 @@ export function SettingsView({
         repos: effectiveProjRepos,
         agent_instructions: projInstructions,
         automation_paused: projPaused,
-        cli_enabled: projCliEnabled,
         delivery_mode: projDeliveryMode,
         widget_code_context: projWidgetCodeContext,
       });
@@ -726,22 +716,18 @@ export function SettingsView({
         {/* Header */}
         <header className="pb-4 border-b border-[var(--border-subtle)]">
           <h1 className="text-[19px] font-semibold tracking-tight text-[var(--text-primary)]">
-            {mode === "settings" ? "设置与 LLM 配置" : "收集入口"}
+            {mode === "settings" ? "设置" : "收集入口"}
           </h1>
           <p className="text-[13px] text-[var(--text-muted)] mt-1">
             {mode === "settings"
-              ? "配置工作区 AI 大模型（API Key / Base URL / Model）、GitHub 仓库授权，以及当前项目的 Local Agent 接入。"
+              ? "管理项目 CLI、GitHub 连接、截图存储和 Local Agent 接入。"
               : "将嵌入式反馈组件与 Telegram 群聊机器人接入当前项目的反馈队列。"}
           </p>
         </header>
 
         {mode === "settings" && (
           <>
-            {/* 1. AI / LLM Multi-Model & Node Routing Card (Workspace-wide) */}
-            <AiSettingsCard
-              aiConfig={aiConfig}
-              onAiConfigUpdated={onAiConfigUpdated}
-            />
+            {project && <ProjectCliSettingsCard key={project.id} projectId={project.id} projectName={project.name} />}
 
             {/* 1.5 Cloudflare R2 Screenshot Storage */}
             <form
@@ -1522,16 +1508,6 @@ export function SettingsView({
                   />
                   <div className="border-t border-[var(--border-subtle)] pt-3.5">
                     <Switch
-                      checked={projCliEnabled}
-                      onChange={setProjCliEnabled}
-                      label="用项目 CLI 执行任务讨论与 PR 审计"
-                      description={projCliEnabled
-                        ? "请求进入本项目的 CLI 队列。执行器离线时，请求将等待领取。"
-                        : "当前使用工作区项目助手和 PR 审计节点。"}
-                    />
-                  </div>
-                  <div className="border-t border-[var(--border-subtle)] pt-3.5">
-                    <Switch
                       checked={projWidgetCodeContext}
                       onChange={setProjWidgetCodeContext}
                       label="允许收集组件 AI 查阅绑定仓库代码（只读沙箱）"
@@ -1620,8 +1596,6 @@ export function SettingsView({
                 </Button>
               </div>
             </form>
-
-            <CodexRunnerSettingsCard key={project.id} projectId={project.id} projectName={project.name} />
 
             {/* 4. Local Agent Skill · 1:1 Scheduled Task Onboarding */}
             {snippets && (
@@ -1932,21 +1906,11 @@ export function SettingsView({
                         应用内 AI 反馈组件
                       </h2>
                       <p className="text-[12px] text-[var(--text-muted)]">
-                        粘贴到应用 HTML 的 <code className="font-mono">&lt;body&gt;</code> 内即可启用 AI 对话浮窗、网页自由框选截屏标注与一键提单。
+                        粘贴到应用 HTML 的 <code className="font-mono">&lt;body&gt;</code> 内即可收集反馈。访客可手动提单；如需对话，请在项目 CLI 设置中启用公开 AI。
                       </p>
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span
-                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium ${
-                        aiConfig?.configured && aiConfig.intake_enabled
-                          ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-300"
-                          : "bg-[var(--surface-subtle)] text-[var(--text-muted)]"
-                      }`}
-                    >
-                      <Icon name="sparkles" size={11} />
-                      {aiConfig?.configured && aiConfig.intake_enabled ? "AI 对话已启用" : "AI 对话未开启"}
-                    </span>
                     <span
                       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium ${
                         r2Config?.configured
