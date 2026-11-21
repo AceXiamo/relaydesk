@@ -1,0 +1,30 @@
+# Independent Compose project. No access to the web container or its data volume.
+services:
+  runner:
+    image: ghcr.io/acexiamo/relaydesk-runner:${IMAGE_TAG:?Set the matching full release SHA}
+    env_file: runner.env
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, CHOWN, KILL, DAC_OVERRIDE]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    cpus: 1.0
+    mem_limit: 2g
+    tmpfs:
+      - /tmp:rw,exec,nosuid,nodev,mode=1777,size=1g
+    volumes:
+      - type: bind
+        source: ./runner-handbook.md
+        target: /run/relaydesk/handbook.md
+        read_only: true
+        bind:
+          create_host_path: false
+    labels:
+      traefik.enable: "false"
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"

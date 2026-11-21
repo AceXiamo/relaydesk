@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CliRunStatus, useCliRuns } from "./CliRunStatus.tsx";
 import { Icon } from "./Icon.tsx";
 import { MarkdownContent, hasMarkdownSyntax } from "./MarkdownContent.tsx";
 import {
@@ -17,7 +18,7 @@ import {
   useToast,
   type SelectOption,
 } from "./ui.tsx";
-import { api } from "~/lib/api.ts";
+import { api, ClientApiError } from "~/lib/api.ts";
 import {
   AUTHOR_LABELS,
   PRIORITY_LABELS,
@@ -31,6 +32,7 @@ import {
 } from "~/lib/format.ts";
 import type {
   AiConfigStatus,
+  CliRun,
   ProjectDetail,
   TaskDetailPayload,
   TaskMessage,
@@ -252,6 +254,7 @@ export function TaskDetailDrawer({
   const [comment, setComment] = useState("");
   const [autoReopen, setAutoReopen] = useState(true);
   const [discussTarget, setDiscussTarget] = useState<string>("operator");
+  const [submittedRun, setSubmittedRun] = useState<CliRun | null>(null);
   const [expandedTraces, setExpandedTraces] = useState<Record<string, boolean>>(
     {},
   );
@@ -262,6 +265,14 @@ export function TaskDetailDrawer({
   const commentInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const task = detail?.task ?? null;
+  const cliEnabled = project?.cli_enabled === true || submittedRun !== null;
+  const { runs, notice } = useCliRuns({
+    projectId: cliEnabled ? task?.project_id : undefined,
+    taskId: task?.id,
+    submitted: submittedRun,
+    onRefreshTask,
+  });
+  const cliBusy = cliEnabled && runs.some((run) => run.status === "queued" || run.status === "running");
 
   useEffect(() => {
     setEditingReq(false);
@@ -378,13 +389,23 @@ export function TaskDetailDrawer({
         const discussOpts =
           discussTarget === "pr_audit"
             ? { mode: "pr_audit" as const }
-            : discussTarget.startsWith("profile:")
+            : !cliEnabled && discussTarget.startsWith("profile:")
               ? {
                   mode: "operator" as const,
                   profile_id: discussTarget.slice("profile:".length),
                 }
               : { mode: "operator" as const };
         const res = await api.discussTask(task.id, text, discussOpts);
+        if (res.queued) {
+          setSubmittedRun({ ...res.run, mode: res.node });
+          setComment("");
+          toast.success("已加入项目 CLI 队列");
+          return;
+        }
+        if (cliEnabled) {
+          toast.error("服务端未确认 CLI 请求已入队，请检查项目配置。");
+          return;
+        }
         toast.success(
           res.used_llm && res.model
             ? `${res.node === "pr_audit" ? "PR 审计" : "AI 助手"}已回复（${res.model}）`
@@ -405,7 +426,13 @@ export function TaskDetailDrawer({
       setComment("");
       await onRefreshTask(task.id);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "发送失败");
+      if (askAssistant && cliEnabled) {
+        toast.error(err instanceof ClientApiError && err.status === 409
+          ? "CLI 请求未入队，请检查已有运行和项目自动执行设置。"
+          : "无法确认 CLI 请求已入队，请先查看运行状态。");
+      } else {
+        toast.error(err instanceof Error ? err.message : "发送失败");
+      }
     } finally {
       setBusyAction(null);
     }
@@ -1082,7 +1109,25 @@ export function TaskDetailDrawer({
                   <h3 className="text-[12px] font-medium uppercase tracking-wider text-[var(--text-muted)]">
                     动态与讨论 ({detail?.messages.length ?? 0})
                   </h3>
-                  {aiConfig && (
+                  {cliEnabled ? (
+                    <Select
+                      ariaLabel="选择项目 CLI 讨论模式"
+                      size="xs"
+                      variant="pill"
+                      align="end"
+                      value={discussTarget === "pr_audit" ? "pr_audit" : "operator"}
+                      onChange={setDiscussTarget}
+                      options={[
+                        {
+                          value: "operator",
+                          label: "项目 CLI · 任务讨论",
+                          description: "回答项目问题，在临时工作区验证想法。",
+                          icon: "terminal",
+                        },
+                        { value: "pr_audit", label: "项目 CLI · PR 审计", icon: "git-pull-request" },
+                      ]}
+                    />
+                  ) : aiConfig && (
                     <div className="flex items-center gap-1.5 flex-wrap justify-end">
                       {aiConfig.configured && (
                         <Select
@@ -1351,6 +1396,8 @@ export function TaskDetailDrawer({
                   )}
                 </div>
 
+                {cliEnabled && <CliRunStatus runs={runs} notice={notice} />}
+
                 {/* Beautiful UI-inspired Prompt Bar Composer */}
                 <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] rd-hairline-glow overflow-hidden focus-within:border-indigo-500/60 focus-within:ring-2 focus-within:ring-indigo-500/12 transition-all">
                   {/* Context-aware quick suggestion chips */}
@@ -1472,11 +1519,11 @@ export function TaskDetailDrawer({
                         }
                         size="xs"
                         icon={discussTarget === "pr_audit" ? "git-pull-request" : "sparkles"}
-                        disabled={!comment.trim() || busyAction !== null}
+                        disabled={!comment.trim() || busyAction !== null || cliBusy}
                         loading={busyAction === "discuss"}
                         onClick={() => void handleSendMessage(true)}
                       >
-                        {discussTarget === "pr_audit" ? "发起 PR 审计" : "问项目助手"}
+                        {discussTarget === "pr_audit" ? "发起 PR 审计" : cliEnabled ? "询问项目 CLI" : "问项目助手"}
                       </Button>
                     </div>
                   </div>

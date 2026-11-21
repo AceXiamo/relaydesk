@@ -154,6 +154,7 @@ function ConsoleWorkspace() {
               repos: project.repos,
               automation_paused: project.automation_paused,
               delivery_mode: project.delivery_mode,
+              cli_enabled: project.cli_enabled ?? false,
             }
           : p,
       ),
@@ -270,7 +271,7 @@ function ConsoleWorkspace() {
     async (taskId: string) => {
       await refreshTasks();
       const payload = await api.getTaskDetail(taskId);
-      setDetail(payload);
+      setDetail((current) => current?.task.id === taskId ? payload : current);
     },
     [refreshTasks],
   );
@@ -550,7 +551,7 @@ function ConsoleWorkspace() {
             onAiConfigUpdated={setAiConfig}
             onGithubConnectionsUpdated={setGithubConnections}
             onProjectUpdated={(updated) => {
-              setCurrentProject(updated);
+              setCurrentProject((current) => current?.id === updated.id ? updated : current);
               setProjects((prev) =>
                 prev.map((p) =>
                   p.id === updated.id
@@ -561,6 +562,7 @@ function ConsoleWorkspace() {
                         repos: updated.repos,
                         automation_paused: updated.automation_paused,
                         delivery_mode: updated.delivery_mode,
+                        cli_enabled: updated.cli_enabled ?? false,
                       }
                     : p,
                 ),
@@ -610,6 +612,7 @@ function ConsoleWorkspace() {
 
       {/* Task Detail Slide-Over Drawer */}
       <TaskDetailDrawer
+        key={detail?.task.id}
         project={currentProject}
         detail={detail}
         loading={detailLoading}
@@ -652,6 +655,7 @@ function ConsoleWorkspace() {
               automation_paused: proj.automation_paused,
               delivery_mode: proj.delivery_mode,
               widget_code_context: proj.widget_code_context,
+              cli_enabled: proj.cli_enabled ?? false,
               created_at: proj.created_at,
             },
           ]);

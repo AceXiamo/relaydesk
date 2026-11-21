@@ -4,7 +4,10 @@ import type {
   AiNodeRoute,
   AiTestResult,
   AuthStatusPayload,
+  CliRun,
   DeliveryMode,
+  DiscussMode,
+  DiscussResult,
   GithubConnectionSummary,
   GithubInspectPayload,
   GithubOwnerInfo,
@@ -93,6 +96,7 @@ export const api = {
       automation_paused?: boolean;
       delivery_mode?: DeliveryMode;
       widget_code_context?: boolean;
+      cli_enabled?: boolean;
     },
   ) =>
     request<{ project: ProjectDetail }>(
@@ -122,22 +126,20 @@ export const api = {
       "POST",
       options?.reopen === false ? { body, reopen: false } : { body },
     ),
+  listCliRuns: (projectId: string, taskId: string) =>
+    request<{ runs: CliRun[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/cli-runs`,
+    ),
   discussTask: (
     taskId: string,
     body: string,
     options?: {
       profile_id?: string;
       model?: string;
-      mode?: "operator" | "pr_audit";
+      mode?: DiscussMode;
     },
   ) =>
-    request<{
-      reply: string;
-      model?: string;
-      profile_name?: string;
-      node?: AiNodeId;
-      used_llm?: boolean;
-    }>(`/api/tasks/${encodeURIComponent(taskId)}/discuss`, "POST", {
+    request<DiscussResult>(`/api/tasks/${encodeURIComponent(taskId)}/discuss`, "POST", {
       body,
       ...(options?.profile_id ? { profile_id: options.profile_id } : {}),
       ...(options?.model ? { model: options.model } : {}),

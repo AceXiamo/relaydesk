@@ -173,6 +173,7 @@ export function SettingsView({
   const [projInstructions, setProjInstructions] = useState(
     project?.agent_instructions ?? "",
   );
+  const [projCliEnabled, setProjCliEnabled] = useState(project?.cli_enabled ?? false);
   const [projPaused, setProjPaused] = useState(project?.automation_paused ?? false);
   const [projDeliveryMode, setProjDeliveryMode] = useState<DeliveryMode>(
     project?.delivery_mode ?? "direct_push",
@@ -219,6 +220,7 @@ export function SettingsView({
       setProjRepoDraft("");
       setProjInstructions(project.agent_instructions);
       setProjPaused(project.automation_paused);
+      setProjCliEnabled(project.cli_enabled ?? false);
       setProjDeliveryMode(project.delivery_mode);
       setProjWidgetCodeContext(project.widget_code_context ?? true);
       setOriginsList(project.allowed_origins);
@@ -230,6 +232,7 @@ export function SettingsView({
     project?.repos,
     project?.agent_instructions,
     project?.automation_paused,
+    project?.cli_enabled,
     project?.delivery_mode,
     project?.widget_code_context,
     project?.allowed_origins,
@@ -529,6 +532,7 @@ export function SettingsView({
         repos: effectiveProjRepos,
         agent_instructions: projInstructions,
         automation_paused: projPaused,
+        cli_enabled: projCliEnabled,
         delivery_mode: projDeliveryMode,
         widget_code_context: projWidgetCodeContext,
       });
@@ -1515,6 +1519,16 @@ export function SettingsView({
                     label="启用全自动迭代"
                     description="开启后，本机 Agent 定时巡检时会自动领取并闭环处理新反馈；暂停后所有巡检会立即返回 PAUSED，不消耗本地 Agent Token。"
                   />
+                  <div className="border-t border-[var(--border-subtle)] pt-3.5">
+                    <Switch
+                      checked={projCliEnabled}
+                      onChange={setProjCliEnabled}
+                      label="用项目 CLI 执行任务讨论与 PR 审计"
+                      description={projCliEnabled
+                        ? "请求进入本项目的 CLI 队列。执行器离线时，请求将等待领取。"
+                        : "当前使用工作区项目助手和 PR 审计节点。"}
+                    />
+                  </div>
                   <div className="border-t border-[var(--border-subtle)] pt-3.5">
                     <Switch
                       checked={projWidgetCodeContext}

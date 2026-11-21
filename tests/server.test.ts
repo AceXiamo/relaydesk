@@ -192,6 +192,49 @@ describe("Relaydesk Core Queue & Agent API", () => {
   });
 });
 
+describe("Project CLI dispatch", () => {
+  it("keeps CLI jobs operator-only and returns a leased result to the originating thread", async () => {
+    const srv = await startApiServer({ adminToken: "operator-test" });
+    const operator = { Authorization: "Bearer operator-test" };
+    const project = (await jsonReq(`${srv.url}/api/projects`, "POST", {
+      name: "CLI fixture", repo: "example/fixture", cli_enabled: true,
+    }, operator)).json.project as Record<string, string>;
+    const prefix = `${srv.url}/api/projects/${project.id}`;
+    const agent = { Authorization: `Bearer ${project.agent_key}` };
+    const widget = { Authorization: `Bearer ${project.intake_key}` };
+    const task = (await jsonReq(`${prefix}/tasks`, "POST", {
+      title: "Check fixture", body: "Check fixture", skip_prescreen: true,
+    }, operator)).json.task as Record<string, string>;
+    const taskUrl = `${srv.url}/api/tasks/${task.id}`;
+    const ask = { mode: "operator", body: "Run fixture verification" };
+    expect((await jsonReq(`${taskUrl}/discuss`, "POST", ask, widget)).status).toBe(401);
+    expect((await jsonReq(`${prefix}/agent/cli/claim`, "POST", {}, widget)).status).toBe(401);
+    const queued = await jsonReq(`${taskUrl}/discuss`, "POST", ask, operator);
+    expect(queued.status).toBe(202);
+    expect(queued.json).toMatchObject({ queued: true, run: { status: "queued" } });
+    const claimed = await jsonReq(`${prefix}/agent/cli/claim`, "POST", {}, agent);
+    expect(claimed.json).toMatchObject({ run: { mode: "operator", status: "running" }, context: { task: { id: task.id } } });
+    expect(JSON.stringify(claimed.json)).not.toContain(project.agent_key);
+    const { id } = claimed.json.run as { id: string };
+    const events = `${prefix}/agent/cli/runs/${id}/events`;
+    expect((await jsonReq(events, "POST", { lease: "invalid", event: "finish", body: "stale" }, agent)).status).not.toBe(200);
+    const sha = "1".repeat(40);
+    const lease = claimed.json.lease;
+    expect((await jsonReq(events, "POST", { lease, event: "progress", sha, body: "Testing fixture" }, agent)).status).toBe(200);
+    const listed = await jsonReq(`${prefix}/tasks/${task.id}/cli-runs`, "GET", undefined, operator);
+    expect(listed.json.runs).toMatchObject([{ id, progress: "Testing fixture", sha }]);
+    expect(JSON.stringify(listed.json)).not.toContain(String(lease));
+    expect((await jsonReq(events, "POST", { lease, event: "finish", body: "Fixture passed", sha }, agent)).status).toBe(200);
+    const detail = await jsonReq(taskUrl, "GET", undefined, operator);
+    expect(detail.json.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ author: "human", body: ask.body }),
+      expect.objectContaining({ author: "assistant", body: expect.stringContaining("Fixture passed") }),
+    ]));
+    expect(detail.json.task).toMatchObject({ status: task.status, owner: task.owner });
+    expect((await jsonReq(`${prefix}/agent/cli/claim`, "POST", {}, agent)).json).toEqual({ run: null });
+  });
+});
+
 describe("Workspace LLM API Key Configuration & Assistant Chat", () => {
   it("saves, masks, tests, and uses workspace LLM config with OpenAI-compatible mock", async () => {
     // Spin up a local loopback mock OpenAI Chat Completions server

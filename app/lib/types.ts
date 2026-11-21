@@ -34,6 +34,7 @@ export interface ProjectSummary {
   automation_paused: boolean;
   delivery_mode: DeliveryMode;
   widget_code_context: boolean;
+  cli_enabled: boolean;
   created_at: string;
 }
 
@@ -53,6 +54,7 @@ export interface AgentProjectInfo {
   automation_paused: boolean;
   delivery_mode: DeliveryMode;
   widget_code_context: boolean;
+  cli_enabled?: boolean;
   agent_instructions: string;
 }
 
@@ -114,6 +116,27 @@ export interface TaskDetailPayload {
   messages: TaskMessage[];
   merged: TaskRecord[];
 }
+
+export type DiscussMode = "operator" | "pr_audit";
+
+export interface CliRun {
+  id: string;
+  mode: DiscussMode;
+  status: "queued" | "running" | "succeeded" | "failed";
+  progress: string;
+  sha: string;
+}
+
+export type DiscussResult =
+  | { queued: true; run: CliRun; node: DiscussMode }
+  | {
+      queued?: false;
+      reply: string;
+      model?: string;
+      profile_name?: string;
+      node?: AiNodeId;
+      used_llm?: boolean;
+    };
 
 export type AuthMode = "none" | "token" | "wallet";
 

@@ -41,6 +41,7 @@ pnpm start
 | --- | --- |
 | 应用反馈组件、Telegram 群机器人 | [收集端接入说明](integrations/README.md) |
 | 本机 coding agent、工作树、交接与恢复 | [执行器说明](agent/README.md) |
+| Project CLI conversations and PR audits | [Runner setup, permissions and acceptance checks](docs/project-runner.md) |
 | 任务对话、LLM API Key 配置与收集端追问 | [对话助手配置](docs/assistant.md) |
 
 ## 多台设备与钱包登录

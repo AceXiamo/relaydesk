@@ -34,6 +34,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/metadata-action@v5
+        id: runner_meta
+        with:
+          images: ghcr.io/${{ github.repository }}-runner
+          tags: type=sha,format=long,prefix=
+      - name: Build the runner and check its actual process isolation
+        run: |
+          docker build -t relaydesk-runner:test ./agent
+          bash tests/cli-image-proof.sh relaydesk-runner:test
+      - name: Publish the tested runner image at the release revision
+        env:
+          RUNNER_TAG: ${{ steps.runner_meta.outputs.tags }}
+        run: |
+          docker tag relaydesk-runner:test "$RUNNER_TAG"
+          docker push "$RUNNER_TAG"
+      - uses: docker/metadata-action@v5
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}

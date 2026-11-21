@@ -42,6 +42,7 @@ export const DELIVERY_MODES = new Set<DeliveryMode>([
 
 export const MAX_AGENT_ATTEMPTS = 3;
 export const STALE_LEASE_MS = 45 * 60 * 1000;
+export const CLI_LEASE_MS = 5 * 60 * 1000;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS projects (
     allowed_origins TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,
     agent_instructions TEXT NOT NULL DEFAULT '',
     automation_paused INTEGER NOT NULL DEFAULT 0,
+    cli_enabled INTEGER NOT NULL DEFAULT 0,
     delivery_mode TEXT NOT NULL DEFAULT 'direct_push',
     widget_code_context INTEGER NOT NULL DEFAULT 1
 );
@@ -76,7 +78,42 @@ CREATE TABLE IF NOT EXISTS messages (
     kind TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS thread ON messages(task_id, id);
+CREATE TABLE IF NOT EXISTS cli_runs (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+    task_id TEXT NOT NULL REFERENCES tasks(id), mode TEXT NOT NULL CHECK(mode IN ('operator','pr_audit')),
+    status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed')),
+    question TEXT NOT NULL, progress TEXT NOT NULL DEFAULT '', sha TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, lease TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS cli_active_task ON cli_runs(task_id) WHERE status IN ('queued','running');
+CREATE INDEX IF NOT EXISTS cli_pending ON cli_runs(project_id, status, created_at);
+CREATE INDEX IF NOT EXISTS cli_thread ON cli_runs(task_id, created_at);
 `;
+
+export type CliRunMode = "operator" | "pr_audit";
+export interface CliRun {
+  id: string;
+  project_id: string;
+  task_id: string;
+  mode: CliRunMode;
+  status: "queued" | "running" | "succeeded" | "failed";
+  question: string;
+  progress: string;
+  sha: string;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface ClaimedCliRun {
+  run: CliRun;
+  lease: string;
+  context: { task: TaskRecord; project: AgentProjectInfo; messages: TaskMessage[] };
+}
+
+// Keep lease credentials out of every public query, including UPDATE ... RETURNING.
+const CLI_FIELDS = "id, project_id, task_id, mode, status, question, progress, sha, created_at, updated_at, started_at, finished_at";
 
 export function nowIso(): string {
   return new Date().toISOString();
@@ -93,6 +130,12 @@ export function field(
     throw new ApiError(400, `Invalid ${name} (maximum ${limit} characters)`);
   }
   return raw.trim();
+}
+
+function cliEnabledFlag(data: Record<string, unknown>, fallback: number): number {
+  if (data.cli_enabled === undefined) return fallback;
+  if (typeof data.cli_enabled !== "boolean") throw new ApiError(400, "cli_enabled must be a boolean");
+  return data.cli_enabled ? 1 : 0;
 }
 
 export const MAX_PROJECT_REPOS = 20;
@@ -222,6 +265,7 @@ export interface RawProjectRow {
   allowed_origins: string;
   created_at: string;
   agent_instructions: string;
+  cli_enabled?: number;
   automation_paused?: number;
   delivery_mode?: string;
   widget_code_context?: number;
@@ -295,6 +339,7 @@ export function toProjectView(row: RawProjectRow): ProjectDetail {
     name: row.name,
     repo: repos[0] ?? row.repo,
     repos,
+    cli_enabled: Boolean(row.cli_enabled),
     automation_paused: Boolean(row.automation_paused),
     delivery_mode: normalizeDeliveryMode(row.delivery_mode),
     widget_code_context: row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
@@ -314,6 +359,7 @@ export function toAgentProject(row: RawProjectRow): AgentProjectInfo {
     name: row.name,
     repo: repos[0] ?? row.repo,
     repos,
+    cli_enabled: Boolean(row.cli_enabled),
     automation_paused: Boolean(row.automation_paused),
     delivery_mode: normalizeDeliveryMode(row.delivery_mode),
     widget_code_context: row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
@@ -385,6 +431,9 @@ export class Store {
         "ALTER TABLE projects ADD COLUMN automation_paused INTEGER NOT NULL DEFAULT 0",
       );
     }
+    if (!cols.some((c) => c.name === "cli_enabled")) {
+      this.db.exec("ALTER TABLE projects ADD COLUMN cli_enabled INTEGER NOT NULL DEFAULT 0");
+    }
     if (!cols.some((c) => c.name === "delivery_mode")) {
       this.db.exec(
         "ALTER TABLE projects ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'direct_push'",
@@ -450,13 +499,14 @@ export class Store {
   listProjects(): ProjectSummary[] {
     const rows = this.db
       .prepare(
-        "SELECT id, name, repo, repos, automation_paused, delivery_mode, widget_code_context, created_at FROM projects ORDER BY created_at",
+        "SELECT id, name, repo, repos, cli_enabled, automation_paused, delivery_mode, widget_code_context, created_at FROM projects ORDER BY created_at",
       )
       .all() as unknown as Array<{
       id: string;
       name: string;
       repo: string;
       repos?: string;
+      cli_enabled?: number;
       automation_paused?: number;
       delivery_mode?: string;
       widget_code_context?: number;
@@ -469,6 +519,7 @@ export class Store {
         name: row.name,
         repo: repos[0] ?? row.repo,
         repos,
+        cli_enabled: Boolean(row.cli_enabled),
         automation_paused: Boolean(row.automation_paused),
         delivery_mode: normalizeDeliveryMode(row.delivery_mode),
         widget_code_context:
@@ -526,8 +577,8 @@ export class Store {
     const created = nowIso();
     this.db
       .prepare(
-        `INSERT INTO projects(id, name, repo, repos, intake_key, bot_key, agent_key, allowed_origins, created_at, agent_instructions, automation_paused, delivery_mode, widget_code_context)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO projects(id, name, repo, repos, intake_key, bot_key, agent_key, allowed_origins, created_at, agent_instructions, automation_paused, delivery_mode, widget_code_context, cli_enabled)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         projectId,
@@ -543,6 +594,7 @@ export class Store {
         automationPaused,
         deliveryMode,
         widgetCodeContext,
+        cliEnabledFlag(data, 0),
       );
     return toProjectView(this.getProjectRow(projectId));
   }
@@ -595,7 +647,7 @@ export class Store {
     }
     this.db
       .prepare(
-        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ?, automation_paused = ?, delivery_mode = ?, widget_code_context = ? WHERE id = ?",
+        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ?, automation_paused = ?, delivery_mode = ?, widget_code_context = ?, cli_enabled = ? WHERE id = ?",
       )
       .run(
         name,
@@ -606,6 +658,7 @@ export class Store {
         automationPaused,
         deliveryMode,
         widgetCodeContext,
+        cliEnabledFlag(data, project.cli_enabled ?? 0),
         projectId,
       );
     return toProjectView(this.getProjectRow(projectId));
@@ -659,6 +712,104 @@ export class Store {
     return this.db
       .prepare("SELECT * FROM messages WHERE task_id = ? ORDER BY id ASC")
       .all(taskId) as unknown as TaskMessage[];
+  }
+
+  private cliTask(projectId: string, taskId: string): RawTaskRow {
+    const task = this.getTaskRow(taskId);
+    if (task.project_id !== projectId) throw new ApiError(404, "Record not found");
+    return task;
+  }
+
+  // Called only under BEGIN IMMEDIATE, after checking lease or expiry. Clearing the
+  // lease and appending the terminal comment commit together or not at all.
+  private completeCliRun(run: CliRun, status: "succeeded" | "failed", body: string, sha: string): CliRun {
+    const now = nowIso();
+    const result = this.db.prepare(`UPDATE cli_runs SET status = ?, progress = ?, sha = ?,
+      lease = NULL, updated_at = ?, finished_at = ? WHERE id = ? AND project_id = ? AND status = 'running'
+      RETURNING ${CLI_FIELDS}`).get(status, body, sha, now, now, run.id, run.project_id) as unknown as CliRun;
+    this.addMessage(run.task_id, "comment", "assistant", status === "failed" ? `CLI 运行失败：${body}` : body);
+    return result;
+  }
+
+  private expireCliRuns(projectId: string): void {
+    const cutoff = new Date(Date.now() - CLI_LEASE_MS).toISOString();
+    const stale = this.db.prepare(`SELECT ${CLI_FIELDS} FROM cli_runs
+      WHERE project_id = ? AND status = 'running' AND updated_at <= ?`).all(projectId, cutoff) as unknown as CliRun[];
+    for (const run of stale) {
+      this.completeCliRun(run, "failed", "CLI 租约已过期，未自动重试。请检查本地执行结果后再决定是否重新运行。", run.sha);
+    }
+  }
+
+  enqueueCliRun(projectId: string, taskId: string, mode: CliRunMode, question: string): CliRun {
+    if (mode !== "operator" && mode !== "pr_audit") throw new ApiError(400, "Invalid CLI mode");
+    const body = field({ question }, "question", 8000);
+    return this.transaction(true, () => {
+      this.cliTask(projectId, taskId);
+      const project = this.getProjectRow(projectId);
+      if (!project.cli_enabled) throw new ApiError(409, "CLI is disabled for this project");
+      if (project.automation_paused) throw new ApiError(409, "Automation is paused");
+      this.expireCliRuns(projectId);
+      if (this.db.prepare("SELECT 1 FROM cli_runs WHERE task_id = ? AND status IN ('queued','running')").get(taskId)) {
+        throw new ApiError(409, "This task already has an active CLI run");
+      }
+      const now = nowIso();
+      const run = this.db.prepare(`INSERT INTO cli_runs(id, project_id, task_id, mode, question, status, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, 'queued', ?, ?) RETURNING ${CLI_FIELDS}`)
+        .get(uuidHex(), projectId, taskId, mode, body, now, now) as unknown as CliRun;
+      this.addMessage(taskId, "comment", "human", body);
+      return run;
+    });
+  }
+
+  listCliRuns(projectId: string, taskId: string): CliRun[] {
+    return this.transaction(true, () => {
+      this.cliTask(projectId, taskId);
+      this.expireCliRuns(projectId);
+      return this.db.prepare(`SELECT ${CLI_FIELDS} FROM cli_runs WHERE project_id = ? AND task_id = ?
+        ORDER BY created_at DESC, rowid DESC`).all(projectId, taskId) as unknown as CliRun[];
+    });
+  }
+
+  claimCliRun(projectId: string): ClaimedCliRun | null {
+    return this.transaction(true, () => {
+      const project = this.getProjectRow(projectId);
+      this.expireCliRuns(projectId);
+      if (!project.cli_enabled || project.automation_paused) return null;
+      const lease = tokenUrlSafe();
+      const now = nowIso();
+      const run = this.db.prepare(`UPDATE cli_runs SET status = 'running', lease = ?, started_at = ?, updated_at = ?
+        WHERE id = (SELECT id FROM cli_runs WHERE project_id = ? AND status = 'queued' ORDER BY created_at, rowid LIMIT 1)
+        RETURNING ${CLI_FIELDS}`).get(lease, now, now, projectId) as unknown as CliRun | undefined;
+      if (!run) return null;
+      return { run, lease, context: {
+        task: toTaskView(this.cliTask(projectId, run.task_id)), project: toAgentProject(project),
+        messages: this.getTaskMessages(run.task_id, 30),
+      } };
+    });
+  }
+
+  eventCliRun(projectId: string, runId: string, data: Record<string, unknown>): CliRun {
+    const event = field(data, "event", 16);
+    if (!["heartbeat", "progress", "finish", "fail"].includes(event)) throw new ApiError(400, "Invalid CLI event");
+    const lease = field(data, "lease", 128);
+    const body = field(data, "body", event === "progress" ? 4000 : 24000, event !== "heartbeat");
+    const sha = field(data, "sha", 64, false);
+    if (sha && !/^[0-9a-f]{7,64}$/i.test(sha)) throw new ApiError(400, "Invalid commit SHA");
+    const result = this.transaction(true, () => {
+      this.expireCliRuns(projectId);
+      const run = this.db.prepare(`SELECT ${CLI_FIELDS}, lease FROM cli_runs WHERE id = ? AND project_id = ?`)
+        .get(runId, projectId) as unknown as (CliRun & { lease: string | null }) | undefined;
+      if (!run) throw new ApiError(404, "Record not found");
+      if (run.status !== "running" || !run.lease || !safeEqual(lease, run.lease)) return null;
+      if (event === "finish" || event === "fail") {
+        return this.completeCliRun(run, event === "finish" ? "succeeded" : "failed", body, sha || run.sha);
+      }
+      return this.db.prepare(`UPDATE cli_runs SET progress = ?, sha = ?, updated_at = ?
+        WHERE id = ? RETURNING ${CLI_FIELDS}`).get(event === "progress" ? body : run.progress, sha || run.sha, nowIso(), run.id) as unknown as CliRun;
+    });
+    // Reject outside the transaction: a late worker must not roll back its own expiration.
+    if (!result) throw new ApiError(409, "Lease is no longer active");
+    return result;
   }
 
   getMergedTasks(taskId: string): TaskRecord[] {

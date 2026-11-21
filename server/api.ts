@@ -441,8 +441,29 @@ export class ApiRouter {
           (parts[0] === "tasks" && parts[2] === "discuss"))
       ) {
         const result = await this.handleChat(req, parts, data, meta);
-        this.sendJson(req, res, 200, result, meta);
+        this.sendJson(req, res, "queued" in result ? 202 : 200, result, meta);
         return;
+      }
+
+      // CLI runs have their own leases and transactions, independent of task ownership.
+      if (parts[0] === "projects" && parts[2] === "tasks" && parts.length === 5 && parts[4] === "cli-runs" && method === "GET") {
+        const runs = this.store.listCliRuns(parts[1], parts[3]);
+        this.sendJson(req, res, 200, { runs }, meta);
+        return;
+      }
+      if (isAgentPath && parts[3] === "cli") {
+        const project = this.store.getProjectRow(parts[1]);
+        this.checkBearer(req, project.agent_key);
+        if (method === "POST" && parts.length === 5 && parts[4] === "claim") {
+          this.sendJson(req, res, 200, this.store.claimCliRun(project.id) ?? { run: null }, meta);
+          return;
+        }
+        if (method === "POST" && parts.length === 7 && parts[4] === "runs" && parts[6] === "events") {
+          const run = this.store.eventCliRun(project.id, parts[5], data);
+          this.sendJson(req, res, 200, { run }, meta);
+          return;
+        }
+        throw new ApiError(404, "Unknown CLI endpoint");
       }
 
       const postCommit: Array<() => void> = [];
@@ -1167,9 +1188,18 @@ export class ApiRouter {
     profile_name?: string;
     node?: string;
     used_llm?: boolean;
-  }> {
+  } | { queued: true; node: "operator" | "pr_audit"; run: ReturnType<Store["enqueueCliRun"]> }> {
     const body = field(data, "body", 8000);
     const clarify = parts[0] === "projects";
+    // Only the authenticated operator discussion endpoint may dispatch shell-capable jobs.
+    if (!clarify) {
+      const row = this.store.getTaskRow(parts[1]);
+      if (this.store.getProjectRow(row.project_id).cli_enabled) {
+        const node = data.mode === "pr_audit" ? "pr_audit" : "operator";
+        const run = this.store.enqueueCliRun(row.project_id, row.id, node, body);
+        return { queued: true, node, run };
+      }
+    }
 
     let task: ReturnType<typeof toTaskView> | undefined;
     let project: ReturnType<typeof toAgentProject> | undefined;
