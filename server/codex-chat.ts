@@ -790,6 +790,8 @@ function handleClaudeJsonLine(
         state.hadIncrementalDelta = true;
         state.text = (state.text + clean).slice(0, MAX_OUTPUT_CHARS);
         emit({ type: "text_delta", delta: clean });
+      } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string" && delta.thinking.trim()) {
+        emit({ type: "reasoning", text: redactSecrets(delta.thinking.trim(), secrets).slice(0, 600) });
       }
     } else if (evType === "content_block_start" && ev.content_block && typeof ev.content_block === "object") {
       const block = ev.content_block as Record<string, unknown>;
