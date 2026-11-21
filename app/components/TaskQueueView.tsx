@@ -66,7 +66,7 @@ interface TaskQueueViewProps {
 }
 
 const VIEW_META: Record<
-  Exclude<WorkspaceView, "sources" | "settings">,
+  Exclude<WorkspaceView, "sources" | "settings" | "workspace" | "chat">,
   { title: string; subtitle: string; emptyTitle: string; emptyDesc: string }
 > = {
   queue: {
@@ -311,7 +311,7 @@ export function TaskQueueView({
 
   const paused = project.automation_paused;
   const meta =
-    VIEW_META[view as Exclude<WorkspaceView, "sources" | "settings">] ??
+    VIEW_META[view as Exclude<WorkspaceView, "sources" | "settings" | "workspace" | "chat">] ??
     VIEW_META.queue;
   const hasFilters = Boolean(
     search.trim() || statusFilter || sourceFilter || (view === "queue" && cockpitFilter),

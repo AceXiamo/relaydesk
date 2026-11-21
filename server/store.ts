@@ -7,6 +7,12 @@ import type {
   AgentProjectInfo,
   AgentQueueItem,
   AgentQueuePayload,
+  ChatContextRef,
+  ChatMessageRecord,
+  ChatRuntime,
+  ChatSandboxMode,
+  ChatSessionRecord,
+  ChatToolEvent,
   DeliveryMode,
   ProjectDetail,
   ProjectSummary,
@@ -87,6 +93,31 @@ CREATE TABLE IF NOT EXISTS cli_runs (
 CREATE UNIQUE INDEX IF NOT EXISTS cli_active_task ON cli_runs(task_id) WHERE status IN ('queued','running');
 CREATE INDEX IF NOT EXISTS cli_pending ON cli_runs(project_id, status, created_at);
 CREATE INDEX IF NOT EXISTS cli_thread ON cli_runs(task_id, created_at);
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    title TEXT NOT NULL,
+    runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude')),
+    model TEXT NOT NULL DEFAULT '',
+    sandbox_mode TEXT NOT NULL DEFAULT 'read-only' CHECK(sandbox_mode IN ('read-only','workspace-write')),
+    network_access INTEGER NOT NULL DEFAULT 0,
+    external_session_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'idle' CHECK(status IN ('idle','running','error')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_sessions_project ON chat_sessions(project_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+    content TEXT NOT NULL,
+    events_json TEXT NOT NULL DEFAULT '[]',
+    attachments_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'done' CHECK(status IN ('streaming','done','error','aborted')),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_session ON chat_messages(session_id, created_at ASC);
 `;
 
 export type CliRunMode = "operator" | "pr_audit";
@@ -451,6 +482,14 @@ export class Store {
     if (!taskCols.some((c) => c.name === "triaged_by")) {
       this.db.exec(
         "ALTER TABLE tasks ADD COLUMN triaged_by TEXT NOT NULL DEFAULT ''",
+      );
+    }
+    const chatSessionCols = this.db
+      .prepare("PRAGMA table_info(chat_sessions)")
+      .all() as Array<{ name: string }>;
+    if (!chatSessionCols.some((c) => c.name === "network_access")) {
+      this.db.exec(
+        "ALTER TABLE chat_sessions ADD COLUMN network_access INTEGER NOT NULL DEFAULT 0",
       );
     }
     const unmigrated = this.db
@@ -1502,5 +1541,300 @@ export class Store {
     }
 
     throw new ApiError(409, "Agent must honor the current task state");
+  }
+
+  /* ── Web Codex / CLI Chat Sessions ────────────────────────────────────── */
+
+  private mapChatMessageRow(row: {
+    id: string;
+    session_id: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    events_json: string;
+    attachments_json: string;
+    status: "streaming" | "done" | "error" | "aborted";
+    created_at: string;
+  }): ChatMessageRecord {
+    let events: ChatToolEvent[] = [];
+    let attachments: ChatContextRef[] = [];
+    try {
+      const parsed = JSON.parse(row.events_json) as unknown;
+      if (Array.isArray(parsed)) events = parsed as ChatToolEvent[];
+    } catch {
+      events = [];
+    }
+    try {
+      const parsed = JSON.parse(row.attachments_json) as unknown;
+      if (Array.isArray(parsed)) attachments = parsed as ChatContextRef[];
+    } catch {
+      attachments = [];
+    }
+    return {
+      id: row.id,
+      session_id: row.session_id,
+      role: row.role,
+      content: row.content,
+      events,
+      attachments,
+      status: row.status,
+      created_at: row.created_at,
+    };
+  }
+
+  listChatSessions(projectId: string): ChatSessionRecord[] {
+    this.getProjectRow(projectId);
+    const rows = this.db
+      .prepare(
+        `SELECT s.*,
+          (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id) AS message_count,
+          (SELECT m.content FROM chat_messages m WHERE m.session_id = s.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS last_message_preview
+         FROM chat_sessions s
+         WHERE s.project_id = ?
+         ORDER BY s.updated_at DESC, s.rowid DESC
+         LIMIT 100`,
+      )
+      .all(projectId) as unknown as Array<
+      Omit<ChatSessionRecord, "network_access"> & {
+        network_access?: number;
+        message_count: number;
+        last_message_preview: string | null;
+      }
+    >;
+    return rows.map((row) => ({
+      ...row,
+      network_access: Boolean(row.network_access),
+      message_count: Number(row.message_count ?? 0),
+      last_message_preview: row.last_message_preview
+        ? row.last_message_preview.replace(/\s+/g, " ").trim().slice(0, 120)
+        : "",
+    }));
+  }
+
+  getChatSession(projectId: string, sessionId: string): ChatSessionRecord {
+    this.getProjectRow(projectId);
+    const row = this.db
+      .prepare("SELECT * FROM chat_sessions WHERE id = ? AND project_id = ?")
+      .get(sessionId, projectId) as unknown as
+      | (Omit<ChatSessionRecord, "network_access"> & { network_access?: number })
+      | undefined;
+    if (!row) throw new ApiError(404, "对话会话不存在");
+    return {
+      ...row,
+      network_access: Boolean(row.network_access),
+    };
+  }
+
+  createChatSession(
+    projectId: string,
+    data: {
+      title?: string;
+      runtime?: ChatRuntime;
+      model?: string;
+      sandbox_mode?: ChatSandboxMode;
+      network_access?: boolean;
+    } = {},
+  ): ChatSessionRecord {
+    this.getProjectRow(projectId);
+    const title =
+      typeof data.title === "string" && data.title.trim()
+        ? data.title.trim().slice(0, 120)
+        : "新对话";
+    const runtime: ChatRuntime = data.runtime === "claude" ? "claude" : "codex";
+    const model =
+      typeof data.model === "string" ? data.model.trim().slice(0, 160) : "";
+    const sandboxMode: ChatSandboxMode =
+      data.sandbox_mode === "workspace-write" ? "workspace-write" : "read-only";
+    const networkAccess = data.network_access === true ? 1 : 0;
+    const id = uuidHex();
+    const now = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO chat_sessions(id, project_id, title, runtime, model, sandbox_mode, network_access, external_session_id, status, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, '', 'idle', ?, ?)`,
+      )
+      .run(id, projectId, title, runtime, model, sandboxMode, networkAccess, now, now);
+    return this.getChatSession(projectId, id);
+  }
+
+  updateChatSession(
+    projectId: string,
+    sessionId: string,
+    patch: {
+      title?: string;
+      runtime?: ChatRuntime;
+      model?: string;
+      sandbox_mode?: ChatSandboxMode;
+      network_access?: boolean;
+      external_session_id?: string;
+      status?: "idle" | "running" | "error";
+    },
+  ): ChatSessionRecord {
+    const current = this.getChatSession(projectId, sessionId);
+    const title =
+      patch.title !== undefined
+        ? String(patch.title).trim().slice(0, 120) || current.title
+        : current.title;
+    const runtime: ChatRuntime =
+      patch.runtime !== undefined
+        ? patch.runtime === "claude"
+          ? "claude"
+          : "codex"
+        : current.runtime;
+    const model =
+      patch.model !== undefined
+        ? String(patch.model).trim().slice(0, 160)
+        : current.model;
+    const sandboxMode: ChatSandboxMode =
+      patch.sandbox_mode !== undefined
+        ? patch.sandbox_mode === "workspace-write"
+          ? "workspace-write"
+          : "read-only"
+        : current.sandbox_mode;
+    const networkAccess =
+      typeof patch.network_access === "boolean"
+        ? patch.network_access
+        : current.network_access;
+    // Switching runtime, sandbox mode, or network access invalidates the prior CLI thread id.
+    let externalSessionId =
+      patch.external_session_id !== undefined
+        ? String(patch.external_session_id).trim().slice(0, 200)
+        : current.external_session_id;
+    if (
+      patch.external_session_id === undefined &&
+      (runtime !== current.runtime ||
+        sandboxMode !== current.sandbox_mode ||
+        networkAccess !== current.network_access)
+    ) {
+      externalSessionId = "";
+    }
+    const status = patch.status ?? current.status;
+    const now = nowIso();
+    this.db
+      .prepare(
+        `UPDATE chat_sessions
+         SET title = ?, runtime = ?, model = ?, sandbox_mode = ?, network_access = ?, external_session_id = ?, status = ?, updated_at = ?
+         WHERE id = ? AND project_id = ?`,
+      )
+      .run(
+        title,
+        runtime,
+        model,
+        sandboxMode,
+        networkAccess ? 1 : 0,
+        externalSessionId,
+        status,
+        now,
+        sessionId,
+        projectId,
+      );
+    return this.getChatSession(projectId, sessionId);
+  }
+
+  deleteChatSession(projectId: string, sessionId: string): { deleted: string } {
+    this.getChatSession(projectId, sessionId);
+    this.db.prepare("DELETE FROM chat_messages WHERE session_id = ?").run(sessionId);
+    this.db
+      .prepare("DELETE FROM chat_sessions WHERE id = ? AND project_id = ?")
+      .run(sessionId, projectId);
+    return { deleted: sessionId };
+  }
+
+  listChatMessages(projectId: string, sessionId: string): ChatMessageRecord[] {
+    this.getChatSession(projectId, sessionId);
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 200",
+      )
+      .all(sessionId) as unknown as Array<{
+      id: string;
+      session_id: string;
+      role: "user" | "assistant" | "system";
+      content: string;
+      events_json: string;
+      attachments_json: string;
+      status: "streaming" | "done" | "error" | "aborted";
+      created_at: string;
+    }>;
+    return rows.map((r) => this.mapChatMessageRow(r));
+  }
+
+  addChatMessage(
+    sessionId: string,
+    payload: {
+      role: "user" | "assistant" | "system";
+      content: string;
+      events?: ChatToolEvent[];
+      attachments?: ChatContextRef[];
+      status?: "streaming" | "done" | "error" | "aborted";
+    },
+  ): ChatMessageRecord {
+    const id = uuidHex();
+    const now = nowIso();
+    const eventsJson = JSON.stringify(payload.events ?? []);
+    const attachmentsJson = JSON.stringify(payload.attachments ?? []);
+    const status = payload.status ?? "done";
+    this.db
+      .prepare(
+        `INSERT INTO chat_messages(id, session_id, role, content, events_json, attachments_json, status, created_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, sessionId, payload.role, payload.content, eventsJson, attachmentsJson, status, now);
+    this.db
+      .prepare("UPDATE chat_sessions SET updated_at = ? WHERE id = ?")
+      .run(now, sessionId);
+    const row = this.db
+      .prepare("SELECT * FROM chat_messages WHERE id = ?")
+      .get(id) as unknown as {
+      id: string;
+      session_id: string;
+      role: "user" | "assistant" | "system";
+      content: string;
+      events_json: string;
+      attachments_json: string;
+      status: "streaming" | "done" | "error" | "aborted";
+      created_at: string;
+    };
+    return this.mapChatMessageRow(row);
+  }
+
+  updateChatMessage(
+    messageId: string,
+    patch: {
+      content?: string;
+      events?: ChatToolEvent[];
+      status?: "streaming" | "done" | "error" | "aborted";
+    },
+  ): ChatMessageRecord {
+    const row = this.db
+      .prepare("SELECT * FROM chat_messages WHERE id = ?")
+      .get(messageId) as unknown as
+      | {
+          id: string;
+          session_id: string;
+          role: "user" | "assistant" | "system";
+          content: string;
+          events_json: string;
+          attachments_json: string;
+          status: "streaming" | "done" | "error" | "aborted";
+          created_at: string;
+        }
+      | undefined;
+    if (!row) throw new ApiError(404, "消息不存在");
+    const content = patch.content !== undefined ? patch.content : row.content;
+    const eventsJson =
+      patch.events !== undefined ? JSON.stringify(patch.events) : row.events_json;
+    const status = patch.status ?? row.status;
+    this.db
+      .prepare("UPDATE chat_messages SET content = ?, events_json = ?, status = ? WHERE id = ?")
+      .run(content, eventsJson, status, messageId);
+    this.db
+      .prepare("UPDATE chat_sessions SET updated_at = ? WHERE id = ?")
+      .run(nowIso(), row.session_id);
+    return this.mapChatMessageRow({
+      ...row,
+      content,
+      events_json: eventsJson,
+      status,
+    });
   }
 }

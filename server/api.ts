@@ -51,6 +51,35 @@ import {
 } from "./r2.ts";
 import { getProjectReposStatus, syncProjectRepos } from "./repo-workspace.ts";
 import {
+  addWorkspaceExternalDatasource,
+  browseProjectRepoFiles,
+  createWorkspaceDirectory,
+  createWorkspaceSqliteDatabase,
+  deleteWorkspaceDatabase,
+  deleteWorkspaceFile,
+  detectLocalDbClients,
+  getWorkspaceSummary,
+  inspectWorkspaceSqliteSchema,
+  listWorkspaceDatabases,
+  listWorkspaceFiles,
+  queryWorkspaceSqlite,
+  readProjectRepoFileContent,
+  readWorkspaceFile,
+  readWorkspaceFileDownload,
+  readWorkspaceHandbook,
+  updateWorkspaceExternalDatasource,
+  uploadWorkspaceFile,
+  writeWorkspaceHandbook,
+  writeWorkspaceTextFile,
+} from "./workspace.ts";
+import {
+  abortChatSessionRun,
+  detectLocalClis,
+  getChatRuntimeInfo,
+  isChatSessionRunning,
+  runWebCliChatTurn,
+} from "./codex-chat.ts";
+import {
   runWidgetAgentStream,
   widgetStreamErrorLabel,
   type WidgetChatMessage,
@@ -60,8 +89,13 @@ import {
 import type {
   AuthMode,
   AuthStatusPayload,
+  ChatContextRef,
+  ChatRuntime,
+  ChatSandboxMode,
+  ChatStreamEvent,
   GithubOwnerInfo,
   WidgetConfigPayload,
+  WorkspaceDatabaseKind,
 } from "../app/lib/types.ts";
 
 export interface ApiContextOptions {
@@ -238,11 +272,12 @@ export class ApiRouter {
   }
 
   private async readBinary(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+    const limitMb = Math.max(1, Math.round(maxBytes / (1024 * 1024)));
     const contentLengthHeader = req.headers["content-length"];
     if (contentLengthHeader) {
       const declared = Number(contentLengthHeader);
       if (Number.isNaN(declared) || declared < 0 || declared > maxBytes) {
-        throw new ApiError(413, "文件体积超出限制（最大 5 MB）");
+        throw new ApiError(413, `文件体积超出限制（最大 ${limitMb} MB）`);
       }
     }
     const chunks: Buffer[] = [];
@@ -251,7 +286,7 @@ export class ApiRouter {
       const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
       total += buf.length;
       if (total > maxBytes) {
-        throw new ApiError(413, "文件体积超出限制（最大 5 MB）");
+        throw new ApiError(413, `文件体积超出限制（最大 ${limitMb} MB）`);
       }
       chunks.push(buf);
     }
@@ -308,7 +343,7 @@ export class ApiRouter {
 
     try {
       const method = (req.method ?? "GET").toUpperCase();
-      if (!["GET", "POST", "PATCH", "OPTIONS", "HEAD"].includes(method)) {
+      if (!["GET", "POST", "PATCH", "DELETE", "OPTIONS", "HEAD"].includes(method)) {
         throw new ApiError(405, "Method not allowed");
       }
 
@@ -378,6 +413,24 @@ export class ApiRouter {
       ) {
         const result = await this.handleProjectRepos(method, parts[1], parts[3]);
         this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
+      // Operator Project Space endpoints (files, handbook, databases, repo browser)
+      if (parts.length >= 4 && parts[0] === "projects" && parts[2] === "workspace") {
+        const handled = await this.handleWorkspace(req, res, method, parts[1], parts.slice(3), meta);
+        if (handled !== undefined) {
+          this.sendJson(req, res, 200, handled, meta);
+        }
+        return;
+      }
+
+      // Operator Web Codex / CLI Chat endpoints (sessions + SSE streaming)
+      if (parts.length >= 4 && parts[0] === "projects" && parts[2] === "codex-chat") {
+        const handled = await this.handleCodexChat(req, res, method, parts[1], parts.slice(3), meta);
+        if (handled !== undefined) {
+          this.sendJson(req, res, 200, handled, meta);
+        }
         return;
       }
 
@@ -890,6 +943,495 @@ export class ApiRouter {
       return await syncProjectRepos(this.store.dbPath, projectInfo);
     }
     throw new ApiError(405, "Method not allowed");
+  }
+
+  private getQueryParams(req: IncomingMessage): URLSearchParams {
+    try {
+      return new URL(req.url ?? "/", "http://127.0.0.1").searchParams;
+    } catch {
+      return new URLSearchParams();
+    }
+  }
+
+  private async handleWorkspace(
+    req: IncomingMessage,
+    res: ServerResponse,
+    method: string,
+    projectId: string,
+    subparts: string[],
+    _meta: { corsOrigin?: string },
+  ): Promise<unknown> {
+    const projectInfo = this.store.transaction(false, () =>
+      toAgentProject(this.store.getProjectRow(projectId)),
+    );
+    const query = this.getQueryParams(req);
+
+    // GET /api/projects/:id/workspace/summary
+    if (subparts.length === 1 && subparts[0] === "summary" && method === "GET") {
+      const clis = detectLocalClis();
+      return getWorkspaceSummary(this.store.dbPath, projectInfo, {
+        codex: clis.codex,
+        claude: clis.claude,
+      });
+    }
+
+    // GET /api/projects/:id/workspace/files
+    if (subparts.length === 1 && subparts[0] === "files" && method === "GET") {
+      return listWorkspaceFiles(this.store.dbPath, projectInfo.id);
+    }
+
+    // GET / POST / DELETE /api/projects/:id/workspace/file
+    if (subparts.length === 1 && subparts[0] === "file") {
+      if (method === "GET") {
+        const relPath = query.get("path") ?? "";
+        if (query.get("download") === "1") {
+          const { buffer, name } = readWorkspaceFileDownload(
+            this.store.dbPath,
+            projectInfo.id,
+            relPath,
+          );
+          const safeFilename = name.replace(/["\\\r\n]/g, "_");
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/octet-stream");
+          res.setHeader(
+            "Content-Disposition",
+            `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+          );
+          res.setHeader("Content-Length", String(buffer.length));
+          res.setHeader("Cache-Control", "no-store");
+          res.setHeader("X-Content-Type-Options", "nosniff");
+          res.end(buffer);
+          return undefined;
+        }
+        return { file: readWorkspaceFile(this.store.dbPath, projectInfo.id, relPath) };
+      }
+      if (method === "POST") {
+        const data = await this.readJson(req, 3 * 1024 * 1024);
+        const relPath = typeof data.path === "string" ? data.path : "";
+        if (data.type === "dir") {
+          return { file: createWorkspaceDirectory(this.store.dbPath, projectInfo.id, relPath) };
+        }
+        const content = typeof data.content === "string" ? data.content : "";
+        return { file: writeWorkspaceTextFile(this.store.dbPath, projectInfo.id, relPath, content) };
+      }
+      if (method === "DELETE") {
+        const relPath = query.get("path") ?? "";
+        return deleteWorkspaceFile(this.store.dbPath, projectInfo.id, relPath);
+      }
+      throw new ApiError(405, "Method not allowed");
+    }
+
+    // POST /api/projects/:id/workspace/upload
+    if (subparts.length === 1 && subparts[0] === "upload" && method === "POST") {
+      const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
+      if (contentType.includes("application/json")) {
+        const data = await this.readJson(req, 28 * 1024 * 1024);
+        const relPath = typeof data.path === "string" ? data.path : "";
+        const encoding = data.encoding === "base64" ? "base64" : "utf8";
+        const raw = typeof data.content === "string" ? data.content : "";
+        const buf = Buffer.from(raw, encoding);
+        return { file: uploadWorkspaceFile(this.store.dbPath, projectInfo.id, relPath, buf) };
+      }
+      const headerPath = req.headers["x-file-path"];
+      const relPath =
+        query.get("path") ||
+        (typeof headerPath === "string" ? decodeURIComponent(headerPath) : "");
+      const buf = await this.readBinary(req, 20 * 1024 * 1024);
+      return { file: uploadWorkspaceFile(this.store.dbPath, projectInfo.id, relPath, buf) };
+    }
+
+    // GET / POST / PATCH /api/projects/:id/workspace/handbook
+    if (subparts.length === 1 && subparts[0] === "handbook") {
+      if (method === "GET") {
+        return { handbook: readWorkspaceHandbook(this.store.dbPath, projectInfo.id) };
+      }
+      if (method === "POST" || method === "PATCH") {
+        const data = await this.readJson(req, 128 * 1024);
+        const content = typeof data.content === "string" ? data.content : "";
+        return { handbook: writeWorkspaceHandbook(this.store.dbPath, projectInfo.id, content) };
+      }
+      throw new ApiError(405, "Method not allowed");
+    }
+
+    // GET / POST /api/projects/:id/workspace/databases
+    if (subparts.length === 1 && subparts[0] === "databases") {
+      if (method === "GET") {
+        const refreshClients = query.get("refresh_clients") === "1";
+        return {
+          databases: listWorkspaceDatabases(this.store.dbPath, projectInfo.id),
+          clients: detectLocalDbClients(refreshClients),
+        };
+      }
+      if (method === "POST") {
+        const data = await this.readJson(req, 256 * 1024);
+        if (data.mode === "sqlite_new") {
+          const database = createWorkspaceSqliteDatabase(this.store.dbPath, projectInfo.id, {
+            name: typeof data.name === "string" ? data.name : "",
+            init_sql: typeof data.init_sql === "string" ? data.init_sql : "",
+          });
+          return { database };
+        }
+        const database = addWorkspaceExternalDatasource(this.store.dbPath, projectInfo.id, {
+          name: typeof data.name === "string" ? data.name : "",
+          kind: (typeof data.kind === "string" ? data.kind : "postgres") as WorkspaceDatabaseKind,
+          env_var: typeof data.env_var === "string" ? data.env_var : undefined,
+          connection_url: typeof data.connection_url === "string" ? data.connection_url : "",
+          read_only: data.read_only !== false,
+          notes: typeof data.notes === "string" ? data.notes : "",
+        });
+        return { database };
+      }
+      throw new ApiError(405, "Method not allowed");
+    }
+
+    // PATCH / DELETE /api/projects/:id/workspace/databases/:dbId
+    if (subparts.length === 2 && subparts[0] === "databases") {
+      const dbId = decodeURIComponent(subparts[1]);
+      if (method === "PATCH") {
+        const data = await this.readJson(req, 64 * 1024);
+        const database = updateWorkspaceExternalDatasource(this.store.dbPath, projectInfo.id, dbId, {
+          name: typeof data.name === "string" ? data.name : undefined,
+          kind: typeof data.kind === "string" ? (data.kind as WorkspaceDatabaseKind) : undefined,
+          env_var: typeof data.env_var === "string" ? data.env_var : undefined,
+          connection_url: typeof data.connection_url === "string" ? data.connection_url : undefined,
+          clear_connection_url: data.clear_connection_url === true,
+          read_only: typeof data.read_only === "boolean" ? data.read_only : undefined,
+          notes: typeof data.notes === "string" ? data.notes : undefined,
+        });
+        return { database };
+      }
+      if (method === "DELETE") {
+        return deleteWorkspaceDatabase(this.store.dbPath, projectInfo.id, dbId);
+      }
+      throw new ApiError(405, "Method not allowed");
+    }
+
+    // GET /api/projects/:id/workspace/databases/:dbId/schema
+    if (
+      subparts.length === 3 &&
+      subparts[0] === "databases" &&
+      subparts[2] === "schema" &&
+      method === "GET"
+    ) {
+      const dbId = decodeURIComponent(subparts[1]);
+      return { schema: inspectWorkspaceSqliteSchema(this.store.dbPath, projectInfo.id, dbId) };
+    }
+
+    // POST /api/projects/:id/workspace/databases/:dbId/query
+    if (
+      subparts.length === 3 &&
+      subparts[0] === "databases" &&
+      subparts[2] === "query" &&
+      method === "POST"
+    ) {
+      const dbId = decodeURIComponent(subparts[1]);
+      const data = await this.readJson(req, 32 * 1024);
+      const sql = typeof data.sql === "string" ? data.sql : "";
+      const limit = typeof data.limit === "number" ? data.limit : 100;
+      return { result: queryWorkspaceSqlite(this.store.dbPath, projectInfo.id, dbId, sql, limit) };
+    }
+
+    // GET /api/projects/:id/workspace/repos/files
+    if (
+      subparts.length === 2 &&
+      subparts[0] === "repos" &&
+      subparts[1] === "files" &&
+      method === "GET"
+    ) {
+      const repo = query.get("repo") || undefined;
+      const subpath = query.get("path") || undefined;
+      return browseProjectRepoFiles(this.store.dbPath, projectInfo, repo, subpath);
+    }
+
+    // GET /api/projects/:id/workspace/repos/file
+    if (
+      subparts.length === 2 &&
+      subparts[0] === "repos" &&
+      subparts[1] === "file" &&
+      method === "GET"
+    ) {
+      const repo = query.get("repo") || undefined;
+      const path = query.get("path") ?? "";
+      const startLine = Number(query.get("start_line") ?? "1") || 1;
+      const endLine = Number(query.get("end_line") ?? String(startLine + 149)) || startLine + 149;
+      return {
+        file: readProjectRepoFileContent(this.store.dbPath, projectInfo, {
+          repo,
+          path,
+          start_line: startLine,
+          end_line: endLine,
+        }),
+      };
+    }
+
+    throw new ApiError(404, "Unknown workspace endpoint");
+  }
+
+  private async handleCodexChat(
+    req: IncomingMessage,
+    res: ServerResponse,
+    method: string,
+    projectId: string,
+    subparts: string[],
+    _meta: { corsOrigin?: string },
+  ): Promise<unknown> {
+    const projectInfo = this.store.transaction(false, () =>
+      toAgentProject(this.store.getProjectRow(projectId)),
+    );
+
+    // GET /api/projects/:id/codex-chat/runtime
+    if (subparts.length === 1 && subparts[0] === "runtime" && method === "GET") {
+      return getChatRuntimeInfo(this.store.dbPath, projectInfo.id);
+    }
+
+    // GET / POST /api/projects/:id/codex-chat/sessions
+    if (subparts.length === 1 && subparts[0] === "sessions") {
+      if (method === "GET") {
+        const sessions = this.store.transaction(false, () =>
+          this.store.listChatSessions(projectInfo.id),
+        );
+        return { sessions };
+      }
+      if (method === "POST") {
+        const data = await this.readJson(req, 16 * 1024);
+        const runtimeInfo = getChatRuntimeInfo(this.store.dbPath, projectInfo.id);
+        const runtime: ChatRuntime =
+          data.runtime === "claude"
+            ? "claude"
+            : data.runtime === "codex"
+              ? "codex"
+              : runtimeInfo.project_cli.runtime;
+        const model =
+          typeof data.model === "string"
+            ? data.model
+            : runtime === runtimeInfo.project_cli.runtime
+              ? runtimeInfo.project_cli.model
+              : "";
+        const sandboxMode: ChatSandboxMode =
+          data.sandbox_mode === "workspace-write" ? "workspace-write" : "read-only";
+        const networkAccess = data.network_access === true;
+        const session = this.store.transaction(true, () =>
+          this.store.createChatSession(projectInfo.id, {
+            title: typeof data.title === "string" ? data.title : undefined,
+            runtime,
+            model,
+            sandbox_mode: sandboxMode,
+            network_access: networkAccess,
+          }),
+        );
+        return { session };
+      }
+      throw new ApiError(405, "Method not allowed");
+    }
+
+    // GET / PATCH / DELETE /api/projects/:id/codex-chat/sessions/:sessionId
+    if (subparts.length === 2 && subparts[0] === "sessions") {
+      const sessionId = subparts[1];
+      if (method === "GET") {
+        return this.store.transaction(false, () => {
+          const session = this.store.getChatSession(projectInfo.id, sessionId);
+          const messages = this.store.listChatMessages(projectInfo.id, sessionId);
+          return { session, messages };
+        });
+      }
+      if (method === "PATCH") {
+        const data = await this.readJson(req, 16 * 1024);
+        const session = this.store.transaction(true, () =>
+          this.store.updateChatSession(projectInfo.id, sessionId, {
+            title: typeof data.title === "string" ? data.title : undefined,
+            runtime:
+              data.runtime === "codex" || data.runtime === "claude" ? data.runtime : undefined,
+            model: typeof data.model === "string" ? data.model : undefined,
+            sandbox_mode:
+              data.sandbox_mode === "read-only" || data.sandbox_mode === "workspace-write"
+                ? data.sandbox_mode
+                : undefined,
+            network_access:
+              typeof data.network_access === "boolean" ? data.network_access : undefined,
+          }),
+        );
+        return { session };
+      }
+      if (method === "DELETE") {
+        abortChatSessionRun(sessionId);
+        return this.store.transaction(true, () =>
+          this.store.deleteChatSession(projectInfo.id, sessionId),
+        );
+      }
+      throw new ApiError(405, "Method not allowed");
+    }
+
+    // POST /api/projects/:id/codex-chat/sessions/:sessionId/abort
+    if (
+      subparts.length === 3 &&
+      subparts[0] === "sessions" &&
+      subparts[2] === "abort" &&
+      method === "POST"
+    ) {
+      const sessionId = subparts[1];
+      this.store.transaction(false, () => this.store.getChatSession(projectInfo.id, sessionId));
+      const aborted = abortChatSessionRun(sessionId);
+      return { aborted };
+    }
+
+    // POST /api/projects/:id/codex-chat/sessions/:sessionId/messages (SSE stream)
+    if (
+      subparts.length === 3 &&
+      subparts[0] === "sessions" &&
+      subparts[2] === "messages" &&
+      method === "POST"
+    ) {
+      const sessionId = subparts[1];
+      const data = await this.readJson(req, 64 * 1024);
+      const content = field(data, "content", 16_000);
+      const rawAttachments = Array.isArray(data.attachments) ? data.attachments : [];
+      const attachments: ChatContextRef[] = [];
+      for (const item of rawAttachments.slice(0, 8)) {
+        if (!item || typeof item !== "object") continue;
+        const obj = item as Record<string, unknown>;
+        const kind = obj.kind;
+        if (kind !== "file" && kind !== "repo_file" && kind !== "database" && kind !== "task") {
+          continue;
+        }
+        const label = typeof obj.label === "string" ? obj.label.trim().slice(0, 120) : "";
+        const ref = typeof obj.ref === "string" ? obj.ref.trim().slice(0, 300) : "";
+        const repo = typeof obj.repo === "string" ? obj.repo.trim().slice(0, 120) : undefined;
+        if (!ref) continue;
+        attachments.push({ kind, label: label || ref, ref, ...(repo ? { repo } : {}) });
+      }
+
+      if (isChatSessionRunning(sessionId)) {
+        throw new ApiError(409, "当前会话正在生成回复，请等待完成或先点击停止。");
+      }
+
+      const { session, priorMessages, userMessage, assistantMessage } = this.store.transaction(
+        true,
+        () => {
+          let current = this.store.getChatSession(projectInfo.id, sessionId);
+          const prior = this.store.listChatMessages(projectInfo.id, sessionId);
+          // Auto-title session from the first user message when still using default title.
+          const autoTitle =
+            prior.length === 0 && (!current.title || current.title === "新对话")
+              ? content.replace(/\s+/g, " ").trim().slice(0, 36)
+              : undefined;
+          current = this.store.updateChatSession(projectInfo.id, sessionId, {
+            ...(autoTitle ? { title: autoTitle } : {}),
+            status: "running",
+          });
+          const userMsg = this.store.addChatMessage(sessionId, {
+            role: "user",
+            content,
+            attachments,
+            status: "done",
+          });
+          const assistantMsg = this.store.addChatMessage(sessionId, {
+            role: "assistant",
+            content: "",
+            events: [],
+            status: "streaming",
+          });
+          return {
+            session: current,
+            priorMessages: prior,
+            userMessage: userMsg,
+            assistantMessage: assistantMsg,
+          };
+        },
+      );
+
+      const abortController = new AbortController();
+      res.on("close", () => {
+        if (!res.writableEnded) {
+          abortController.abort();
+        }
+      });
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.flushHeaders?.();
+
+      const writeEvent = (event: ChatStreamEvent) => {
+        if (res.writableEnded || res.destroyed) return;
+        res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      };
+
+      writeEvent({
+        type: "session",
+        session,
+        user_message: userMessage,
+        assistant_message_id: assistantMessage.id,
+      });
+
+      try {
+        const result = await runWebCliChatTurn({
+          dbPath: this.store.dbPath,
+          project: projectInfo,
+          session,
+          prompt: content,
+          attachments,
+          priorMessages,
+          signal: abortController.signal,
+          resolveTask: (taskId) => {
+            try {
+              const row = this.store.getTaskRow(taskId);
+              return row.project_id === projectInfo.id ? toTaskView(row) : null;
+            } catch {
+              return null;
+            }
+          },
+          onEvent: writeEvent,
+        });
+
+        const saved = this.store.transaction(true, () => {
+          const updatedMsg = this.store.updateChatMessage(assistantMessage.id, {
+            content:
+              result.status === "error" && !result.content && result.error
+                ? `执行失败：${result.error}`
+                : result.content,
+            events: result.events,
+            status: result.status,
+          });
+          const updatedSession = this.store.updateChatSession(projectInfo.id, sessionId, {
+            external_session_id: result.externalSessionId,
+            status: result.status === "error" ? "error" : "idle",
+          });
+          return { updatedMsg, updatedSession };
+        });
+
+        if (result.status === "error" && result.error) {
+          writeEvent({ type: "error", error: result.error, message: saved.updatedMsg });
+        } else {
+          writeEvent({
+            type: "done",
+            message: saved.updatedMsg,
+            session: saved.updatedSession,
+          });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : "对话执行异常";
+        const savedMsg = this.store.transaction(true, () => {
+          const msg = this.store.updateChatMessage(assistantMessage.id, {
+            content: `执行异常：${errMsg}`,
+            status: "error",
+          });
+          this.store.updateChatSession(projectInfo.id, sessionId, { status: "error" });
+          return msg;
+        });
+        writeEvent({ type: "error", error: errMsg, message: savedMsg });
+      } finally {
+        if (!res.writableEnded) {
+          res.end();
+        }
+      }
+      return undefined;
+    }
+
+    throw new ApiError(404, "Unknown Codex chat endpoint");
   }
 
   private handleWidgetConfig(

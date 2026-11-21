@@ -365,6 +365,8 @@ export function CommandPaletteModal({
     const items = [
       { id: "new-feedback", label: "新建反馈", icon: "plus", shortcut: "N", run: onNewFeedback },
       { id: "new-project", label: "新建项目", icon: "folder-git-2", run: onNewProject },
+      { id: "view-workspace", label: "打开项目空间（文件、数据库、手册）", icon: "folder-open", run: () => onSelectView("workspace") },
+      { id: "view-chat", label: "打开 Codex 网页对话", icon: "sparkles", run: () => onSelectView("chat") },
       {
         id: "settings",
         label: "打开设置",

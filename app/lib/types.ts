@@ -23,6 +23,8 @@ export type WorkspaceView =
   | "mine"
   | "agents"
   | "review"
+  | "workspace"
+  | "chat"
   | "sources"
   | "settings";
 
@@ -273,3 +275,200 @@ export interface GithubReposPayload {
   more: boolean;
   warnings?: GithubRepoWarning[];
 }
+
+/* ── Project Space (Workspace) ─────────────────────────────────────────── */
+
+export interface WorkspaceFileEntry {
+  path: string;
+  name: string;
+  type: "file" | "dir";
+  size: number;
+  updated_at: string;
+  ext: string;
+  is_text: boolean;
+  is_sqlite: boolean;
+}
+
+export interface WorkspaceFileDetail extends WorkspaceFileEntry {
+  content?: string;
+  truncated?: boolean;
+}
+
+export interface WorkspaceHandbook {
+  content: string;
+  exists: boolean;
+  size: number;
+  updated_at: string | null;
+}
+
+export type WorkspaceDatabaseKind =
+  | "sqlite"
+  | "postgres"
+  | "mysql"
+  | "redis"
+  | "mongodb"
+  | "other";
+
+export interface WorkspaceDbClientInfo {
+  id: "psql" | "mysql" | "sqlite3" | "redis-cli" | "mongosh";
+  label: string;
+  kinds: WorkspaceDatabaseKind[];
+  installed: boolean;
+  bin_path?: string;
+  install_hint: string;
+}
+
+export interface WorkspaceDatabaseEntry {
+  id: string;
+  name: string;
+  kind: WorkspaceDatabaseKind;
+  source: "workspace_file" | "external";
+  file_path?: string;
+  env_var?: string;
+  read_only: boolean;
+  queryable: boolean;
+  size?: number;
+  table_count?: number;
+  host_preview: string;
+  has_connection_url: boolean;
+  notes: string;
+  updated_at: string;
+}
+
+export interface WorkspaceSqliteColumn {
+  name: string;
+  type: string;
+  notnull: boolean;
+  pk: boolean;
+  default_value: string | null;
+}
+
+export interface WorkspaceSqliteTable {
+  name: string;
+  type: "table" | "view";
+  row_count: number;
+  sql: string;
+  columns: WorkspaceSqliteColumn[];
+}
+
+export interface WorkspaceSqliteSchema {
+  database_id: string;
+  file_path: string;
+  tables: WorkspaceSqliteTable[];
+}
+
+export interface WorkspaceQueryResult {
+  columns: string[];
+  rows: Array<Record<string, string | number | boolean | null>>;
+  row_count: number;
+  truncated: boolean;
+  duration_ms: number;
+}
+
+export interface WorkspaceSummary {
+  files_count: number;
+  total_bytes: number;
+  handbook_exists: boolean;
+  handbook_size: number;
+  handbook_updated_at: string | null;
+  databases_count: number;
+  sqlite_count: number;
+  repos_status: ProjectReposSyncStatus;
+  local_clis: {
+    codex: boolean;
+    claude: boolean;
+  };
+}
+
+export interface WorkspaceRepoFileEntry {
+  repo: string;
+  path: string;
+  type: "file" | "dir";
+  size?: number;
+}
+
+export interface WorkspaceRepoFileContent {
+  repo: string;
+  path: string;
+  start_line: number;
+  end_line: number;
+  total_lines: number;
+  content: string;
+  error?: string;
+}
+
+/* ── Web Codex / CLI Chat ──────────────────────────────────────────────── */
+
+export type ChatRuntime = "codex" | "claude";
+export type ChatSandboxMode = "read-only" | "workspace-write";
+
+export interface ChatContextRef {
+  kind: "file" | "repo_file" | "database" | "task";
+  label: string;
+  ref: string;
+  repo?: string;
+}
+
+export interface ChatToolEvent {
+  id: string;
+  tool: string;
+  summary: string;
+  status: "running" | "done" | "error";
+  output?: string;
+  exit_code?: number | null;
+}
+
+export interface ChatSessionRecord {
+  id: string;
+  project_id: string;
+  title: string;
+  runtime: ChatRuntime;
+  model: string;
+  sandbox_mode: ChatSandboxMode;
+  network_access: boolean;
+  external_session_id: string;
+  status: "idle" | "running" | "error";
+  created_at: string;
+  updated_at: string;
+  message_count?: number;
+  last_message_preview?: string;
+}
+
+export interface ChatMessageRecord {
+  id: string;
+  session_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  events: ChatToolEvent[];
+  attachments: ChatContextRef[];
+  status: "streaming" | "done" | "error" | "aborted";
+  created_at: string;
+}
+
+export interface ChatRuntimeInfo {
+  local_clis: {
+    codex: boolean;
+    claude: boolean;
+  };
+  project_cli: {
+    runtime: ChatRuntime;
+    configured: boolean;
+    endpoint: string;
+    model: string;
+  };
+  auth_mode: {
+    codex: "project_key" | "local_cli" | "unavailable";
+    claude: "project_key" | "local_cli" | "unavailable";
+  };
+}
+
+export type ChatStreamEvent =
+  | { type: "session"; session: ChatSessionRecord; user_message: ChatMessageRecord; assistant_message_id: string }
+  | { type: "status"; message: string; external_session_id?: string }
+  | { type: "reasoning"; text: string }
+  | { type: "tool"; event: ChatToolEvent }
+  | { type: "text_delta"; delta: string }
+  | { type: "text_replace"; text: string }
+  | { type: "done"; message: ChatMessageRecord; session: ChatSessionRecord }
+  | { type: "error"; error: string; message?: ChatMessageRecord };
+

@@ -68,6 +68,8 @@ export function Sidebar({
     mine: openTasks.filter((t) => t.owner === "human" && t.status !== "done").length,
     agents: openTasks.filter((t) => t.owner === "agent").length,
     review: openTasks.filter((t) => t.status === "review").length,
+    workspace: 0,
+    chat: 0,
     sources: 0,
     settings: 0,
   };
@@ -99,6 +101,16 @@ export function Sidebar({
       alertCount: waitingCount,
       alertTitle: `${waitingCount} 条待补充或交接异常`,
     },
+  ];
+
+  const spaceItems: Array<{
+    id: WorkspaceView;
+    label: string;
+    icon: string;
+    badge?: string;
+  }> = [
+    { id: "workspace", label: "项目空间", icon: "folder-open" },
+    { id: "chat", label: "Codex 对话", icon: "sparkles", badge: "CLI" },
   ];
 
   const configItems: Array<{
@@ -374,6 +386,55 @@ export function Sidebar({
                       </span>
                     )}
                   </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <div className="px-2.5 pb-1.5 text-[11px] font-medium tracking-wide text-[var(--text-muted)]">
+            空间与对话
+          </div>
+          <div className="space-y-0.5">
+            {spaceItems.map((item) => {
+              const active = view === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => selectView(item.id)}
+                  className={`group relative w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition-all duration-150 cursor-pointer ${
+                    active
+                      ? "bg-[var(--surface-active)] text-[var(--text-primary)] font-medium shadow-2xs"
+                      : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+                  }`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-r-full transition-opacity duration-150 ${
+                      active
+                        ? "bg-indigo-500 opacity-100"
+                        : "bg-[var(--border-strong)] opacity-0 group-hover:opacity-60"
+                    }`}
+                  />
+                  <span className="flex items-center gap-2.5 min-w-0">
+                    <Icon
+                      name={item.icon}
+                      size={15}
+                      className={`transition-colors duration-150 ${
+                        active
+                          ? "text-indigo-500"
+                          : "text-[var(--text-muted)] group-hover:text-[var(--text-primary)]"
+                      }`}
+                    />
+                    <span className="truncate">{item.label}</span>
+                  </span>
+                  {item.badge && (
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 font-medium">
+                      {item.badge}
+                    </span>
+                  )}
                 </button>
               );
             })}

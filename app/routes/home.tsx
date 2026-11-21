@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MetaFunction } from "react-router";
+import { CodexChatView } from "~/components/CodexChatView.tsx";
 import { Icon } from "~/components/Icon.tsx";
 import {
   CommandPaletteModal,
   CreateFeedbackModal,
   CreateProjectModal,
 } from "~/components/ProjectModals.tsx";
+import { ProjectWorkspaceView } from "~/components/ProjectWorkspaceView.tsx";
 import { SettingsView } from "~/components/SettingsView.tsx";
 import { Sidebar } from "~/components/Sidebar.tsx";
 import { TaskDetailDrawer } from "~/components/TaskDetailDrawer.tsx";
@@ -19,6 +21,7 @@ import { Button, ToastProvider, useToast } from "~/components/ui.tsx";
 import { api } from "~/lib/api.ts";
 import type {
   AuthStatusPayload,
+  ChatContextRef,
   GithubConnectionSummary,
   ProjectDetail,
   ProjectSummary,
@@ -43,6 +46,8 @@ const VALID_VIEWS = new Set<WorkspaceView>([
   "mine",
   "agents",
   "review",
+  "workspace",
+  "chat",
   "sources",
   "settings",
 ]);
@@ -86,6 +91,11 @@ function ConsoleWorkspace() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [dark, setDark] = useState(false);
+  const [pendingChatContext, setPendingChatContext] = useState<{
+    ref?: ChatContextRef;
+    prompt?: string;
+    enableNetwork?: boolean;
+  } | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const projectIdRef = useRef<string | null>(null);
@@ -536,7 +546,36 @@ function ConsoleWorkspace() {
         </div>
 
         {/* Main Workspace View */}
-        {view === "settings" || view === "sources" ? (
+        {view === "workspace" ? (
+          <ProjectWorkspaceView
+            project={currentProject}
+            onNewProject={() => setProjectModalOpen(true)}
+            onOpenChatWithContext={(ref, prompt, opts) => {
+              if (ref || prompt || opts?.enableNetwork) {
+                setPendingChatContext({
+                  ref,
+                  prompt,
+                  ...(opts?.enableNetwork ? { enableNetwork: true } : {}),
+                });
+              }
+              changeView("chat");
+            }}
+          />
+        ) : view === "chat" ? (
+          <CodexChatView
+            project={currentProject}
+            tasks={tasks}
+            pendingContext={pendingChatContext}
+            onConsumePendingContext={() => setPendingChatContext(null)}
+            onNewProject={() => setProjectModalOpen(true)}
+            onOpenWorkspace={() => changeView("workspace")}
+            onOpenCliSettings={() => changeView("settings")}
+            onTaskCreated={(task) => {
+              void refreshTasks();
+              void openTaskDetail(task.id, false);
+            }}
+          />
+        ) : view === "settings" || view === "sources" ? (
           <SettingsView
             mode={view}
             project={currentProject}

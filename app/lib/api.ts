@@ -1,5 +1,12 @@
 import type {
   AuthStatusPayload,
+  ChatContextRef,
+  ChatMessageRecord,
+  ChatRuntime,
+  ChatRuntimeInfo,
+  ChatSandboxMode,
+  ChatSessionRecord,
+  ChatStreamEvent,
   CliRun,
   ProjectCliPatch,
   ProjectCliStatus,
@@ -21,6 +28,17 @@ import type {
   TaskPriority,
   TaskRecord,
   TaskStatus,
+  WorkspaceDatabaseEntry,
+  WorkspaceDatabaseKind,
+  WorkspaceDbClientInfo,
+  WorkspaceFileDetail,
+  WorkspaceFileEntry,
+  WorkspaceHandbook,
+  WorkspaceQueryResult,
+  WorkspaceRepoFileContent,
+  WorkspaceRepoFileEntry,
+  WorkspaceSqliteSchema,
+  WorkspaceSummary,
 } from "./types.ts";
 
 export class ClientApiError extends Error {
@@ -37,7 +55,7 @@ export class ClientApiError extends Error {
 
 async function request<T>(
   path: string,
-  method: "GET" | "POST" | "PATCH" = "GET",
+  method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
   body?: unknown,
 ): Promise<T> {
   const response = await fetch(path, {
@@ -259,4 +277,262 @@ export const api = {
       "POST",
       {},
     ),
+
+  /* ── Project Space (Workspace) ──────────────────────────────────────── */
+
+  getWorkspaceSummary: (projectId: string) =>
+    request<WorkspaceSummary>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/summary`,
+    ),
+  listWorkspaceFiles: (projectId: string) =>
+    request<{ files: WorkspaceFileEntry[]; total_bytes: number; file_count: number }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/files`,
+    ),
+  getWorkspaceFile: (projectId: string, path: string) =>
+    request<{ file: WorkspaceFileDetail }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(path)}`,
+    ),
+  saveWorkspaceFile: (projectId: string, path: string, content: string) =>
+    request<{ file: WorkspaceFileDetail }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/file`,
+      "POST",
+      { path, content },
+    ),
+  createWorkspaceDir: (projectId: string, path: string) =>
+    request<{ file: WorkspaceFileEntry }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/file`,
+      "POST",
+      { path, type: "dir" },
+    ),
+  deleteWorkspaceFile: (projectId: string, path: string) =>
+    request<{ deleted: string }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(path)}`,
+      "DELETE",
+    ),
+  uploadWorkspaceFile: async (
+    projectId: string,
+    path: string,
+    file: Blob | File | ArrayBuffer,
+  ): Promise<{ file: WorkspaceFileDetail }> => {
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/upload?path=${encodeURIComponent(path)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file,
+      },
+    );
+    let data: Record<string, unknown> = {};
+    try {
+      data = (await response.json()) as Record<string, unknown>;
+    } catch {
+      data = {};
+    }
+    if (!response.ok) {
+      throw new ClientApiError(
+        response.status,
+        typeof data.error === "string" ? data.error : `上传失败（HTTP ${response.status}）`,
+      );
+    }
+    return data as { file: WorkspaceFileDetail };
+  },
+  getWorkspaceHandbook: (projectId: string) =>
+    request<{ handbook: WorkspaceHandbook }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/handbook`,
+    ),
+  saveWorkspaceHandbook: (projectId: string, content: string) =>
+    request<{ handbook: WorkspaceHandbook }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/handbook`,
+      "POST",
+      { content },
+    ),
+  listWorkspaceDatabases: (projectId: string, refreshClients = false) =>
+    request<{ databases: WorkspaceDatabaseEntry[]; clients: WorkspaceDbClientInfo[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/databases${refreshClients ? "?refresh_clients=1" : ""}`,
+    ),
+  createWorkspaceSqlite: (projectId: string, payload: { name: string; init_sql?: string }) =>
+    request<{ database: WorkspaceDatabaseEntry }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/databases`,
+      "POST",
+      { mode: "sqlite_new", ...payload },
+    ),
+  addWorkspaceDatasource: (
+    projectId: string,
+    payload: {
+      name: string;
+      kind: WorkspaceDatabaseKind;
+      env_var?: string;
+      connection_url?: string;
+      read_only?: boolean;
+      notes?: string;
+    },
+  ) =>
+    request<{ database: WorkspaceDatabaseEntry }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/databases`,
+      "POST",
+      { mode: "external", ...payload },
+    ),
+  updateWorkspaceDatasource: (
+    projectId: string,
+    dbId: string,
+    patch: {
+      name?: string;
+      kind?: WorkspaceDatabaseKind;
+      env_var?: string;
+      connection_url?: string;
+      clear_connection_url?: boolean;
+      read_only?: boolean;
+      notes?: string;
+    },
+  ) =>
+    request<{ database: WorkspaceDatabaseEntry }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/databases/${encodeURIComponent(dbId)}`,
+      "PATCH",
+      patch,
+    ),
+  deleteWorkspaceDatabase: (projectId: string, dbId: string) =>
+    request<{ deleted: string }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/databases/${encodeURIComponent(dbId)}`,
+      "DELETE",
+    ),
+  getWorkspaceDatabaseSchema: (projectId: string, dbId: string) =>
+    request<{ schema: WorkspaceSqliteSchema }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/databases/${encodeURIComponent(dbId)}/schema`,
+    ),
+  queryWorkspaceDatabase: (projectId: string, dbId: string, sql: string, limit = 100) =>
+    request<{ result: WorkspaceQueryResult }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/databases/${encodeURIComponent(dbId)}/query`,
+      "POST",
+      { sql, limit },
+    ),
+  listWorkspaceRepoFiles: (projectId: string, params?: { repo?: string; path?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.repo) qs.set("repo", params.repo);
+    if (params?.path) qs.set("path", params.path);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<{ entries: WorkspaceRepoFileEntry[]; truncated: boolean }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/repos/files${suffix}`,
+    );
+  },
+  getWorkspaceRepoFile: (
+    projectId: string,
+    params: { repo?: string; path: string; start_line?: number; end_line?: number },
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.repo) qs.set("repo", params.repo);
+    qs.set("path", params.path);
+    if (params.start_line) qs.set("start_line", String(params.start_line));
+    if (params.end_line) qs.set("end_line", String(params.end_line));
+    return request<{ file: WorkspaceRepoFileContent }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/repos/file?${qs.toString()}`,
+    );
+  },
+
+  /* ── Web Codex / CLI Chat ───────────────────────────────────────────── */
+
+  getCodexChatRuntime: (projectId: string) =>
+    request<ChatRuntimeInfo>(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/runtime`,
+    ),
+  listCodexChatSessions: (projectId: string) =>
+    request<{ sessions: ChatSessionRecord[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions`,
+    ),
+  createCodexChatSession: (
+    projectId: string,
+    payload?: {
+      title?: string;
+      runtime?: ChatRuntime;
+      model?: string;
+      sandbox_mode?: ChatSandboxMode;
+      network_access?: boolean;
+    },
+  ) =>
+    request<{ session: ChatSessionRecord }>(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions`,
+      "POST",
+      payload ?? {},
+    ),
+  getCodexChatSession: (projectId: string, sessionId: string) =>
+    request<{ session: ChatSessionRecord; messages: ChatMessageRecord[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}`,
+    ),
+  updateCodexChatSession: (
+    projectId: string,
+    sessionId: string,
+    patch: {
+      title?: string;
+      runtime?: ChatRuntime;
+      model?: string;
+      sandbox_mode?: ChatSandboxMode;
+      network_access?: boolean;
+    },
+  ) =>
+    request<{ session: ChatSessionRecord }>(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}`,
+      "PATCH",
+      patch,
+    ),
+  deleteCodexChatSession: (projectId: string, sessionId: string) =>
+    request<{ deleted: string }>(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}`,
+      "DELETE",
+    ),
+  abortCodexChatSession: (projectId: string, sessionId: string) =>
+    request<{ aborted: boolean }>(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}/abort`,
+      "POST",
+      {},
+    ),
+  streamCodexChatMessage: async (
+    projectId: string,
+    sessionId: string,
+    payload: { content: string; attachments?: ChatContextRef[] },
+    onEvent: (event: ChatStreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal,
+      },
+    );
+    if (!response.ok || !response.body) {
+      let msg = `请求失败（HTTP ${response.status}）`;
+      try {
+        const err = (await response.json()) as { error?: string };
+        if (typeof err.error === "string") msg = err.error;
+      } catch {
+        // ignore
+      }
+      throw new ClientApiError(response.status, msg);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split("\n\n");
+      buffer = blocks.pop() ?? "";
+      for (const block of blocks) {
+        const dataLines = block
+          .split(/\r?\n/)
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => l.slice(5).trim());
+        if (!dataLines.length) continue;
+        try {
+          const parsed = JSON.parse(dataLines.join("\n")) as ChatStreamEvent;
+          onEvent(parsed);
+        } catch {
+          // ignore malformed chunk
+        }
+      }
+    }
+  },
 };
