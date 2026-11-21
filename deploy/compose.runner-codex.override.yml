@@ -1,0 +1,14 @@
+# Optional overlay for a Codex supervisor on the same host as Relaydesk Web.
+# Mount the single project directory, never the entire Web data volume.
+services:
+  runner:
+    environment:
+      RELAYDESK_CLI: codex
+      RELAYDESK_CODEX_CREDENTIALS_FILE: /run/relaydesk/codex/credentials.json
+    volumes:
+      - type: bind
+        source: ${CODEX_PROJECT_CONFIG_DIR:?Set the absolute path to this project's credential directory}
+        target: /run/relaydesk/codex
+        read_only: true
+        bind:
+          create_host_path: false

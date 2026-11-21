@@ -27,6 +27,7 @@ else:
 
 MAX_REPLY = 16000
 MAX_INPUT = 512 * 1024
+MAX_CREDENTIALS = 16 * 1024
 HANDBOOK = Path('/run/relaydesk/handbook.md')
 DISPOSABLE = '仅供讨论与验证；临时工作区已丢弃，没有交付代码改动。'
 
@@ -318,10 +319,39 @@ def execute(claim, opts, lease):
     return head, result_body(answer, [opts.key, opts.model_key, opts.github_token, lease.token])
 
 
-def cycle(api, opts):
-    claim = api.post('claim')
+def codex_credentials(path, project):
+    """Read one private credential snapshot. An unusable snapshot clears both keys."""
+    def open_private(name, flags):
+        return os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+
+    try:
+        with open(path, 'rb', opener=open_private) as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)
+                    or info.st_size > MAX_CREDENTIALS):
+                return '', ''
+            raw = stream.read(MAX_CREDENTIALS + 1)
+        if len(raw) > MAX_CREDENTIALS:
+            return '', ''
+        data = json.loads(raw.decode('utf-8'))
+    except (OSError, ValueError, RecursionError):
+        return '', ''
+    if not isinstance(data, dict) or data.get('project_id') != project:
+        return '', ''
+    key = data.get('api_key')
+    token = data.get('github_token', '')
+    if not (isinstance(key, str) and re.fullmatch(r'[!-~]+', key)
+            and isinstance(token, str) and re.fullmatch(r'[!-~]*', token)):
+        return '', ''
+    return key, token
+
+
+def cycle(api, opts, claim_payload=None):
+    claim = api.post('claim', **(claim_payload or {}))
     if claim['run'] is None:
         return False
+    if claim_payload is not None and claim_payload.get('ready') is False:
+        raise HttpFailure(0)
     lease = Lease(api, claim, opts.timeout, opts.interval)
     try:
         lease.check()
@@ -382,16 +412,27 @@ def main():
         return
     opts.project = os.getenv('RELAYDESK_PROJECT')
     opts.key = os.getenv('RELAYDESK_AGENT_KEY')
-    opts.model_key = os.getenv('CODEX_API_KEY' if opts.cli == 'codex' else 'ANTHROPIC_API_KEY')
-    opts.github_token = os.getenv('RELAYDESK_GITHUB_TOKEN', '')
-    if not all((os.getenv('RELAYDESK_URL'), opts.project, opts.key, opts.model_key)):
-        parser.error('Set RELAYDESK_URL, RELAYDESK_PROJECT, RELAYDESK_AGENT_KEY, RELAYDESK_REPO '
-                     'and a dedicated CODEX_API_KEY or ANTHROPIC_API_KEY')
+    # Managed deployments set this to /run/relaydesk/codex/credentials.json.
+    credentials_file = os.getenv('RELAYDESK_CODEX_CREDENTIALS_FILE') if opts.cli == 'codex' else None
+    if not all((os.getenv('RELAYDESK_URL'), opts.project, opts.key)):
+        parser.error('Set RELAYDESK_URL, RELAYDESK_PROJECT and RELAYDESK_AGENT_KEY')
+    if not credentials_file:
+        key_env = 'CODEX_API_KEY' if opts.cli == 'codex' else 'ANTHROPIC_API_KEY'
+        opts.model_key = os.getenv(key_env)
+        opts.github_token = os.getenv('RELAYDESK_GITHUB_TOKEN', '')
+        if not opts.model_key or not opts.model_key.strip():
+            parser.error(f'Set a dedicated {key_env}')
     opts.repo = slug(os.getenv('RELAYDESK_REPO'))
     api = Api(os.environ['RELAYDESK_URL'], opts.project, opts.key)
     while True:
         try:
-            cycle(api, opts)
+            if credentials_file:
+                opts.model_key, opts.github_token = codex_credentials(credentials_file, opts.project)
+            claim_payload = None
+            if opts.cli == 'codex':
+                claim_payload = {'runtime': 'codex', 'managed': bool(credentials_file),
+                                 'ready': bool(opts.model_key)}
+            cycle(api, opts, claim_payload)
         except HttpFailure as exc:
             # Never print bodies, prompts, model output, headers or credentials.
             print(f'CLI worker request stopped: {exc}.', file=sys.stderr, flush=True)

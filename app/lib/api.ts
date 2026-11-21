@@ -5,6 +5,8 @@ import type {
   AiTestResult,
   AuthStatusPayload,
   CliRun,
+  CodexRunnerCredentials,
+  CodexRunnerStatus,
   DeliveryMode,
   DiscussMode,
   DiscussResult,
@@ -103,6 +105,15 @@ export const api = {
       `/api/projects/${encodeURIComponent(id)}`,
       "PATCH",
       payload,
+    ),
+
+  getCodexRunner: (projectId: string) =>
+    request<CodexRunnerStatus>(`/api/projects/${encodeURIComponent(projectId)}/codex-runner`),
+  updateCodexRunner: (projectId: string, credentials: CodexRunnerCredentials) =>
+    request<CodexRunnerStatus>(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-runner`,
+      "PATCH",
+      credentials,
     ),
 
   listTasks: (projectId: string) =>

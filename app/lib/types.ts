@@ -119,6 +119,20 @@ export interface TaskDetailPayload {
 
 export type DiscussMode = "operator" | "pr_audit";
 
+export interface CodexRunnerStatus {
+  configured: boolean;
+  github_configured: boolean;
+  online: boolean;
+  ready: boolean;
+  managed: boolean;
+  last_seen_at: string | null;
+}
+
+export interface CodexRunnerCredentials {
+  api_key?: string;
+  github_token?: string;
+}
+
 export interface CliRun {
   id: string;
   mode: DiscussMode;

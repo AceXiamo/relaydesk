@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AiSettingsCard } from "./AiSettingsCard.tsx";
+import { CodexRunnerSettingsCard } from "./CodexRunnerSettingsCard.tsx";
 import { Icon } from "./Icon.tsx";
 import {
   GithubOwnerAvatar,
@@ -1619,6 +1620,8 @@ export function SettingsView({
                 </Button>
               </div>
             </form>
+
+            <CodexRunnerSettingsCard key={project.id} projectId={project.id} projectName={project.name} />
 
             {/* 4. Local Agent Skill · 1:1 Scheduled Task Onboarding */}
             {snippets && (

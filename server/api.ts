@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ApiError } from "./errors.ts";
+import { codexConfiguration } from "./codex-runner-config.ts";
 import {
   Store,
   field,
@@ -93,6 +94,7 @@ export class ApiRouter {
   readonly wallet: WalletAuth | null;
   readonly bindHost: string;
   private traffic = new Map<string, number[]>();
+  private codexPresence = new Map<string, { seen: number; ready: boolean; managed: boolean; runId?: string }>();
   private assistantInFlight = 0;
   private prescreenInFlight = 0;
   private readonly maxAssistantSlots = 4;
@@ -378,6 +380,18 @@ export class ApiRouter {
         this.checkOperator(req, meta);
       }
 
+      if (parts.length === 3 && parts[0] === "projects" && parts[2] === "codex-runner" && (method === "GET" || method === "PATCH")) {
+        const project = this.store.getProjectRow(parts[1]);
+        const patch = method === "PATCH" ? await this.readJson(req, 16384) : undefined;
+        const config = codexConfiguration(this.store.dbPath, project.id, patch);
+        const presence = this.codexPresence.get(project.id);
+        const online = !!presence && Date.now() - presence.seen < 90_000;
+        this.sendJson(req, res, 200, { ...config, online, managed: presence?.managed ?? false,
+          ready: online && !!presence?.ready && (!presence.managed || config.configured),
+          last_seen_at: presence ? new Date(presence.seen).toISOString() : null }, meta);
+        return;
+      }
+
       // Async operator repo mirror endpoints
       if (
         parts.length === 4 &&
@@ -455,11 +469,19 @@ export class ApiRouter {
         const project = this.store.getProjectRow(parts[1]);
         this.checkBearer(req, project.agent_key);
         if (method === "POST" && parts.length === 5 && parts[4] === "claim") {
-          this.sendJson(req, res, 200, this.store.claimCliRun(project.id) ?? { run: null }, meta);
+          const codex = data.runtime === "codex";
+          if (codex && (typeof data.ready !== "boolean" || typeof data.managed !== "boolean")) {
+            throw new ApiError(400, "Invalid Codex runner status");
+          }
+          const claim = codex && !data.ready ? null : this.store.claimCliRun(project.id);
+          if (codex) this.codexPresence.set(project.id, { seen: Date.now(), managed: data.managed === true, ready: data.ready === true, runId: claim?.run.id });
+          this.sendJson(req, res, 200, claim ?? { run: null }, meta);
           return;
         }
         if (method === "POST" && parts.length === 7 && parts[4] === "runs" && parts[6] === "events") {
           const run = this.store.eventCliRun(project.id, parts[5], data);
+          const presence = this.codexPresence.get(project.id);
+          if (presence?.runId === run.id) presence.seen = Date.now();
           this.sendJson(req, res, 200, { run }, meta);
           return;
         }

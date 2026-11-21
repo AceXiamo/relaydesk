@@ -2,6 +2,7 @@
 import base64
 import contextlib
 import functools
+import io
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
@@ -80,6 +81,106 @@ class CliTest(unittest.TestCase):
                                   {'lease': 'fake', 'event': 'heartbeat'})])
         with self.assertRaises(ValueError):
             worker.Api('http://remote.invalid', 'p', 'testkey')
+
+    def test_managed_polls_reload_credentials_and_gate_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'credentials.json'
+            env = {'RELAYDESK_URL': 'http://localhost', 'RELAYDESK_PROJECT': 'p',
+                   'RELAYDESK_REPO': 'org/example', 'RELAYDESK_AGENT_KEY': 'agent',
+                   'RELAYDESK_CODEX_CREDENTIALS_FILE': str(path), 'CODEX_API_KEY': 'env-key',
+                   'RELAYDESK_GITHUB_TOKEN': 'env-token'}
+            snapshots = [None, {'project_id': 'p', 'api_key': 'first-key', 'github_token': 'file-token'},
+                         {'project_id': 'p', 'api_key': 'second-key'}, None,
+                         {'project_id': 'P', 'api_key': 'misbound-key'}]
+            polls, jobs = [], []
+            queue = Queue()
+            stderr = io.StringIO()
+
+            def post(route, **payload):
+                if route != 'claim':
+                    return queue.post(route, **payload)
+                polls.append(payload)
+                # An incompatible server returns a job on every poll except the first.
+                return {'run': None} if len(polls) == 1 else queue.claim
+
+            def execute(claim, config, lease):
+                jobs.append((config.model_key, config.github_token))
+                return 'a' * 40, 'done'
+
+            def next_poll(interval):
+                if len(polls) == len(snapshots):
+                    raise StopIteration
+                snapshot = snapshots[len(polls)]
+                if snapshot is None:
+                    path.unlink()
+                else:
+                    staging = path.with_suffix('.new')
+                    staging.write_text(json.dumps(snapshot))
+                    staging.chmod(0o600)
+                    staging.replace(path)
+
+            with patch.dict(os.environ, env, clear=True), patch.object(sys, 'argv', ['runner']), \
+                    patch.object(worker.os, 'umask'), patch.object(worker.sandbox, 'enable_supervisor'), \
+                    patch.object(worker, 'Api') as api, patch.object(worker, 'execute', execute), \
+                    patch.object(worker.time, 'sleep', next_poll), contextlib.redirect_stderr(stderr):
+                api.return_value.post.side_effect = post
+                with self.assertRaises(StopIteration):
+                    worker.main()
+            self.assertEqual(polls, [{'runtime': 'codex', 'managed': True, 'ready': ready}
+                                     for ready in (False, True, True, False, False)])
+            self.assertEqual(jobs, [('first-key', 'file-token'), ('second-key', '')])
+            self.assertEqual([e['event'] for e in queue.events], ['heartbeat', 'finish'] * 2)
+            for secret in ('env-key', 'env-token', 'first-key', 'second-key', 'file-token', 'misbound-key'):
+                self.assertNotIn(secret, stderr.getvalue() + str(polls) + str(queue.events))
+
+    def test_credentials_reject_invalid_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'credentials.json'
+            valid = {'project_id': 'p', 'api_key': 'key', 'github_token': 'token'}
+            for raw in (b'not json', b'\xff', b'[' * 2000 + b']' * 2000,
+                        json.dumps(valid).encode() + b' ' * worker.MAX_CREDENTIALS,
+                        *(json.dumps(obj).encode() for obj in (
+                            [], {}, {'api_key': 'key'}, dict(valid, project_id=1),
+                            dict(valid, project_id='p '), dict(valid, api_key=None),
+                            dict(valid, api_key=''), dict(valid, api_key='  '),
+                            dict(valid, api_key='key\x00'), dict(valid, github_token=42),
+                            dict(valid, github_token='first\r\nsecond')))):
+                path.write_bytes(raw)
+                path.chmod(0o600)
+                self.assertEqual(worker.codex_credentials(path, 'p'), ('', ''))
+            path.write_text(json.dumps(valid))
+            for mode in (0o600, 0o400):
+                path.chmod(mode)
+                self.assertEqual(worker.codex_credentials(path, 'p'), ('key', 'token'))
+            link = path.with_suffix('.link')
+            link.symlink_to(path)
+            fifo = path.with_suffix('.fifo')
+            os.mkfifo(fifo, 0o600)
+            for unsafe in (link, fifo, Path(tmp)):
+                self.assertEqual(worker.codex_credentials(unsafe, 'p'), ('', ''))
+            for mode in (0o640, 0o604, 0o666):
+                path.chmod(mode)
+                self.assertEqual(worker.codex_credentials(path, 'p'), ('', ''))
+
+    def test_env_only_codex_and_claude_claims(self):
+        env = {'RELAYDESK_URL': 'http://localhost', 'RELAYDESK_PROJECT': 'p',
+               'RELAYDESK_REPO': 'org/example', 'RELAYDESK_AGENT_KEY': 'agent',
+               'CODEX_API_KEY': 'codex-key', 'ANTHROPIC_API_KEY': 'claude-key',
+               'RELAYDESK_GITHUB_TOKEN': 'env-token'}
+        for cli in ('codex', 'claude'):
+            if cli == 'claude':
+                env['RELAYDESK_CODEX_CREDENTIALS_FILE'] = '/absent'
+            with self.subTest(cli=cli), patch.dict(os.environ, env, clear=True), \
+                    patch.object(sys, 'argv', ['runner', '--once', '--cli', cli]), \
+                    patch.object(worker.os, 'umask'), patch.object(worker.sandbox, 'enable_supervisor'), \
+                    patch.object(worker, 'Api') as api, patch.object(worker, 'execute') as execute:
+                api.return_value.post.return_value = Queue().claim
+                execute.return_value = 'a' * 40, 'done'
+                worker.main()
+                self.assertEqual(api.return_value.post.call_args_list[0].kwargs,
+                                 {'runtime': 'codex', 'managed': False, 'ready': True} if cli == 'codex' else {})
+                config = execute.call_args.args[1]
+                self.assertEqual((config.model_key, config.github_token), (cli + '-key', 'env-token'))
 
     def test_binding_and_strict_delivery_ref(self):
         for ref in ('other/repo#1', 'HEAD', 'https://github.com.evil/org/example/pull/3',

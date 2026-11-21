@@ -192,6 +192,44 @@ describe("Relaydesk Core Queue & Agent API", () => {
   });
 });
 
+describe("Codex project credentials", () => {
+  it("keeps secrets operator-write-only and distinguishes an idle runner from one ready to claim", async () => {
+    const { dbPath, dir } = makeTempDb();
+    const srv = await startApiServer({ dbPath, adminToken: "admin-fixture" });
+    const operator = { Authorization: "Bearer admin-fixture" };
+    const create = async (name: string) => (await jsonReq(`${srv.url}/api/projects`, "POST", { name, repo: "example/fixture", cli_enabled: true }, operator)).json.project as Record<string, string>;
+    const p = await create("first");
+    const other = await create("second");
+    const prefix = `${srv.url}/api/projects/${p.id}`;
+    const route = `${prefix}/codex-runner`;
+    const agent = { Authorization: `Bearer ${p.agent_key}` };
+    const claim = (ready: boolean) => jsonReq(`${prefix}/agent/cli/claim`, "POST", { runtime: "codex", managed: true, ready }, agent);
+    const initial = { configured: false, github_configured: false, online: false, ready: false, managed: false, last_seen_at: null };
+    expect((await jsonReq(route, "GET", undefined, operator)).json).toEqual(initial);
+    for (const token of [p.agent_key, p.intake_key, p.bot_key]) {
+      const h = { Authorization: `Bearer ${token}` };
+      expect((await jsonReq(route, "GET", undefined, h)).status).toBe(401);
+      expect((await jsonReq(route, "PATCH", { api_key: "invalid" }, h)).status).toBe(401);
+    }
+    expect((await jsonReq(route, "PATCH", { api_key: "no\nnewlines" }, operator)).status).toBe(400);
+    expect((await jsonReq(route, "PATCH", { api_key: "sk-test-fixture", github_token: "github-test-fixture" }, operator)).json)
+      .toEqual({ ...initial, configured: true, github_configured: true });
+    const file = join(dir, "codex-runners", p.id, "credentials.json");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(join(dir, "codex-runners", p.id)).mode & 0o777).toBe(0o700);
+    const task = (await jsonReq(`${prefix}/tasks`, "POST", { title: "Fixture", body: "Fixture", skip_prescreen: true }, operator)).json.task as {id:string};
+    expect((await jsonReq(`${srv.url}/api/tasks/${task.id}/discuss`, "POST", { body: "question" }, operator)).status).toBe(202);
+    expect((await claim(false)).json).toEqual({ run: null });
+    expect((await jsonReq(route, "GET", undefined, operator)).json).toMatchObject({ online: true, ready: false, managed: true });
+    const accepted = await claim(true);
+    expect(accepted.json.run).toMatchObject({ status: "running" });
+    expect(JSON.stringify(accepted.json)).not.toMatch(/sk-test-fixture|github-test-fixture/);
+    expect((await jsonReq(route, "GET", undefined, operator)).json.ready).toBe(true);
+    expect((await jsonReq(route, "PATCH", { api_key: "" }, operator)).json).toMatchObject({ configured: false, github_configured: true, ready: false });
+    expect((await jsonReq(`${srv.url}/api/projects/${other.id}/codex-runner`, "GET", undefined, operator)).json).toEqual(initial);
+  });
+});
+
 describe("Project CLI dispatch", () => {
   it("keeps CLI jobs operator-only and returns a leased result to the originating thread", async () => {
     const srv = await startApiServer({ adminToken: "operator-test" });
