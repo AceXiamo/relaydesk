@@ -1,4 +1,10 @@
-import type { ChatReasoningEffort, ModelCatalogItem } from "./types.ts";
+import type {
+  BridgeAgentSummary,
+  ChatReasoningEffort,
+  ChatRuntime,
+  ChatRuntimeInfo,
+  ModelCatalogItem,
+} from "./types.ts";
 
 export const validCatalogId = (value: unknown): value is string => typeof value === "string" &&
   value.length > 0 && value.length <= 160 && !value.startsWith("-") && !/[^!-~]/.test(value);
@@ -62,3 +68,143 @@ export const builtinModels: ModelCatalogItem[] = [
     effort_levels: ["off", "low", "medium", "high"], default_effort: "medium",
   },
 ];
+
+/**
+ * Resolve which local bridge agent (if any) will handle execution for the given target and runtime.
+ * Returns null when execution targets Relaydesk Cloud.
+ */
+export function resolveActiveLocalAgent(
+  runtimeInfo: ChatRuntimeInfo | null | undefined,
+  projectId: string | undefined,
+  executionTarget: string,
+  runtime: ChatRuntime,
+): BridgeAgentSummary | null {
+  const agents = runtimeInfo?.agents ?? [];
+  if (executionTarget === "cloud") return null;
+  if (executionTarget.startsWith("local:")) {
+    const id = executionTarget.slice("local:".length);
+    return agents.find((a) => a.id === id) ?? null;
+  }
+  const priority = runtimeInfo?.effective_priority ?? agents.map((a) => `local:${a.id}`);
+  for (let i = 0; i < priority.length; i += 1) {
+    const key = priority[i];
+    if (key === "cloud") {
+      if (runtimeInfo?.local_clis[runtime]) return null;
+      if (i === 0 && runtimeInfo?.routing?.auto_fallback === false) return null;
+      continue;
+    }
+    if (!key.startsWith("local:")) continue;
+    const id = key.slice("local:".length);
+    const agent = agents.find((a) => a.id === id);
+    const binding = projectId ? agent?.bindings.find((b) => b.project_id === projectId) : undefined;
+    const eligible = Boolean(
+      agent?.online &&
+        (!projectId || (binding?.enabled && binding?.path_ok)) &&
+        agent?.runtimes[runtime]?.available,
+    );
+    if (eligible && agent) return agent;
+    if (i === 0 && runtimeInfo?.routing?.auto_fallback === false) return null;
+  }
+  return null;
+}
+
+/**
+ * Resolve the default model ID strictly scoped to the active execution target.
+ * Local agent targets never inherit cloud project_cli.model.
+ */
+export function resolveDefaultModelForTarget(
+  runtime: ChatRuntime,
+  activeLocalAgent: BridgeAgentSummary | null,
+  projectCli: ChatRuntimeInfo["project_cli"] | undefined,
+): string {
+  if (activeLocalAgent) {
+    return (
+      activeLocalAgent.runtimes[runtime]?.default_model ||
+      activeLocalAgent.models.find((item) => item.runtime === runtime && item.is_default)?.id ||
+      ""
+    );
+  }
+  if (projectCli?.runtime === runtime && projectCli.model) {
+    return projectCli.model;
+  }
+  return projectCli?.models?.find((item) => item.runtime === runtime && item.is_default)?.id || "";
+}
+
+/**
+ * Build the selectable model catalog for a runtime and execution target.
+ * - Local agent target: strictly mirrors models reported by that agent (plus its runtime default_model),
+ *   without merging cloud project_cli models or unrelated built-in models.
+ * - Cloud target: uses project_cli models, project default model, and built-in fallback models.
+ */
+export function resolveCatalogForTarget(options: {
+  runtime: ChatRuntime;
+  activeLocalAgent: BridgeAgentSummary | null;
+  projectCli: ChatRuntimeInfo["project_cli"] | undefined;
+  selectedModel?: string;
+  includeSelectedFallback?: boolean;
+}): ModelCatalogItem[] {
+  const {
+    runtime,
+    activeLocalAgent,
+    projectCli,
+    selectedModel = "",
+    includeSelectedFallback = true,
+  } = options;
+  const suggestions = builtinModels.filter((item) => item.runtime === runtime);
+  const enrich = (item: ModelCatalogItem): ModelCatalogItem => ({
+    ...suggestions.find((s) => s.id === item.id),
+    ...item,
+  });
+  const catalog = new Map<string, ModelCatalogItem>();
+
+  if (activeLocalAgent) {
+    for (const item of activeLocalAgent.models) {
+      if (item.runtime === runtime) {
+        catalog.set(item.id, enrich(item));
+      }
+    }
+    const agentDefault = activeLocalAgent.runtimes[runtime]?.default_model;
+    if (agentDefault && !catalog.has(agentDefault)) {
+      catalog.set(
+        agentDefault,
+        suggestions.find((s) => s.id === agentDefault) ?? {
+          id: agentDefault,
+          runtime,
+          is_default: true,
+        },
+      );
+    }
+    if (includeSelectedFallback && selectedModel && !catalog.has(selectedModel)) {
+      catalog.set(
+        selectedModel,
+        suggestions.find((s) => s.id === selectedModel) ?? { id: selectedModel, runtime },
+      );
+    }
+    return [...catalog.values()];
+  }
+
+  for (const item of projectCli?.models ?? []) {
+    if (item.runtime === runtime && !catalog.has(item.id)) {
+      catalog.set(item.id, enrich(item));
+    }
+  }
+  const projectDefault = projectCli?.runtime === runtime ? projectCli.model : "";
+  if (projectDefault && !catalog.has(projectDefault)) {
+    catalog.set(
+      projectDefault,
+      suggestions.find((s) => s.id === projectDefault) ?? { id: projectDefault, runtime },
+    );
+  }
+  if (includeSelectedFallback && selectedModel && !catalog.has(selectedModel)) {
+    catalog.set(
+      selectedModel,
+      suggestions.find((s) => s.id === selectedModel) ?? { id: selectedModel, runtime },
+    );
+  }
+  for (const item of suggestions) {
+    if (!catalog.has(item.id)) {
+      catalog.set(item.id, item);
+    }
+  }
+  return [...catalog.values()];
+}

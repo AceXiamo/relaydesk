@@ -13,7 +13,12 @@ import {
 import { ApiError } from "./errors.ts";
 import { projectCliConfiguration } from "./project-cli-config.ts";
 import { discoverProjectCliModels } from "./project-model-discovery.ts";
-import { effortLabels, validCatalogId } from "../app/lib/model-catalog.ts";
+import {
+  effortLabels,
+  resolveActiveLocalAgent,
+  resolveDefaultModelForTarget,
+  validCatalogId,
+} from "../app/lib/model-catalog.ts";
 import { projectPublicAiEnabled } from "./project-ai-provider.ts";
 import {
   Store,
@@ -1793,8 +1798,25 @@ export class ApiRouter {
         const runtimeInfo = getChatRuntimeInfo(this.store.dbPath, projectInfo.id);
         const selection = chatModelSelection(data);
         const runtime = selection.runtime ?? runtimeInfo.project_cli.runtime;
-        const local = selection.execution_target?.startsWith("local:");
-        const model = selection.model ?? (!local && runtime === runtimeInfo.project_cli.runtime ? runtimeInfo.project_cli.model : "");
+        const target = selection.execution_target ?? "auto";
+        const routing = this.store.getProjectExecutionRouting(projectInfo.id);
+        const agents = this.store.listBridgeAgents().map((a) => this.describeBridgeAgent(a));
+        const activeLocalAgent = resolveActiveLocalAgent(
+          {
+            ...runtimeInfo,
+            routing,
+            effective_priority: normalizeExecutionPriority(routing, agents),
+            agents,
+          },
+          projectInfo.id,
+          target,
+          runtime,
+        );
+        const model =
+          selection.model ??
+          (activeLocalAgent
+            ? ""
+            : resolveDefaultModelForTarget(runtime, null, runtimeInfo.project_cli));
         const sandboxMode: ChatSandboxMode =
           data.sandbox_mode === "workspace-write" ? "workspace-write" : "read-only";
         const networkAccess = data.network_access === true;

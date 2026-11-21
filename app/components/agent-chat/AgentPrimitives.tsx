@@ -1,5 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { builtinModels, effortLabels, validCatalogId } from "~/lib/model-catalog.ts";
+import {
+  effortLabels,
+  resolveActiveLocalAgent,
+  resolveCatalogForTarget,
+  resolveDefaultModelForTarget,
+  validCatalogId,
+} from "~/lib/model-catalog.ts";
 import type {
   ChatContextRef,
   ChatReasoningEffort,
@@ -644,154 +650,29 @@ const effortOptionMeta: Record<
 };
 const contextSize = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
 
-function resolveActiveLocalAgent(
-  runtimeInfo: ChatRuntimeInfo | null,
-  projectId: string | undefined,
-  executionTarget: string,
-  runtime: ChatRuntime,
-) {
-  const agents = runtimeInfo?.agents ?? [];
-  if (executionTarget === "cloud") return null;
-  if (executionTarget.startsWith("local:")) {
-    const id = executionTarget.slice("local:".length);
-    return agents.find((a) => a.id === id) ?? null;
-  }
-  const priority = runtimeInfo?.effective_priority ?? agents.map((a) => `local:${a.id}`);
-  for (const key of priority) {
-    if (key === "cloud") return null;
-    if (!key.startsWith("local:")) continue;
-    const id = key.slice("local:".length);
-    const agent = agents.find((a) => a.id === id);
-    if (!agent?.online) continue;
-    const binding = projectId ? agent.bindings.find((b) => b.project_id === projectId) : undefined;
-    if (projectId && (!binding || !binding.enabled || !binding.path_ok)) continue;
-    if (!agent.runtimes[runtime]?.available) continue;
-    return agent;
-  }
-  return null;
-}
-
-function catalogForRuntime(
-  runtime: ChatRuntime,
-  settings: ChatRuntimeInfo["project_cli"] | undefined,
-  selectedModel: string,
-  extraModels: ReadonlyArray<ModelCatalogItem> = [],
-): ModelCatalogItem[] {
-  const suggestions = builtinModels.filter((item) => item.runtime === runtime);
-  const catalog = new Map<string, ModelCatalogItem>();
-  for (const item of extraModels) {
-    if (item.runtime === runtime)
-      catalog.set(item.id, { ...suggestions.find((s) => s.id === item.id), ...item });
-  }
-  for (const item of settings?.models ?? []) {
-    if (item.runtime === runtime && !catalog.has(item.id))
-      catalog.set(item.id, { ...suggestions.find((s) => s.id === item.id), ...item });
-  }
-  const projectDefault = settings?.runtime === runtime ? settings.model : "";
-  for (const id of [projectDefault, selectedModel]) {
-    if (id && !catalog.has(id)) catalog.set(id, suggestions.find((s) => s.id === id) ?? { id, runtime });
-  }
-  for (const item of suggestions) {
-    if (!catalog.has(item.id)) catalog.set(item.id, item);
-  }
-  return [...catalog.values()];
-}
-
-interface ModelControlsProps {
+interface ExecutionTargetSelectProps {
   projectId?: string;
   runtime: ChatRuntime;
   runtimeInfo: ChatRuntimeInfo | null;
-  model: string;
-  effort: ChatReasoningEffort;
-  executionTarget?: string;
-  onChangeModel: (runtime: ChatRuntime, model: string, effort: ChatReasoningEffort) => void;
-  onChangeEffort: (effort: ChatReasoningEffort) => void;
-  onChangeExecutionTarget?: (target: string) => void;
+  executionTarget: string;
+  disabled: boolean;
+  onChangeExecutionTarget: (target: string) => void;
+  onOpenChange?: () => void;
 }
 
-function ModelControls({
+function ExecutionTargetSelect({
   projectId,
   runtime,
   runtimeInfo,
-  model,
-  effort,
-  executionTarget = "auto",
-  onChangeModel,
-  onChangeEffort,
-  onChangeExecutionTarget,
-  open,
-  setOpen,
+  executionTarget,
   disabled,
-  onOpenCliSettings,
-}: ModelControlsProps & {
-  open: boolean;
-  setOpen: (open: boolean) => void;
-  disabled: boolean;
-  onOpenCliSettings: () => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [index, setIndex] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const listId = useId();
-  const settings = runtimeInfo?.project_cli;
+  onChangeExecutionTarget,
+  onOpenChange,
+}: ExecutionTargetSelectProps) {
   const activeLocalAgent = useMemo(
     () => resolveActiveLocalAgent(runtimeInfo, projectId, executionTarget, runtime),
     [runtimeInfo, projectId, executionTarget, runtime],
   );
-  const catalog = useMemo(
-    () => catalogForRuntime(runtime, settings, model, activeLocalAgent?.models ?? []),
-    [runtime, settings, model, activeLocalAgent],
-  );
-  const current = catalog.find((item) => item.id === model);
-  const levels = current?.effort_levels ?? effortLevels;
-  const adjustable = current?.supports_effort !== false && levels.length > 0;
-  const displayedEffort =
-    adjustable && (effort === "default" || levels.includes(effort)) ? effort : "default";
-  const configuredModel =
-    activeLocalAgent?.runtimes[runtime]?.default_model ||
-    (settings?.runtime === runtime ? settings.model : "");
-  const search = query.trim();
-  const matches = catalog.filter((item) =>
-    `${item.id} ${item.label ?? ""}`.toLowerCase().includes(search.toLowerCase()),
-  );
-  const exact = matches.find((item) => item.id === search);
-  const options: ModelCatalogItem[] = validCatalogId(search)
-    ? [exact ?? { runtime, id: search, label: "使用自定义模型" }, ...matches.filter((item) => item !== exact)]
-    : matches;
-  if (!search && !configuredModel) options.push({ runtime, id: "", label: "使用 CLI 默认模型" });
-  const selectedIndex = Math.min(index, options.length - 1);
-  const ready = activeLocalAgent
-    ? Boolean(activeLocalAgent.online && activeLocalAgent.runtimes[runtime]?.available)
-    : Boolean(runtimeInfo && runtimeInfo.auth_mode[runtime] !== "unavailable");
-
-  const effortOptions = useMemo<Array<SelectOption<ChatReasoningEffort>>>(() => {
-    const projectDefault =
-      settings?.runtime === runtime && settings.default_effort && settings.default_effort !== "default"
-        ? effortLabels[settings.default_effort]
-        : undefined;
-    const list: Array<SelectOption<ChatReasoningEffort>> = [
-      {
-        value: "default",
-        label: effortLabels.default,
-        triggerLabel: effortLabels.default,
-        description: effortOptionMeta.default.description,
-        badge: projectDefault ? `项目：${projectDefault}` : undefined,
-        dotClassName: effortOptionMeta.default.dotClassName,
-      },
-    ];
-    for (const level of levels) {
-      list.push({
-        value: level,
-        label: effortLabels[level],
-        triggerLabel: effortLabels[level],
-        description: effortOptionMeta[level].description,
-        badge: effortOptionMeta[level].badge,
-        dotClassName: effortOptionMeta[level].dotClassName,
-      });
-    }
-    return list;
-  }, [levels, runtime, settings]);
 
   const targetOptions = useMemo<Array<SelectOption<string>>>(() => {
     const agents = runtimeInfo?.agents ?? [];
@@ -844,6 +725,154 @@ function ModelControls({
     return list;
   }, [runtimeInfo, projectId, runtime, activeLocalAgent]);
 
+  return (
+    <Select
+      value={executionTarget}
+      onChange={(next) => {
+        onOpenChange?.();
+        onChangeExecutionTarget(next);
+      }}
+      options={targetOptions}
+      disabled={disabled}
+      size="xs"
+      variant="default"
+      minMenuWidth={256}
+      maxMenuWidth={320}
+      leadingIcon={
+        executionTarget === "cloud"
+          ? "cloud"
+          : executionTarget.startsWith("local:")
+            ? "monitor"
+            : "sparkles"
+      }
+      leadingIconClassName={
+        activeLocalAgent ? "text-emerald-500" : "text-[var(--text-muted)]"
+      }
+      ariaLabel="执行节点"
+      className="!bg-[var(--surface-card)]/90 max-w-[200px] sm:max-w-[260px]"
+    />
+  );
+}
+
+interface ModelControlsProps {
+  projectId?: string;
+  runtime: ChatRuntime;
+  runtimeInfo: ChatRuntimeInfo | null;
+  model: string;
+  effort: ChatReasoningEffort;
+  executionTarget?: string;
+  onChangeModel: (runtime: ChatRuntime, model: string, effort: ChatReasoningEffort) => void;
+  onChangeEffort: (effort: ChatReasoningEffort) => void;
+  onChangeExecutionTarget?: (target: string) => void;
+}
+
+function ModelControls({
+  projectId,
+  runtime,
+  runtimeInfo,
+  model,
+  effort,
+  executionTarget = "auto",
+  onChangeModel,
+  onChangeEffort,
+  open,
+  setOpen,
+  disabled,
+  onOpenCliSettings,
+}: ModelControlsProps & {
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  disabled: boolean;
+  onOpenCliSettings: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [index, setIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listId = useId();
+  const settings = runtimeInfo?.project_cli;
+  const activeLocalAgent = useMemo(
+    () => resolveActiveLocalAgent(runtimeInfo, projectId, executionTarget, runtime),
+    [runtimeInfo, projectId, executionTarget, runtime],
+  );
+  const strictTargetCatalog = useMemo(
+    () =>
+      resolveCatalogForTarget({
+        runtime,
+        activeLocalAgent,
+        projectCli: settings,
+        includeSelectedFallback: false,
+      }),
+    [runtime, activeLocalAgent, settings],
+  );
+  const catalog = useMemo(
+    () =>
+      resolveCatalogForTarget({
+        runtime,
+        activeLocalAgent,
+        projectCli: settings,
+        selectedModel: model,
+        includeSelectedFallback: true,
+      }),
+    [runtime, activeLocalAgent, settings, model],
+  );
+  const strictCatalogIds = useMemo(
+    () => new Set(strictTargetCatalog.map((item) => item.id)),
+    [strictTargetCatalog],
+  );
+  const current = catalog.find((item) => item.id === model);
+  const levels = current?.effort_levels ?? effortLevels;
+  const adjustable = current?.supports_effort !== false && levels.length > 0;
+  const displayedEffort =
+    adjustable && (effort === "default" || levels.includes(effort)) ? effort : "default";
+  const configuredModel = resolveDefaultModelForTarget(runtime, activeLocalAgent, settings);
+  const search = query.trim();
+  const matches = catalog.filter((item) =>
+    `${item.id} ${item.label ?? ""}`.toLowerCase().includes(search.toLowerCase()),
+  );
+  const exact = matches.find((item) => item.id === search);
+  const options: ModelCatalogItem[] = validCatalogId(search)
+    ? [exact ?? { runtime, id: search, label: "使用自定义模型" }, ...matches.filter((item) => item !== exact)]
+    : matches;
+  if (!search && !configuredModel) options.push({ runtime, id: "", label: "使用 CLI 默认模型" });
+  const selectedIndex = Math.min(index, options.length - 1);
+  const ready = activeLocalAgent
+    ? Boolean(activeLocalAgent.online && activeLocalAgent.runtimes[runtime]?.available)
+    : Boolean(runtimeInfo && runtimeInfo.auth_mode[runtime] !== "unavailable");
+
+  const effortOptions = useMemo<Array<SelectOption<ChatReasoningEffort>>>(() => {
+    const targetDefaultEffort = activeLocalAgent
+      ? activeLocalAgent.runtimes[runtime]?.default_effort
+      : settings?.runtime === runtime
+        ? settings.default_effort
+        : undefined;
+    const defaultBadge =
+      targetDefaultEffort && targetDefaultEffort !== "default"
+        ? `${activeLocalAgent ? "节点" : "项目"}：${effortLabels[targetDefaultEffort]}`
+        : undefined;
+    const list: Array<SelectOption<ChatReasoningEffort>> = [
+      {
+        value: "default",
+        label: effortLabels.default,
+        triggerLabel: effortLabels.default,
+        description: effortOptionMeta.default.description,
+        badge: defaultBadge,
+        dotClassName: effortOptionMeta.default.dotClassName,
+      },
+    ];
+    for (const level of levels) {
+      list.push({
+        value: level,
+        label: effortLabels[level],
+        triggerLabel: effortLabels[level],
+        description: effortOptionMeta[level].description,
+        badge: effortOptionMeta[level].badge,
+        dotClassName: effortOptionMeta[level].dotClassName,
+      });
+    }
+    return list;
+  }, [levels, runtime, settings, activeLocalAgent]);
+
   useEffect(() => {
     if (open) inputRef.current?.focus();
   }, [open, runtime]);
@@ -854,9 +883,17 @@ function ModelControls({
   };
   const choose = (rt: ChatRuntime, id: string, closeAfter: boolean) => {
     const targetAgent = resolveActiveLocalAgent(runtimeInfo, projectId, executionTarget, rt);
-    const entry = (rt === runtime ? catalog : catalogForRuntime(rt, settings, id, targetAgent?.models ?? [])).find(
-      (item) => item.id === id,
-    );
+    const nextCatalog =
+      rt === runtime
+        ? catalog
+        : resolveCatalogForTarget({
+            runtime: rt,
+            activeLocalAgent: targetAgent,
+            projectCli: settings,
+            selectedModel: id,
+            includeSelectedFallback: true,
+          });
+    const entry = nextCatalog.find((item) => item.id === id);
     const nextEffort =
       entry?.supports_effort === false ||
       (effort !== "default" && entry?.effort_levels && !entry.effort_levels.includes(effort))
@@ -868,7 +905,7 @@ function ModelControls({
     if (closeAfter) close();
   };
   const pillClass =
-    "inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] disabled:opacity-50 cursor-pointer";
+    "inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] disabled:opacity-50 cursor-pointer min-w-0";
   return (
     <div
       className="contents"
@@ -882,27 +919,6 @@ function ModelControls({
         }
       }}
     >
-      {onChangeExecutionTarget && (
-        <Select
-          value={executionTarget}
-          onChange={(next) => {
-            setOpen(false);
-            onChangeExecutionTarget(next);
-          }}
-          options={targetOptions}
-          disabled={disabled}
-          size="xs"
-          variant="default"
-          minMenuWidth={256}
-          maxMenuWidth={320}
-          leadingIcon={executionTarget === "cloud" ? "cloud" : executionTarget.startsWith("local:") ? "monitor" : "sparkles"}
-          leadingIconClassName={
-            activeLocalAgent ? "text-emerald-500" : "text-[var(--text-muted)]"
-          }
-          ariaLabel="执行节点"
-          className="!border-transparent !bg-transparent hover:!bg-[var(--surface-hover)] hover:!border-[var(--border-subtle)] !px-2 max-w-[140px]"
-        />
-      )}
       <button
         type="button"
         ref={triggerRef}
@@ -918,11 +934,11 @@ function ModelControls({
         }}
       >
         <LivePulseDot tone={ready ? "emerald" : "zinc"} active={!!ready} />
-        <span>{runtime === "codex" ? "Codex" : "Claude"}</span>
-        <span className="max-w-[90px] sm:max-w-[135px] truncate font-mono text-[11px] text-[var(--text-muted)]">
+        <span className="shrink-0">{runtime === "codex" ? "Codex" : "Claude"}</span>
+        <span className="max-w-[120px] sm:max-w-[200px] truncate font-mono text-[11px] text-[var(--text-muted)]">
           {current?.label || model || "默认模型"}
         </span>
-        <Icon name="chevron-down" size={11} />
+        <Icon name="chevron-down" size={11} className="shrink-0" />
       </button>
       {open && (
         <div
@@ -937,11 +953,19 @@ function ModelControls({
                 type="button"
                 disabled={disabled}
                 aria-pressed={runtime === rt}
-                onClick={() =>
-                  choose(rt, runtime === rt ? model : settings?.runtime === rt ? settings.model : "", false)
-                }
+                onClick={() => {
+                  if (runtime === rt) return;
+                  const nextAgent = resolveActiveLocalAgent(
+                    runtimeInfo,
+                    projectId,
+                    executionTarget,
+                    rt,
+                  );
+                  const nextDefault = resolveDefaultModelForTarget(rt, nextAgent, settings);
+                  choose(rt, nextDefault, false);
+                }}
                 className={cn(
-                  "flex-1 rounded-lg px-2 py-1.5 text-[12px] font-medium transition-colors",
+                  "flex-1 rounded-lg px-2 py-1.5 text-[12px] font-medium transition-colors cursor-pointer",
                   runtime === rt
                     ? "bg-[var(--surface-hover)] text-[var(--text-primary)]"
                     : "text-[var(--text-muted)] hover:text-[var(--text-primary)]",
@@ -950,6 +974,27 @@ function ModelControls({
                 {rt === "claude" ? "Claude Code" : "Codex CLI"}
               </button>
             ))}
+          </div>
+          <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-[var(--border-subtle)] bg-[var(--surface-subtle)]/50 text-[11px] text-[var(--text-muted)]">
+            <span className="inline-flex items-center gap-1.5 min-w-0 truncate">
+              {activeLocalAgent ? (
+                <>
+                  <LivePulseDot
+                    tone={activeLocalAgent.online ? "emerald" : "zinc"}
+                    active={activeLocalAgent.online}
+                  />
+                  <span className="truncate">本机目录 · {activeLocalAgent.name}</span>
+                </>
+              ) : (
+                <>
+                  <Icon name="cloud" size={11} className="shrink-0" />
+                  <span className="truncate">云端项目目录</span>
+                </>
+              )}
+            </span>
+            <span className="font-mono text-[10.5px] shrink-0 tabular-nums">
+              {strictTargetCatalog.length} 个模型
+            </span>
           </div>
           <label className="mx-3 flex items-center gap-2 py-2 text-[var(--text-muted)]">
             <Icon name="search" size={14} />
@@ -992,53 +1037,78 @@ function ModelControls({
             aria-label="可选模型"
             className="max-h-[min(38vh,16rem)] overflow-y-auto rd-scroll px-1.5 pb-1.5"
           >
-            {!options.length && <p className="px-2.5 py-2 text-xs text-[var(--text-muted)]">无匹配模型。自定义 ID 须使用可见 ASCII 字符，不能含空格或以连字符开头。</p>}
-            {options.map((item, i) => (
-              <button
-                type="button"
-                role="option"
-                aria-selected={model === item.id}
-                id={`${listId}-${i}`}
-                key={item.id}
-                tabIndex={-1}
-                disabled={disabled}
-                onMouseDown={(e) => e.preventDefault()}
-                onMouseEnter={() => setIndex(i)}
-                onClick={() => choose(runtime, item.id, true)}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left",
-                  selectedIndex === i && "bg-[var(--surface-hover)]",
-                )}
-              >
-                <span className="min-w-0 flex-1">
-                  {item.label && (
-                    <span className="block truncate text-[12px] font-medium text-[var(--text-primary)]">
-                      {item.label}
-                    </span>
+            {activeLocalAgent && strictTargetCatalog.length === 0 && !search && (
+              <p className="px-2.5 py-1.5 text-[11px] text-[var(--text-muted)]">
+                该本机节点尚未上报 {runtime} 模型，可直接输入自定义 ID 或使用 CLI 默认模型。
+              </p>
+            )}
+            {!options.length && (
+              <p className="px-2.5 py-2 text-xs text-[var(--text-muted)]">
+                无匹配模型。自定义 ID 须使用可见 ASCII 字符，不能含空格或以连字符开头。
+              </p>
+            )}
+            {options.map((item, i) => {
+              const showSeparateLabel = Boolean(item.label && item.label !== item.id);
+              const isOutOfCatalogCurrent = Boolean(
+                item.id && item.id === model && !strictCatalogIds.has(item.id),
+              );
+              return (
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={model === item.id}
+                  id={`${listId}-${i}`}
+                  key={item.id}
+                  tabIndex={-1}
+                  disabled={disabled}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseEnter={() => setIndex(i)}
+                  onClick={() => choose(runtime, item.id, true)}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left cursor-pointer",
+                    selectedIndex === i && "bg-[var(--surface-hover)]",
                   )}
-                  {item.id && (
-                    <span
-                      title={item.id}
-                      className="block truncate font-mono text-[11.5px] text-[var(--text-secondary)]"
-                    >
-                      {item.id}
-                    </span>
-                  )}
-                </span>
-                {item.context_window && (
-                  <span
-                    title={`${item.context_window.toLocaleString()} 个上下文 token`}
-                    className="rounded border border-[var(--border-subtle)] px-1 font-mono text-[10px] text-[var(--text-muted)]"
-                  >
-                    {contextSize.format(item.context_window)}
+                >
+                  <span className="min-w-0 flex-1">
+                    {showSeparateLabel && (
+                      <span className="block truncate text-[12px] font-medium text-[var(--text-primary)]">
+                        {item.label}
+                      </span>
+                    )}
+                    {item.id && (
+                      <span
+                        title={item.id}
+                        className={cn(
+                          "block truncate font-mono",
+                          showSeparateLabel
+                            ? "text-[11.5px] text-[var(--text-secondary)]"
+                            : "text-[12px] font-medium text-[var(--text-primary)]",
+                        )}
+                      >
+                        {item.id}
+                      </span>
+                    )}
                   </span>
-                )}
-                {(configuredModel ? item.id === configuredModel : item.is_default) && (
-                  <span className="text-[10px] text-[var(--text-muted)]">默认</span>
-                )}
-                {item.id === model && <Icon name="check" size={13} className="text-indigo-500" />}
-              </button>
-            ))}
+                  {item.context_window && (
+                    <span
+                      title={`${item.context_window.toLocaleString()} 个上下文 token`}
+                      className="rounded border border-[var(--border-subtle)] px-1 font-mono text-[10px] text-[var(--text-muted)] shrink-0"
+                    >
+                      {contextSize.format(item.context_window)}
+                    </span>
+                  )}
+                  {isOutOfCatalogCurrent && (
+                    <span className="rounded bg-amber-500/12 px-1 py-0.5 text-[10px] text-amber-700 dark:text-amber-300 shrink-0">
+                      当前会话
+                    </span>
+                  )}
+                  {(configuredModel ? item.id === configuredModel : item.is_default) && (
+                    <span className="text-[10px] text-[var(--text-muted)] shrink-0">默认</span>
+                  )}
+                  {item.id === model && <Icon name="check" size={13} className="text-indigo-500 shrink-0" />}
+                </button>
+              );
+            })}
           </div>
           <button
             type="button"
@@ -1046,7 +1116,7 @@ function ModelControls({
               close();
               onOpenCliSettings();
             }}
-            className="flex w-full items-center gap-1.5 border-t border-[var(--border-subtle)] px-3 py-2 text-[11.5px] text-[var(--text-muted)] hover:bg-[var(--surface-hover)]"
+            className="flex w-full items-center gap-1.5 border-t border-[var(--border-subtle)] px-3 py-2 text-[11.5px] text-[var(--text-muted)] hover:bg-[var(--surface-hover)] cursor-pointer"
           >
             <Icon name="sliders-horizontal" size={12} /> 项目模型设置
           </button>
@@ -1072,7 +1142,7 @@ function ModelControls({
         }
         ariaLabel={adjustable ? "思考强度" : "该模型不支持调节思考强度"}
         className={cn(
-          "!border-transparent !bg-transparent hover:!bg-[var(--surface-hover)] hover:!border-[var(--border-subtle)] !px-2",
+          "!border-transparent !bg-transparent hover:!bg-[var(--surface-hover)] hover:!border-[var(--border-subtle)] !px-2 shrink-0",
           displayedEffort !== "default" &&
             displayedEffort !== "off" &&
             "!bg-indigo-500/8 !text-indigo-700 dark:!text-indigo-300",
@@ -1487,6 +1557,74 @@ export function PromptBar({
         </div>
       )}
 
+      {/* Outer Execution Environment Bar (above composer card) */}
+      <div className="mb-2 px-0.5 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {onChangeExecutionTarget && (
+            <ExecutionTargetSelect
+              projectId={projectId}
+              runtime={runtime}
+              runtimeInfo={runtimeInfo}
+              executionTarget={executionTarget ?? "auto"}
+              disabled={streaming || settingsBusy}
+              onChangeExecutionTarget={onChangeExecutionTarget}
+              onOpenChange={() => setPopover("none")}
+            />
+          )}
+        </div>
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Sandbox Mode Toggle Pill */}
+          <button
+            type="button"
+            disabled={streaming || settingsBusy}
+            onClick={() =>
+              onChangeSandboxMode(sandboxMode === "read-only" ? "workspace-write" : "read-only")
+            }
+            title={
+              sandboxMode === "workspace-write"
+                ? "当前允许编辑项目空间文件；点击切回只读探索"
+                : "当前为只读探索模式；点击切为可写项目空间"
+            }
+            className={cn(
+              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-colors cursor-pointer disabled:opacity-50",
+              sandboxMode === "workspace-write"
+                ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/18"
+                : "border-[var(--border-subtle)] bg-[var(--surface-card)]/90 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]",
+            )}
+          >
+            <Icon
+              name={sandboxMode === "workspace-write" ? "pen-line" : "shield-check"}
+              size={12}
+            />
+            <span>{sandboxMode === "workspace-write" ? "可写空间" : "只读"}</span>
+          </button>
+
+          {/* Codex Network Toggle Pill */}
+          {runtime === "codex" && (
+            <button
+              type="button"
+              disabled={streaming || settingsBusy}
+              onClick={onToggleNetworkAccess}
+              title={
+                networkAccess
+                  ? "已放开 Codex 沙箱联网，可直连外部数据库或网络；点击关闭"
+                  : "Codex 沙箱默认断网；点击允许联网"
+              }
+              className={cn(
+                "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-colors cursor-pointer disabled:opacity-50",
+                networkAccess
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/18"
+                  : "border-[var(--border-subtle)] bg-[var(--surface-card)]/90 text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]",
+              )}
+            >
+              <Icon name={networkAccess ? "wifi" : "wifi-off"} size={12} />
+              <span className="hidden sm:inline">{networkAccess ? "联网" : "断网"}</span>
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Main Composer Card */}
       <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] shadow-[var(--rd-shadow-md)] focus-within:border-[var(--border-strong)] focus-within:ring-2 focus-within:ring-[var(--rd-ring)]/40 transition-all">
         {/* Attached Context Chips inside Composer */}
@@ -1533,9 +1671,9 @@ export function PromptBar({
           placeholder={`向 ${runtime === "codex" ? "Codex" : "Claude"} 提问，支持 \`代码\` / \`\`\` 代码块、@ 引用、/ 快捷指令…`}
         />
 
-        {/* Bottom Action Pill Bar */}
-        <div className="px-2.5 pb-2 pt-0.5 flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-1 flex-wrap">
+        {/* Inner Bottom Action Pill Bar */}
+        <div className="px-2.5 pb-2 pt-0.5 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1 min-w-0 flex-1">
             {/* @ Mention Button */}
             <button
               type="button"
@@ -1546,7 +1684,7 @@ export function PromptBar({
               }}
               title="引用项目空间文件、数据库或工单 (@)"
               className={cn(
-                "inline-flex items-center gap-1 h-7 px-2 rounded-lg text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50",
+                "inline-flex items-center gap-1 h-7 px-2 rounded-lg text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
                 popover === "mention" || attachments.length > 0
                   ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
@@ -1572,7 +1710,7 @@ export function PromptBar({
               }}
               title="快捷指令 (/)"
               className={cn(
-                "inline-flex items-center justify-center h-7 w-7 rounded-lg text-[12px] font-mono font-medium transition-colors cursor-pointer disabled:opacity-50",
+                "inline-flex items-center justify-center h-7 w-7 rounded-lg text-[12px] font-mono font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
                 popover === "slash"
                   ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
@@ -1581,7 +1719,7 @@ export function PromptBar({
               /
             </button>
 
-            <span className="h-3.5 w-px bg-[var(--border-subtle)] mx-0.5" />
+            <span className="h-3.5 w-px bg-[var(--border-subtle)] mx-0.5 shrink-0" />
 
             <ModelControls
               projectId={projectId}
@@ -1598,65 +1736,16 @@ export function PromptBar({
               disabled={streaming || settingsBusy}
               onOpenCliSettings={onOpenCliSettings}
             />
-
-            {/* Sandbox Mode Toggle Pill */}
-            <button
-              type="button"
-              disabled={streaming || settingsBusy}
-              onClick={() =>
-                onChangeSandboxMode(sandboxMode === "read-only" ? "workspace-write" : "read-only")
-              }
-              title={
-                sandboxMode === "workspace-write"
-                  ? "当前允许编辑项目空间文件；点击切回只读探索"
-                  : "当前为只读探索模式；点击切为可写项目空间"
-              }
-              className={cn(
-                "inline-flex items-center gap-1 h-7 px-2 rounded-lg text-[11.5px] font-medium transition-colors cursor-pointer disabled:opacity-50",
-                sandboxMode === "workspace-write"
-                  ? "bg-amber-500/12 text-amber-700 dark:text-amber-300 hover:bg-amber-500/18"
-                  : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
-              )}
-            >
-              <Icon
-                name={sandboxMode === "workspace-write" ? "pen-line" : "shield-check"}
-                size={12}
-              />
-              <span>{sandboxMode === "workspace-write" ? "可写空间" : "只读"}</span>
-            </button>
-
-            {/* Codex Network Toggle Pill */}
-            {runtime === "codex" && (
-              <button
-                type="button"
-                disabled={streaming || settingsBusy}
-                onClick={onToggleNetworkAccess}
-                title={
-                  networkAccess
-                    ? "已放开 Codex 沙箱联网，可直连外部数据库或网络；点击关闭"
-                    : "Codex 沙箱默认断网；点击允许联网"
-                }
-                className={cn(
-                  "inline-flex items-center gap-1 h-7 px-2 rounded-lg text-[11.5px] font-medium transition-colors cursor-pointer disabled:opacity-50",
-                  networkAccess
-                    ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/18"
-                    : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
-                )}
-              >
-                <Icon name={networkAccess ? "wifi" : "wifi-off"} size={12} />
-                <span className="hidden sm:inline">{networkAccess ? "联网" : "断网"}</span>
-              </button>
-            )}
           </div>
 
           {/* Right Side: Streaming hint + Send/Stop Pill */}
-          <div className="flex items-center gap-2 ml-auto">
+          <div className="flex items-center gap-2 shrink-0">
             {streaming && statusLine ? (
-              <span className="hidden md:inline text-[11.5px] text-[var(--text-muted)] truncate max-w-[200px]">
+              <span className="hidden md:inline text-[11.5px] text-[var(--text-muted)] truncate max-w-[180px]">
                 {statusLine}
               </span>
             ) : (
-              <span className="hidden sm:inline text-[11px] text-[var(--text-muted)] select-none">
+              <span className="hidden md:inline text-[11px] text-[var(--text-muted)] select-none whitespace-nowrap">
                 Enter 发送 · Shift+Enter 换行
               </span>
             )}

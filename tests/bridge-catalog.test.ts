@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bridgeCatalogPaths, detectBridgeCatalog } from "../agent/bridge/catalog.ts";
-import { sanitizeBridgeModels } from "../app/lib/model-catalog.ts";
+import {
+  resolveActiveLocalAgent,
+  resolveCatalogForTarget,
+  resolveDefaultModelForTarget,
+  sanitizeBridgeModels,
+} from "../app/lib/model-catalog.ts";
+import type { BridgeAgentSummary, ChatRuntimeInfo } from "../app/lib/types.ts";
 
 let homeDir: string, configDir: string, binDir: string;
 const json = (path: string, value: unknown) => writeFile(path, JSON.stringify(value));
@@ -87,5 +93,114 @@ describe("bridge wire model sanitizer", () => {
     expect(models).toHaveLength(200);
     expect(models[0]).toEqual({ id: "m", runtime: "codex", label: "A", context_window: 42 });
     expect(models[1].runtime).toBe("claude");
+  });
+});
+
+describe("target-scoped model catalog resolution", () => {
+  const macAgent: BridgeAgentSummary = {
+    id: "agent-mac",
+    name: "xiamo's mac",
+    online: true,
+    hostname: "AceXiamo.local",
+    platform: "darwin",
+    bridge_version: "2.0.0",
+    token_prefix: "rdbr_mac",
+    max_concurrency: 2,
+    active_runs: 0,
+    accept_cli_runs: true,
+    last_seen_at: "2026-11-22T00:00:00Z",
+    updated_at: "2026-11-22T00:00:00Z",
+    runtimes: {
+      claude: { available: true, version: "2.1.330" },
+      codex: { available: true, version: "0.140.0" },
+    },
+    models: [
+      { id: "codex/gpt-6.2-astra", runtime: "claude", is_default: true, source: "cli_config" },
+      { id: "codex/gpt-6.2-sol", runtime: "claude", source: "cli_config" },
+      { id: "gpt-6.2-astra", runtime: "codex", is_default: true, source: "cli_config" },
+    ],
+    capabilities: { allowed_roots_enabled: true },
+    bindings: [
+      {
+        project_id: "proj-1",
+        agent_id: "agent-mac",
+        workdir: "/Users/dev/project",
+        enabled: true,
+        path_ok: true,
+        path_error: "",
+        allow_datasource_secrets: false,
+        updated_at: "2026-11-22T00:00:00Z",
+      },
+    ],
+    created_at: "2026-11-22T00:00:00Z",
+  };
+
+  const runtimeInfo: ChatRuntimeInfo = {
+    local_clis: { claude: true, codex: true },
+    project_cli: {
+      runtime: "claude",
+      configured: true,
+      endpoint: "https://gateway.example/v1",
+      model: "deepseek-flash",
+      models: [{ id: "deepseek-flash", runtime: "claude", source: "cloud_config" }],
+      default_effort: "medium",
+    },
+    auth_mode: { claude: "project_key", codex: "local_cli" },
+    routing: { priority: ["local:agent-mac", "cloud"], auto_fallback: true, route_cli_runs: true },
+    effective_priority: ["local:agent-mac", "cloud"],
+    agents: [macAgent],
+  };
+
+  it("isolates local agent models from cloud project CLI models and unrelated builtins", () => {
+    const active = resolveActiveLocalAgent(runtimeInfo, "proj-1", "auto", "claude");
+    expect(active?.id).toBe("agent-mac");
+
+    const claudeCatalog = resolveCatalogForTarget({
+      runtime: "claude",
+      activeLocalAgent: active,
+      projectCli: runtimeInfo.project_cli,
+      selectedModel: "codex/gpt-6.2-astra",
+    });
+    expect(claudeCatalog.map((m) => m.id)).toEqual(["codex/gpt-6.2-astra", "codex/gpt-6.2-sol"]);
+    expect(resolveDefaultModelForTarget("claude", active, runtimeInfo.project_cli)).toBe("codex/gpt-6.2-astra");
+
+    const codexCatalog = resolveCatalogForTarget({
+      runtime: "codex",
+      activeLocalAgent: active,
+      projectCli: runtimeInfo.project_cli,
+      selectedModel: "",
+    });
+    expect(codexCatalog.map((m) => m.id)).toEqual(["gpt-6.2-astra"]);
+    expect(resolveDefaultModelForTarget("codex", active, runtimeInfo.project_cli)).toBe("gpt-6.2-astra");
+  });
+
+  it("uses cloud project models and built-in suggestions only when targeting cloud", () => {
+    const active = resolveActiveLocalAgent(runtimeInfo, "proj-1", "cloud", "claude");
+    expect(active).toBeNull();
+
+    const cloudCatalog = resolveCatalogForTarget({
+      runtime: "claude",
+      activeLocalAgent: active,
+      projectCli: runtimeInfo.project_cli,
+      selectedModel: "deepseek-flash",
+    });
+    expect(cloudCatalog.map((m) => m.id)).toEqual(["deepseek-flash", "claude-opus-4-6", "claude-sonnet-4-6"]);
+    expect(resolveDefaultModelForTarget("claude", active, runtimeInfo.project_cli)).toBe("deepseek-flash");
+  });
+
+  it("falls through cloud in auto mode when cloud lacks the CLI and auto_fallback is enabled", () => {
+    const cloudFirstNoCli: ChatRuntimeInfo = {
+      ...runtimeInfo,
+      local_clis: { claude: false, codex: false },
+      routing: { priority: ["cloud", "local:agent-mac"], auto_fallback: true, route_cli_runs: true },
+      effective_priority: ["cloud", "local:agent-mac"],
+    };
+    expect(resolveActiveLocalAgent(cloudFirstNoCli, "proj-1", "auto", "claude")?.id).toBe("agent-mac");
+
+    const strictCloudFirst: ChatRuntimeInfo = {
+      ...cloudFirstNoCli,
+      routing: { priority: ["cloud", "local:agent-mac"], auto_fallback: false, route_cli_runs: true },
+    };
+    expect(resolveActiveLocalAgent(strictCloudFirst, "proj-1", "auto", "claude")).toBeNull();
   });
 });

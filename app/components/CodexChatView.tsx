@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "~/lib/api.ts";
 import { formatRelativeTime } from "~/lib/format.ts";
+import {
+  resolveActiveLocalAgent,
+  resolveCatalogForTarget,
+  resolveDefaultModelForTarget,
+} from "~/lib/model-catalog.ts";
 import type {
   ChatContextRef,
   ChatMessageRecord,
@@ -371,10 +376,19 @@ export function CodexChatView({
   }, [scrollSignal, streaming, scrollToBottom]);
 
   const currentRuntime = activeSession?.runtime ?? draftRuntime ?? runtimeInfo?.project_cli.runtime ?? "codex";
+  const currentTarget = activeSession?.execution_target || draftTarget || "auto";
+  const activeLocalAgent = useMemo(
+    () => resolveActiveLocalAgent(runtimeInfo, projectId ?? undefined, currentTarget, currentRuntime),
+    [runtimeInfo, projectId, currentTarget, currentRuntime],
+  );
   const currentModel = activeSession?.model ?? draftModel;
   const currentEffort = activeSession ? activeSession.reasoning_effort ?? "default" : draftEffort;
-  const activeConfiguredModel = currentModel ||
-    (runtimeInfo?.project_cli.runtime === currentRuntime ? runtimeInfo.project_cli.model : "");
+  const targetDefaultModel = resolveDefaultModelForTarget(
+    currentRuntime,
+    activeLocalAgent,
+    runtimeInfo?.project_cli,
+  );
+  const activeConfiguredModel = currentModel || targetDefaultModel;
   const currentSandboxMode = activeSession?.sandbox_mode ?? draftSandboxMode;
   const currentNetworkAccess = activeSession?.network_access ?? draftNetworkAccess;
   const settingsBusy = savingSettings || sessionsLoading || !!(activeSessionId && activeSession?.id !== activeSessionId);
@@ -813,7 +827,6 @@ export function CodexChatView({
     );
   }
 
-  const currentTarget = activeSession?.execution_target || draftTarget || "auto";
   const currentAgents = runtimeInfo?.agents ?? [];
   const hasReadyLocalForCurrent = (() => {
     const checkAgent = (agentId: string) => {
@@ -1511,7 +1524,7 @@ export function CodexChatView({
 
         {/* Floating Scroll-to-Bottom Pill */}
         {showScrollBottom && (
-          <div className="pointer-events-none absolute inset-x-0 bottom-[132px] flex justify-center z-20 animate-fade-in">
+          <div className="pointer-events-none absolute inset-x-0 bottom-[168px] flex justify-center z-20 animate-fade-in">
             <button
               type="button"
               onClick={() => {
@@ -1569,9 +1582,48 @@ export function CodexChatView({
                 else setDraftEffort(effort);
               }}
               onChangeExecutionTarget={(target) => {
+                const nextLocalAgent = resolveActiveLocalAgent(
+                  runtimeInfo,
+                  project.id,
+                  target,
+                  currentRuntime,
+                );
+                const nextCatalog = resolveCatalogForTarget({
+                  runtime: currentRuntime,
+                  activeLocalAgent: nextLocalAgent,
+                  projectCli: runtimeInfo?.project_cli,
+                  includeSelectedFallback: false,
+                });
+                const modelStillValid =
+                  !currentModel || nextCatalog.some((item) => item.id === currentModel);
+                const nextModel = modelStillValid
+                  ? currentModel
+                  : resolveDefaultModelForTarget(
+                      currentRuntime,
+                      nextLocalAgent,
+                      runtimeInfo?.project_cli,
+                    );
+                const nextEntry = nextCatalog.find((item) => item.id === nextModel);
+                const nextEffort =
+                  nextEntry?.supports_effort === false ||
+                  (currentEffort !== "default" &&
+                    nextEntry?.effort_levels &&
+                    !nextEntry.effort_levels.includes(currentEffort))
+                    ? "default"
+                    : currentEffort;
+
                 setDraftTarget(target);
-                if (activeSession && target !== activeSession.execution_target) {
-                  void handleUpdateSession({ execution_target: target });
+                if (!modelStillValid) setDraftModel(nextModel);
+                if (nextEffort !== currentEffort) setDraftEffort(nextEffort);
+
+                if (activeSession) {
+                  const patch: Parameters<typeof api.updateCodexChatSession>[2] = {};
+                  if (target !== activeSession.execution_target) patch.execution_target = target;
+                  if (!modelStillValid && nextModel !== activeSession.model) patch.model = nextModel;
+                  if (nextEffort !== currentEffort) patch.reasoning_effort = nextEffort;
+                  if (Object.keys(patch).length > 0) {
+                    void handleUpdateSession(patch);
+                  }
                 }
               }}
               onChangeSandboxMode={(mode) => {
