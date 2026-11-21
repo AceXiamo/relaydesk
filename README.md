@@ -41,8 +41,19 @@ pnpm start
 | --- | --- |
 | 应用反馈组件、Telegram 群机器人 | [收集端接入说明](integrations/README.md) |
 | 本机 coding agent、工作树、交接与恢复 | [执行器说明](agent/README.md) |
+| 本机 Local Bridge 节点、模型目录与执行优先级路由 | [架构与运维指南](docs/local-bridge-and-model-routing.md) |
 | Project CLI conversations and PR audits | [Runner setup, permissions and acceptance checks](docs/project-runner.md) |
 | 项目 CLI 配置、工单讨论与公开反馈 | [对话助手配置](docs/assistant.md) |
+
+## 本机执行节点（Local Bridge）一键接入
+
+无需在每台电脑 clone Relaydesk 仓库，`pnpm build` 会自动把 `agent/bridge/` 打包为单文件零依赖客户端 `build/bridge/relaydesk-bridge.mjs`，并由服务端通过 `GET /api/bridge/client.mjs`（设备 Bearer Token 鉴权 + `X-Content-Sha256` 校验）下发：
+
+1. 在设置页「本机执行节点 · Local Agents」点击 **添加本机 Agent**，生成**一键复制 Agent 接入 Prompt**；
+2. 将 Prompt 粘贴给任意目录下的 Claude Code 或 Codex，Agent 会自动校验 Node 24+、写入 `0600` 权限配置、下载校验单文件客户端并配置后台常驻（macOS `launchd` / Linux `systemd --user`）；
+3. 在项目设置「项目执行优先级与节点绑定」卡片中排列本机节点与云端的承接顺序、校验绑定本机工作目录，以及开关自动降级与工单/PR 审计本机优先。
+
+反向代理（Traefik / Nginx）需放行 `/api/bridge/ws` 的 WebSocket Upgrade 请求头，并保持读超时 ≥ 60s（服务端每 15s 自动 ping 保活）。
 
 ## 多台设备与钱包登录
 

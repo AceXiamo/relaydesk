@@ -27,6 +27,24 @@ export interface BridgeChatStart {
   pg_read_only_enforced?: boolean;
 }
 
+export interface BridgeCliRunStart {
+  run_id: string;
+  project_id: string;
+  mode: "operator" | "pr_audit";
+  runtime: ChatRuntime;
+  model?: string;
+  reasoning_effort?: ChatReasoningEffort;
+  prompt: string;
+  system_context?: string;
+  workspace_manifest: ReturnType<typeof buildWorkspaceManifest>;
+}
+
+export interface BridgeCliRunEvent {
+  event: "heartbeat" | "progress" | "finish" | "fail";
+  body: string;
+  sha?: string;
+}
+
 export interface BridgeHubOptions { pingIntervalMs?: number; pongTimeoutMs?: number }
 const RPC_BYTES = 2 * 1024 * 1024;
 const RUN_TIMEOUT_MS = 8 * 60_000;
@@ -59,6 +77,12 @@ const intermediate = z.discriminatedUnion("type", [
 ]);
 const terminal = z.object({ content: text(120_000), events: z.array(tool).max(1000), externalSessionId: text(512),
   status: z.enum(["done", "error", "aborted"]), error: text(32_768).optional() });
+const cliRunEventSchema = z.object({
+  run_id: text(160).min(1),
+  event: z.enum(["heartbeat", "progress", "finish", "fail"]),
+  body: text(24_000).default(""),
+  sha: text(64).optional(),
+});
 function redact<T>(object: T, secrets: string[]): T {
   return JSON.parse(JSON.stringify(object, (key, value) => typeof value === "string" && key !== "type" && key !== "status"
     ? redactSecrets(value, secrets).replace(/rdbr_[a-f0-9]{48}/gi, "[redacted]") : value));
@@ -93,6 +117,12 @@ interface Run {
   onEvent: ReturnType<typeof streamOutput>; secrets: string[];
   finish: (result: RunChatTurnResult) => void; stop: (reason: string, aborted?: boolean) => void;
 }
+interface CliRunHandle {
+  id: string; project: string; owner: Connection; workdir: string;
+  onEvent: (event: BridgeCliRunEvent) => void;
+  finish: (event: BridgeCliRunEvent) => void;
+  stop: (reason: string) => void;
+}
 interface Connection {
   id: string; ws: WebSocket; ready: boolean; lastPong: number; projects: Map<string, Binding>;
   binds: Map<string, { project: string; workdir: string; settle: (value: Binding | Error) => void }>;
@@ -102,6 +132,7 @@ export class BridgeHub {
   private readonly wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 4 * 1024 * 1024 });
   private readonly connections = new Map<string, Connection>();
   private readonly runs = new Map<string, Run>();
+  private readonly cliRuns = new Map<string, CliRunHandle>();
   private readonly heartbeat: NodeJS.Timeout;
   private readonly timeout: number;
   private closing?: Promise<void>;
@@ -163,6 +194,7 @@ export class BridgeHub {
     this.connections.delete(conn.id);
     for (const bind of conn.binds.values()) bind.settle(new ApiError(409, reason));
     for (const run of this.runs.values()) if (run.owner === conn) run.stop(reason);
+    for (const cli of this.cliRuns.values()) if (cli.owner === conn) cli.stop(reason);
   }
   disconnect(agentId: string, code = 4000, reason = "Bridge disconnected") {
     const conn = this.connections.get(agentId);
@@ -187,8 +219,9 @@ export class BridgeHub {
     return conn?.ready && conn.ws.readyState === WebSocket.OPEN && Date.now() - conn.lastPong < this.timeout ? conn : undefined;
   }
   describe(agent: BridgeAgentSummary): BridgeAgentSummary {
-    return { ...agent, online: !!this.live(agent.id),
-      active_runs: Array.from(this.runs.values()).filter(run => run.owner.id === agent.id).length };
+    const chatCount = Array.from(this.runs.values()).filter(run => run.owner.id === agent.id).length;
+    const cliCount = Array.from(this.cliRuns.values()).filter(run => run.owner.id === agent.id).length;
+    return { ...agent, online: !!this.live(agent.id), active_runs: chatCount + cliCount };
   }
   refresh(agentId: string) {
     const conn = this.live(agentId);
@@ -205,6 +238,9 @@ export class BridgeHub {
     conn.projects.set(project_id, { workdir, path_error, path_ok });
     for (const run of this.runs.values()) {
       if (run.owner === conn && run.project === project_id && (!path_ok || run.workdir !== workdir)) run.stop("项目目录绑定已变更");
+    }
+    for (const cli of this.cliRuns.values()) {
+      if (cli.owner === conn && cli.project === project_id && (!path_ok || cli.workdir !== workdir)) cli.stop("项目目录绑定已变更");
     }
   }
   private agent(agentId: string) {
@@ -230,6 +266,7 @@ export class BridgeHub {
         this.store.upsertProjectAgentBinding(old.project_id, conn.id, { path_ok: false, path_error: "节点未报告该项目目录", allow_datasource_secrets: false });
         conn.projects.delete(old.project_id);
         for (const run of this.runs.values()) if (run.owner === conn && run.project === old.project_id) run.stop("项目目录绑定已移除");
+        for (const cli of this.cliRuns.values()) if (cli.owner === conn && cli.project === old.project_id) cli.stop("项目目录绑定已移除");
       }
     }
     this.store.updateBridgeAgentTelemetry(conn.id, {
@@ -291,6 +328,23 @@ export class BridgeHub {
         // The HTTP caller persists the result before emitting the authoritative terminal event.
         run.finish(redact(result, run.secrets));
       } else run.onEvent(intermediate.parse(p.event));
+    } else if (type === "cli_run.event") {
+      const ev = cliRunEventSchema.parse(p);
+      const cli = this.cliRuns.get(ev.run_id);
+      if (!cli || cli.owner !== conn) return;
+      try {
+        if (this.assertWorkspaceAccess(conn.id, cli.project).workdir !== cli.workdir) throw new Error();
+      } catch { cli.stop("项目目录绑定已失效"); return; }
+      const cleanEvent: BridgeCliRunEvent = {
+        event: ev.event,
+        body: redactSecrets(ev.body, []).replace(/rdbr_[a-f0-9]{48}/gi, "[redacted]"),
+        ...(ev.sha && /^[0-9a-f]{7,64}$/i.test(ev.sha) ? { sha: ev.sha } : {}),
+      };
+      if (cleanEvent.event === "finish" || cleanEvent.event === "fail") {
+        cli.finish(cleanEvent);
+      } else {
+        cli.onEvent(cleanEvent);
+      }
     } else throw new Error();
   }
   async bindProject(agentId: string, projectId: string, workdir: string): Promise<Binding> {
@@ -373,6 +427,48 @@ export class BridgeHub {
       try { this.send(conn, "chat.start", { ...start, prompt: redactSecrets(start.prompt, secrets),
         system_context: redactSecrets(start.system_context ?? "", secrets), ...grant, run_id: id }); }
       catch { stop("本机节点连接中断"); }
+    });
+  }
+  abortCliRun(runId: string) {
+    const cli = this.cliRuns.get(runId);
+    if (!cli) return false;
+    cli.stop("CLI 运行已中止");
+    return true;
+  }
+  runCliRun(agentId: string, payload: BridgeCliRunStart, onEvent: (event: BridgeCliRunEvent) => void): Promise<BridgeCliRunEvent> {
+    const binding = this.assertCanRun(agentId, payload.project_id, payload.runtime);
+    const agent = this.agent(agentId);
+    if (!agent.accept_cli_runs) throw new ApiError(409, "本机节点未开启工单/审计承接");
+    if (this.cliRuns.has(payload.run_id)) throw new ApiError(409, "该 CLI 任务已在执行");
+    const conn = this.live(agentId)!;
+    return new Promise((resolve) => {
+      const finish = (result: BridgeCliRunEvent) => {
+        if (!this.cliRuns.delete(payload.run_id)) return;
+        clearTimeout(timer);
+        onEvent(result);
+        resolve(result);
+      };
+      const stop = (reason: string) => {
+        if (this.connections.get(agentId) === conn && conn.ws.readyState === WebSocket.OPEN) {
+          this.send(conn, "cli_run.abort", { run_id: payload.run_id });
+        }
+        finish({ event: "fail", body: reason });
+      };
+      const timer = setTimeout(() => stop("本机节点 CLI 执行超时"), RUN_TIMEOUT_MS).unref();
+      this.cliRuns.set(payload.run_id, {
+        id: payload.run_id,
+        project: payload.project_id,
+        owner: conn,
+        workdir: binding.workdir,
+        onEvent,
+        finish,
+        stop,
+      });
+      try {
+        this.send(conn, "cli_run.start", payload);
+      } catch {
+        stop("本机节点连接中断");
+      }
     });
   }
 }

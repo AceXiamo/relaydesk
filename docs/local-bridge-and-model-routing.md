@@ -496,5 +496,97 @@ CREATE TABLE IF NOT EXISTS project_agent_bindings (
 - **验收**：优先级设为「MacBook Pro → 云端」时，默认新建会话与工单讨论优先由本机承接；关闭本机 Bridge 后下一轮自动平滑降级到云端并保留上下文；重新上线后新会话自动恢复优先本机。
 
 ### Phase 4：端到端测试与运维文档
-- 补充单测与集成测试：WSS 鉴权与重连、优先级路由与降级矩阵、跨节点续聊、`space-sync` 路径安全与回写、`reasoning_effort` CLI 参数单测。
+- 补充单测与集成测试：WSS 鉴权与重连、优先级路由与降级矩阵、跨节点续聊、`space-sync` 路径安全与回写、`reasoning_effort` CLI 参数单测、独立单文件打包与 `GET /api/bridge/client.mjs` 分发校验。
 - 更新 `README.md` 与部署说明（Traefik WSS 配置检查与本机 LaunchAgent/systemd 常驻示例）。
+
+---
+
+## 12. 运维与本机常驻指南
+
+### 12.1 独立零依赖客户端打包与分发
+- `pnpm build` 会同时执行 `react-router build` 和 `node scripts/build-bridge.mjs`，产出单文件 ESM `build/bridge/relaydesk-bridge.mjs`（仅依赖 Node 24+，内联 `ws` 与 `smol-toml`）。
+- 服务端通过 `GET /api/bridge/client.mjs` 提供下载：必须携带设备 Header `Authorization: Bearer rdbr_...`，响应附带 `X-Content-Sha256` 与 `X-Bridge-Version`。
+- 在设置页创建设备或轮换 Token 时，点击 **「一键复制 Agent 接入 Prompt」** 发给任意目录下的 Claude Code / Codex，即可全自动完成下载、校验、配置写入与常驻拉起。
+
+### 12.2 反向代理（Traefik / Nginx）WSS 核对
+- **Traefik**：HTTP/HTTPS Router 默认透传 WebSocket `Upgrade: websocket` / `Connection: Upgrade`，确保后端服务超时（`respondingTimeouts.readTimeout`）≥ 60s 或为 `0`（服务端每 15s 发送 WS ping，35s 无 pong 断连）。
+- **Nginx**：为 `/api/bridge/ws` 配置：
+  ```nginx
+  location /api/bridge/ws {
+      proxy_pass http://127.0.0.1:8787;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_read_timeout 120s;
+  }
+  ```
+
+### 12.3 macOS `launchd` 常驻示例
+保存为 `~/Library/LaunchAgents/com.relaydesk.bridge.plist`（将 `/opt/homebrew/bin/node` 和 `$HOME` 替换为本机实际路径）：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.relaydesk.bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/YOUR_USER/.local/share/relaydesk-bridge/relaydesk-bridge.mjs</string>
+    <string>--config</string>
+    <string>/Users/YOUR_USER/.config/relaydesk-bridge/config.json</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USER/.local/state/relaydesk-bridge/bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USER/.local/state/relaydesk-bridge/bridge.log</string>
+</dict>
+</plist>
+```
+
+加载并启动：
+```bash
+launchctl bootout "gui/$(id -u)/com.relaydesk.bridge" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.relaydesk.bridge.plist
+launchctl kickstart -k "gui/$(id -u)/com.relaydesk.bridge"
+```
+
+### 12.4 Linux `systemd --user` 常驻示例
+保存为 `~/.config/systemd/user/relaydesk-bridge.service`：
+
+```ini
+[Unit]
+Description=Relaydesk Local Bridge
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env node %h/.local/share/relaydesk-bridge/relaydesk-bridge.mjs --config %h/.config/relaydesk-bridge/config.json
+Restart=always
+RestartSec=3
+StandardOutput=append:%h/.local/state/relaydesk-bridge/bridge.log
+StandardError=append:%h/.local/state/relaydesk-bridge/bridge.log
+
+[Install]
+WantedBy=default.target
+```
+
+启用并启动：
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now relaydesk-bridge.service
+```
+

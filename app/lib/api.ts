@@ -5,6 +5,8 @@ import type {
   BridgeAgentSummary,
   BridgeAgentTokenResponse,
   BridgeBindingPatch,
+  ProjectExecutionRoutingResponse,
+  ProjectRoutingConfig,
   ChatContextRef,
   ChatMessageRecord,
   ChatRuntime,
@@ -142,6 +144,10 @@ export const api = {
     request<{ ok: true }>(`/api/bridge/agents/${encodeURIComponent(agentId)}`, "DELETE"),
   updateProjectAgentBinding: (projectId: string, agentId: string, patch: BridgeBindingPatch) =>
     request<{ binding: BridgeAgentBindingSummary }>(`/api/projects/${encodeURIComponent(projectId)}/agent-bindings/${encodeURIComponent(agentId)}`, "PATCH", patch),
+  getProjectExecutionRouting: (projectId: string) =>
+    request<ProjectExecutionRoutingResponse>(`/api/projects/${encodeURIComponent(projectId)}/execution-routing`),
+  updateProjectExecutionRouting: (projectId: string, patch: Partial<ProjectRoutingConfig>) =>
+    request<ProjectExecutionRoutingResponse>(`/api/projects/${encodeURIComponent(projectId)}/execution-routing`, "PATCH", patch),
 
   getProjectCliConfig: (projectId: string) =>
     request<ProjectCliStatus>(`/api/projects/${encodeURIComponent(projectId)}/cli-config`),

@@ -1025,6 +1025,35 @@ export class Store {
     });
   }
 
+  claimCliRunById(projectId: string, runId: string): ClaimedCliRun | null {
+    return this.transaction(true, () => {
+      const project = this.getProjectRow(projectId);
+      this.expireCliRuns(projectId);
+      if (project.automation_paused) return null;
+      const lease = tokenUrlSafe();
+      const now = nowIso();
+      const run = this.db.prepare(`UPDATE cli_runs SET status = 'running', lease = ?, started_at = ?, updated_at = ?
+        WHERE id = ? AND project_id = ? AND status = 'queued'
+        RETURNING ${CLI_FIELDS}`).get(lease, now, now, runId, projectId) as unknown as CliRun | undefined;
+      if (!run) return null;
+      return { run, lease, context: {
+        task: toTaskView(this.cliTask(projectId, run.task_id)), project: toAgentProject(project),
+        messages: this.getTaskMessages(run.task_id, 30),
+      } };
+    });
+  }
+
+  requeueCliRun(projectId: string, runId: string, lease: string): boolean {
+    return this.transaction(true, () => {
+      const row = this.db.prepare("SELECT status, lease FROM cli_runs WHERE id = ? AND project_id = ?")
+        .get(runId, projectId) as { status: string; lease: string | null } | undefined;
+      if (!row || row.status !== "running" || !row.lease || !safeEqual(lease, row.lease)) return false;
+      const res = this.db.prepare("UPDATE cli_runs SET status = 'queued', lease = NULL, started_at = NULL, progress = '', updated_at = ? WHERE id = ? AND project_id = ? AND status = 'running'")
+        .run(nowIso(), runId, projectId);
+      return res.changes > 0;
+    });
+  }
+
   eventCliRun(projectId: string, runId: string, data: Record<string, unknown>): CliRun {
     const event = field(data, "event", 16);
     if (!["heartbeat", "progress", "finish", "fail"].includes(event)) throw new ApiError(400, "Invalid CLI event");

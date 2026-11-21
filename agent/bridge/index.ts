@@ -40,6 +40,8 @@ interface Config extends BridgeCatalogConfig {
   cache_dir?: string;
   projects?: Record<string, Project>;
 }
+export const BRIDGE_VERSION = "2.0.0";
+
 export interface BridgeDaemonOptions {
   configPath: string;
   cacheDir?: string;
@@ -47,6 +49,7 @@ export interface BridgeDaemonOptions {
   reconnectMinMs?: number;
   reconnectMaxMs?: number;
   disconnectGraceMs?: number;
+  verbose?: boolean;
 }
 function load(path: string): Config {
   const fd = openSync(path, constants.O_NOFOLLOW | constants.O_NONBLOCK | constants.O_RDONLY);
@@ -264,13 +267,16 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
   const report = (c: Config, cat: BridgeCatalog) => ({
     hostname: hostname(),
     platform: process.platform,
-    bridge_version: "2.0.0",
+    bridge_version: BRIDGE_VERSION,
     max_concurrency: c.max_concurrency ?? 2,
     accept_cli_runs: c.accept_cli_runs === true,
     ...cat,
     allowed_roots_enabled: !!c.allowed_roots?.length,
     projects: projects(c, home),
   });
+  const log = (msg: string) => {
+    if (o.verbose) console.log(`[relaydesk-bridge] ${new Date().toISOString()} ${msg}`);
+  };
   function schedule() {
     if (closed || superseded || reconnect) return;
     reconnect = setTimeout(() => {
@@ -524,6 +530,134 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       });
       active.set(p.run_id, { abort, socket, project: p.project_id, session: p.session_id, job });
     }
+    function startCliRun(p: {
+      run_id: string;
+      project_id: string;
+      mode?: string;
+      runtime: "codex" | "claude";
+      model?: string;
+      reasoning_effort?: ChatStart["reasoning_effort"];
+      prompt: string;
+      system_context?: string;
+      workspace_manifest?: ChatStart["workspace_manifest"];
+    }) {
+      if (typeof p.run_id !== "string" || !/^[\w.:\-]{1,160}$/.test(p.run_id)) return;
+      const runKey = `cli:${p.run_id}`;
+      const emit = (event: "heartbeat" | "progress" | "finish" | "fail", body: string, sha = "") =>
+        send(socket, "cli_run.event", { run_id: p.run_id, event, body: body.slice(0, event === "progress" ? 4000 : 24000), ...(sha ? { sha } : {}) });
+      if (active.has(runKey)) return;
+      if (config.accept_cli_runs !== true) {
+        emit("fail", "Local bridge has accept_cli_runs disabled");
+        return;
+      }
+      if (active.size >= (config.max_concurrency ?? 2)) {
+        emit("fail", "Bridge concurrency limit reached");
+        return;
+      }
+      const abort = new AbortController();
+      const timeout = setTimeout(() => abort.abort(new Error("Local CLI run timed out")), 8 * 60_000);
+      const heartbeatTimer = setInterval(() => {
+        if (!abort.signal.aborted) emit("heartbeat", "");
+      }, 20_000);
+      const c = config,
+        cat = catalog;
+      const job = (async () => {
+        let release: (() => void) | undefined;
+        let sha = "";
+        try {
+          if (!validProjectId(p.project_id) || !Object.hasOwn(c.projects ?? {}, p.project_id))
+            throw new Error("Project is not locally bound");
+          if (p.runtime !== "codex" && p.runtime !== "claude") throw new Error("Invalid CLI runtime");
+          if (typeof p.prompt !== "string" || !p.prompt.trim()) throw new Error("Empty CLI prompt");
+          release = await lock(p.project_id, abort.signal);
+          abort.signal.throwIfAborted();
+          const project = config.projects?.[p.project_id];
+          if (!project) throw new Error("Project binding was removed");
+          const cwd = projectWorkdir(project, config, home);
+          if (!cat.runtimes[p.runtime].available) throw new Error("Requested CLI is not available");
+          const rev = spawnSync("git", ["--no-optional-locks", "rev-parse", "HEAD"], {
+            cwd,
+            encoding: "utf8",
+            timeout: 1500,
+          });
+          if (rev.status === 0 && /^[0-9a-f]{40}$/i.test(rev.stdout.trim())) sha = rev.stdout.trim();
+          emit("progress", `本机节点正在执行（${p.runtime}）…`, sha);
+          const manifest = p.workspace_manifest ?? { files: [] };
+          const mirror = await syncSpace(
+            {
+              workdir: cwd,
+              cacheDir:
+                o.cacheDir ?? (c.cache_dir ? expand(c.cache_dir, home) : join(home, ".cache/relaydesk-bridge/spaces")),
+              projectId: p.project_id,
+              runId: runKey,
+              serverUrl: c.server_url,
+              token: c.agent_token,
+              rpc,
+              signal: abort.signal,
+            },
+            manifest,
+          );
+          const fullPrompt = [
+            "This is a read-only discussion/audit run on the bound local project repository. Do not modify repository files or disclose any secrets.",
+            mirror.handbook,
+            p.system_context,
+            p.prompt,
+          ]
+            .filter(Boolean)
+            .join("\n\n");
+          let lastProgressAt = 0;
+          const result = await runLocalChat({
+            config: c,
+            catalog: cat,
+            p: {
+              run_id: p.run_id,
+              session_id: runKey,
+              project_id: p.project_id,
+              runtime: p.runtime,
+              model: p.model,
+              reasoning_effort: p.reasoning_effort ?? "default",
+              sandbox_mode: "read-only",
+              network_access: false,
+              prompt: p.prompt,
+              workspace_manifest: manifest,
+            },
+            cwd,
+            homeDir: home,
+            spaceDir: mirror.root,
+            allowSecrets: false,
+            signal: abort.signal,
+            prompt: fullPrompt,
+            onEvent: (ev) => {
+              const now = Date.now();
+              if (now - lastProgressAt < 2500) return;
+              if (ev.type === "status" && ev.message) {
+                lastProgressAt = now;
+                emit("progress", ev.message, sha);
+              } else if (ev.type === "tool" && ev.event.summary) {
+                lastProgressAt = now;
+                emit("progress", `${ev.event.tool}: ${ev.event.summary}`, sha);
+              }
+            },
+          });
+          if (abort.signal.aborted) {
+            emit("fail", abort.signal.reason?.message === "Local CLI run timed out" ? "本机 CLI 执行超时" : "本机 CLI 执行已中止", sha);
+          } else if (result.status === "done" && result.content.trim()) {
+            emit("finish", result.content.trim(), sha);
+          } else {
+            emit("fail", result.error || "本机 CLI 未返回有效结果", sha);
+          }
+        } catch (e) {
+          emit("fail", message(e), sha);
+        } finally {
+          release?.();
+        }
+      })().finally(() => {
+        clearTimeout(timeout);
+        clearInterval(heartbeatTimer);
+        active.delete(runKey);
+      });
+      active.set(runKey, { abort, socket, project: p.project_id, session: runKey, job });
+    }
     socket.on("message", (data, binary) => {
       if (closed || ws !== socket || binary) return;
       let f: Frame;
@@ -540,6 +674,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       if (f.type === "hello.ack") {
         ready = true;
         backoff = min;
+        log(`connected as "${String(f.payload.agent_name ?? "")}" (${String(f.payload.agent_id ?? "")}) · models=${catalog.models.length} · projects=${Object.keys(config.projects ?? {}).length}`);
         return;
       }
       if (!ready) return;
@@ -554,6 +689,11 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       if (f.type === "chat.abort") {
         const a = active.get(String(f.payload.run_id));
         if (a && a.socket === socket && (!f.payload.session_id || f.payload.session_id === a.session)) a.abort.abort();
+      }
+      if (f.type === "cli_run.start") startCliRun(f.payload as Parameters<typeof startCliRun>[0]);
+      if (f.type === "cli_run.abort") {
+        const a = active.get(`cli:${String(f.payload.run_id)}`);
+        if (a && a.socket === socket) a.abort.abort();
       }
     });
     socket.once("close", (code) => {
@@ -570,6 +710,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       if (ws === socket) {
         ws = undefined;
         superseded = code === 4001;
+        log(`disconnected (code=${code})${superseded ? " - replaced by newer connection" : closed ? "" : ` - reconnecting in ${backoff}ms`}`);
         schedule();
       }
     });
@@ -592,23 +733,45 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
   };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  const resolved = resolve(process.argv[1]);
+  if (import.meta.url === pathToFileURL(resolved).href) return true;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(resolved)).href;
+  } catch {
+    return false;
+  }
+})();
+
+if (isMain) {
   const args = process.argv.slice(2);
-  if (args.length && (args[0] !== "--config" || args.length !== 2)) {
-    console.error("Usage: pnpm bridge [--config PATH]");
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(
+      [
+        `Relaydesk Local Bridge v${BRIDGE_VERSION}`,
+        "Usage: node relaydesk-bridge.mjs [--config PATH]",
+        "Default config: $RELAYDESK_BRIDGE_CONFIG or ~/.config/relaydesk-bridge/config.json",
+      ].join("\n"),
+    );
+  } else if (args.includes("--version") || args.includes("-v")) {
+    console.log(BRIDGE_VERSION);
+  } else if (args.length && (args[0] !== "--config" || args.length !== 2)) {
+    console.error("Usage: node relaydesk-bridge.mjs [--config PATH]");
     process.exitCode = 1;
   } else {
     try {
-      const daemon = await startBridgeDaemon({
-        configPath:
-          args[1] ?? process.env.RELAYDESK_BRIDGE_CONFIG ?? join(homedir(), ".config/relaydesk-bridge/config.json"),
-      });
+      const configPath =
+        args[1] ?? process.env.RELAYDESK_BRIDGE_CONFIG ?? join(homedir(), ".config/relaydesk-bridge/config.json");
+      const daemon = await startBridgeDaemon({ configPath, verbose: true });
       for (const sig of ["SIGTERM", "SIGINT"] as const)
         process.once(sig, () => {
           void daemon.close();
         });
-    } catch {
-      console.error("Unable to start bridge. Check the local configuration and file permissions.");
+    } catch (err) {
+      console.error(
+        `Unable to start bridge: ${err instanceof Error ? err.message : "check local configuration and file permissions."}`,
+      );
       process.exitCode = 1;
     }
   }

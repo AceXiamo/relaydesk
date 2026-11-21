@@ -11,3 +11,8 @@
 !app/**
 !public/
 !public/**
+!agent/
+!agent/bridge/
+!agent/bridge/**
+!scripts/
+!scripts/**

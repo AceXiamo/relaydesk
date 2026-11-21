@@ -13,6 +13,7 @@ import type {
   WorkspaceFileEntry,
 } from "~/lib/types.ts";
 import { Icon } from "../Icon.tsx";
+import { Select, type SelectOption } from "../Select.tsx";
 import { LivePulseDot } from "../ui.tsx";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./RichPromptEditor.tsx";
 
@@ -630,17 +631,60 @@ interface MentionEntry {
 }
 
 const effortLevels = ["off", "low", "medium", "high", "max"] as const;
+const effortOptionMeta: Record<
+  ChatReasoningEffort,
+  { description: string; badge?: string; dotClassName: string }
+> = {
+  default: { description: "跟随模型或项目默认设定", dotClassName: "bg-zinc-400" },
+  off: { description: "关闭深度思考，响应最快", badge: "Off", dotClassName: "bg-slate-400" },
+  low: { description: "轻量推理，适合简单问答", badge: "Low", dotClassName: "bg-sky-400" },
+  medium: { description: "均衡推理质量与响应速度", badge: "Med", dotClassName: "bg-indigo-400" },
+  high: { description: "深度严谨推理，适合复杂排查", badge: "High", dotClassName: "bg-violet-500" },
+  max: { description: "最高推理预算，攻克复杂难题", badge: "Max", dotClassName: "bg-amber-500" },
+};
 const contextSize = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+
+function resolveActiveLocalAgent(
+  runtimeInfo: ChatRuntimeInfo | null,
+  projectId: string | undefined,
+  executionTarget: string,
+  runtime: ChatRuntime,
+) {
+  const agents = runtimeInfo?.agents ?? [];
+  if (executionTarget === "cloud") return null;
+  if (executionTarget.startsWith("local:")) {
+    const id = executionTarget.slice("local:".length);
+    return agents.find((a) => a.id === id) ?? null;
+  }
+  const priority = runtimeInfo?.effective_priority ?? agents.map((a) => `local:${a.id}`);
+  for (const key of priority) {
+    if (key === "cloud") return null;
+    if (!key.startsWith("local:")) continue;
+    const id = key.slice("local:".length);
+    const agent = agents.find((a) => a.id === id);
+    if (!agent?.online) continue;
+    const binding = projectId ? agent.bindings.find((b) => b.project_id === projectId) : undefined;
+    if (projectId && (!binding || !binding.enabled || !binding.path_ok)) continue;
+    if (!agent.runtimes[runtime]?.available) continue;
+    return agent;
+  }
+  return null;
+}
 
 function catalogForRuntime(
   runtime: ChatRuntime,
   settings: ChatRuntimeInfo["project_cli"] | undefined,
   selectedModel: string,
+  extraModels: ReadonlyArray<ModelCatalogItem> = [],
 ): ModelCatalogItem[] {
   const suggestions = builtinModels.filter((item) => item.runtime === runtime);
   const catalog = new Map<string, ModelCatalogItem>();
-  for (const item of settings?.models ?? []) {
+  for (const item of extraModels) {
     if (item.runtime === runtime)
+      catalog.set(item.id, { ...suggestions.find((s) => s.id === item.id), ...item });
+  }
+  for (const item of settings?.models ?? []) {
+    if (item.runtime === runtime && !catalog.has(item.id))
       catalog.set(item.id, { ...suggestions.find((s) => s.id === item.id), ...item });
   }
   const projectDefault = settings?.runtime === runtime ? settings.model : "";
@@ -654,21 +698,27 @@ function catalogForRuntime(
 }
 
 interface ModelControlsProps {
+  projectId?: string;
   runtime: ChatRuntime;
   runtimeInfo: ChatRuntimeInfo | null;
   model: string;
   effort: ChatReasoningEffort;
+  executionTarget?: string;
   onChangeModel: (runtime: ChatRuntime, model: string, effort: ChatReasoningEffort) => void;
   onChangeEffort: (effort: ChatReasoningEffort) => void;
+  onChangeExecutionTarget?: (target: string) => void;
 }
 
 function ModelControls({
+  projectId,
   runtime,
   runtimeInfo,
   model,
   effort,
+  executionTarget = "auto",
   onChangeModel,
   onChangeEffort,
+  onChangeExecutionTarget,
   open,
   setOpen,
   disabled,
@@ -685,13 +735,22 @@ function ModelControls({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listId = useId();
   const settings = runtimeInfo?.project_cli;
-  const catalog = useMemo(() => catalogForRuntime(runtime, settings, model), [runtime, settings, model]);
+  const activeLocalAgent = useMemo(
+    () => resolveActiveLocalAgent(runtimeInfo, projectId, executionTarget, runtime),
+    [runtimeInfo, projectId, executionTarget, runtime],
+  );
+  const catalog = useMemo(
+    () => catalogForRuntime(runtime, settings, model, activeLocalAgent?.models ?? []),
+    [runtime, settings, model, activeLocalAgent],
+  );
   const current = catalog.find((item) => item.id === model);
   const levels = current?.effort_levels ?? effortLevels;
   const adjustable = current?.supports_effort !== false && levels.length > 0;
   const displayedEffort =
     adjustable && (effort === "default" || levels.includes(effort)) ? effort : "default";
-  const configuredModel = settings?.runtime === runtime ? settings.model : "";
+  const configuredModel =
+    activeLocalAgent?.runtimes[runtime]?.default_model ||
+    (settings?.runtime === runtime ? settings.model : "");
   const search = query.trim();
   const matches = catalog.filter((item) =>
     `${item.id} ${item.label ?? ""}`.toLowerCase().includes(search.toLowerCase()),
@@ -702,7 +761,88 @@ function ModelControls({
     : matches;
   if (!search && !configuredModel) options.push({ runtime, id: "", label: "使用 CLI 默认模型" });
   const selectedIndex = Math.min(index, options.length - 1);
-  const ready = runtimeInfo && runtimeInfo.auth_mode[runtime] !== "unavailable";
+  const ready = activeLocalAgent
+    ? Boolean(activeLocalAgent.online && activeLocalAgent.runtimes[runtime]?.available)
+    : Boolean(runtimeInfo && runtimeInfo.auth_mode[runtime] !== "unavailable");
+
+  const effortOptions = useMemo<Array<SelectOption<ChatReasoningEffort>>>(() => {
+    const projectDefault =
+      settings?.runtime === runtime && settings.default_effort && settings.default_effort !== "default"
+        ? effortLabels[settings.default_effort]
+        : undefined;
+    const list: Array<SelectOption<ChatReasoningEffort>> = [
+      {
+        value: "default",
+        label: effortLabels.default,
+        triggerLabel: effortLabels.default,
+        description: effortOptionMeta.default.description,
+        badge: projectDefault ? `项目：${projectDefault}` : undefined,
+        dotClassName: effortOptionMeta.default.dotClassName,
+      },
+    ];
+    for (const level of levels) {
+      list.push({
+        value: level,
+        label: effortLabels[level],
+        triggerLabel: effortLabels[level],
+        description: effortOptionMeta[level].description,
+        badge: effortOptionMeta[level].badge,
+        dotClassName: effortOptionMeta[level].dotClassName,
+      });
+    }
+    return list;
+  }, [levels, runtime, settings]);
+
+  const targetOptions = useMemo<Array<SelectOption<string>>>(() => {
+    const agents = runtimeInfo?.agents ?? [];
+    const autoPreview = activeLocalAgent
+      ? `将优先由本机「${activeLocalAgent.name}」承接`
+      : runtimeInfo?.local_clis[runtime]
+        ? "当前无可用本机节点，将由云端执行"
+        : "按项目优先级自动路由";
+    const list: Array<SelectOption<string>> = [
+      {
+        value: "auto",
+        label: "自动路由",
+        triggerLabel: activeLocalAgent ? `自动 · ${activeLocalAgent.name}` : "自动",
+        description: autoPreview,
+        icon: "sparkles",
+        badge: "推荐",
+      },
+    ];
+    for (const agent of agents) {
+      const binding = projectId ? agent.bindings.find((b) => b.project_id === projectId) : undefined;
+      const runtimeReady = Boolean(agent.runtimes[runtime]?.available);
+      const bindingReady = Boolean(binding?.enabled && binding?.path_ok);
+      const statusText = !agent.online
+        ? "离线"
+        : !bindingReady
+          ? "未绑定/禁用本项目目录"
+          : !runtimeReady
+            ? `未安装 ${runtime}`
+            : `就绪 · 并发 ${agent.active_runs}/${agent.max_concurrency}`;
+      list.push({
+        value: `local:${agent.id}`,
+        label: agent.name,
+        triggerLabel: agent.name,
+        description: binding?.workdir ? `${statusText} · ${binding.workdir}` : statusText,
+        dotClassName: agent.online && bindingReady && runtimeReady ? "bg-emerald-500" : "bg-zinc-400",
+        badge: agent.online ? "本机" : "离线",
+        group: "本机执行节点",
+      });
+    }
+    list.push({
+      value: "cloud",
+      label: "云端执行器",
+      triggerLabel: "云端",
+      description: runtimeInfo?.local_clis[runtime]
+        ? "在 Relaydesk 服务端隔离工作区运行"
+        : `服务端未检测到 ${runtime} CLI`,
+      icon: "cloud",
+      group: "云端",
+    });
+    return list;
+  }, [runtimeInfo, projectId, runtime, activeLocalAgent]);
 
   useEffect(() => {
     if (open) inputRef.current?.focus();
@@ -713,7 +853,8 @@ function ModelControls({
     triggerRef.current?.focus();
   };
   const choose = (rt: ChatRuntime, id: string, closeAfter: boolean) => {
-    const entry = (rt === runtime ? catalog : catalogForRuntime(rt, settings, id)).find(
+    const targetAgent = resolveActiveLocalAgent(runtimeInfo, projectId, executionTarget, rt);
+    const entry = (rt === runtime ? catalog : catalogForRuntime(rt, settings, id, targetAgent?.models ?? [])).find(
       (item) => item.id === id,
     );
     const nextEffort =
@@ -741,6 +882,27 @@ function ModelControls({
         }
       }}
     >
+      {onChangeExecutionTarget && (
+        <Select
+          value={executionTarget}
+          onChange={(next) => {
+            setOpen(false);
+            onChangeExecutionTarget(next);
+          }}
+          options={targetOptions}
+          disabled={disabled}
+          size="xs"
+          variant="default"
+          minMenuWidth={256}
+          maxMenuWidth={320}
+          leadingIcon={executionTarget === "cloud" ? "cloud" : executionTarget.startsWith("local:") ? "monitor" : "sparkles"}
+          leadingIconClassName={
+            activeLocalAgent ? "text-emerald-500" : "text-[var(--text-muted)]"
+          }
+          ariaLabel="执行节点"
+          className="!border-transparent !bg-transparent hover:!bg-[var(--surface-hover)] hover:!border-[var(--border-subtle)] !px-2 max-w-[140px]"
+        />
+      )}
       <button
         type="button"
         ref={triggerRef}
@@ -890,38 +1052,32 @@ function ModelControls({
           </button>
         </div>
       )}
-      <label
-        title={!adjustable ? "该模型不支持调节思考强度" : "调整思考强度"}
+      <Select
+        value={displayedEffort}
+        onChange={(next) => {
+          setOpen(false);
+          onChangeEffort(next);
+        }}
+        options={effortOptions}
+        disabled={!adjustable || disabled}
+        size="xs"
+        variant="default"
+        minMenuWidth={268}
+        maxMenuWidth={300}
+        leadingIcon="sparkles"
+        leadingIconClassName={
+          displayedEffort !== "default" && displayedEffort !== "off"
+            ? "text-indigo-500"
+            : "text-[var(--text-muted)]"
+        }
+        ariaLabel={adjustable ? "思考强度" : "该模型不支持调节思考强度"}
         className={cn(
-          pillClass,
-          "relative focus-within:ring-2 focus-within:ring-[var(--rd-ring)]",
-          (!adjustable || disabled) && "opacity-50",
+          "!border-transparent !bg-transparent hover:!bg-[var(--surface-hover)] hover:!border-[var(--border-subtle)] !px-2",
+          displayedEffort !== "default" &&
+            displayedEffort !== "off" &&
+            "!bg-indigo-500/8 !text-indigo-700 dark:!text-indigo-300",
         )}
-      >
-        <Icon name="sparkles" size={12} />
-        <span>{effortLabels[displayedEffort]}</span>
-        <Icon name="chevron-down" size={10} />
-        <select
-          aria-label={adjustable ? "思考强度" : "该模型不支持调节思考强度"}
-          disabled={!adjustable || disabled}
-          value={displayedEffort}
-          onFocus={() => setOpen(false)}
-          onChange={(e) => onChangeEffort(e.target.value as ChatReasoningEffort)}
-          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-        >
-          <option value="default">
-            {effortLabels.default}
-            {settings?.runtime === runtime && settings.default_effort && settings.default_effort !== "default"
-              ? `（项目：${effortLabels[settings.default_effort]}）`
-              : ""}
-          </option>
-          {levels.map((level) => (
-            <option key={level} value={level}>
-              {effortLabels[level]}
-            </option>
-          ))}
-        </select>
-      </label>
+      />
     </div>
   );
 }
@@ -951,6 +1107,7 @@ export interface PromptBarProps extends ModelControlsProps {
 }
 
 export function PromptBar({
+  projectId,
   input,
   onInputChange,
   attachments,
@@ -968,9 +1125,11 @@ export function PromptBar({
   composerRef,
   model,
   effort,
+  executionTarget,
   settingsBusy,
   onChangeModel,
   onChangeEffort,
+  onChangeExecutionTarget,
   onChangeSandboxMode,
   onToggleNetworkAccess,
   onOpenCliSettings,
@@ -1425,10 +1584,19 @@ export function PromptBar({
             <span className="h-3.5 w-px bg-[var(--border-subtle)] mx-0.5" />
 
             <ModelControls
-              runtime={runtime} runtimeInfo={runtimeInfo} model={model} effort={effort}
-              onChangeModel={onChangeModel} onChangeEffort={onChangeEffort}
-              open={popover === "runtime"} setOpen={(open) => setPopover(open ? "runtime" : "none")}
-              disabled={streaming || settingsBusy} onOpenCliSettings={onOpenCliSettings}
+              projectId={projectId}
+              runtime={runtime}
+              runtimeInfo={runtimeInfo}
+              model={model}
+              effort={effort}
+              executionTarget={executionTarget}
+              onChangeModel={onChangeModel}
+              onChangeEffort={onChangeEffort}
+              onChangeExecutionTarget={onChangeExecutionTarget}
+              open={popover === "runtime"}
+              setOpen={(open) => setPopover(open ? "runtime" : "none")}
+              disabled={streaming || settingsBusy}
+              onOpenCliSettings={onOpenCliSettings}
             />
 
             {/* Sandbox Mode Toggle Pill */}

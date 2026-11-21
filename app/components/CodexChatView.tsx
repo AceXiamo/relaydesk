@@ -813,7 +813,38 @@ export function CodexChatView({
     );
   }
 
-  const currentAuthMode = runtimeInfo?.auth_mode[currentRuntime] ?? "unavailable";
+  const currentTarget = activeSession?.execution_target || draftTarget || "auto";
+  const currentAgents = runtimeInfo?.agents ?? [];
+  const hasReadyLocalForCurrent = (() => {
+    const checkAgent = (agentId: string) => {
+      const agent = currentAgents.find((a) => a.id === agentId);
+      if (!agent?.online || !agent.runtimes[currentRuntime]?.available) return false;
+      const binding = agent.bindings.find((b) => b.project_id === project.id);
+      return Boolean(binding?.enabled && binding?.path_ok);
+    };
+    if (currentTarget.startsWith("local:")) return checkAgent(currentTarget.slice("local:".length));
+    if (currentTarget === "cloud") return false;
+    return currentAgents.some((a) => checkAgent(a.id));
+  })();
+  const currentAuthMode =
+    currentTarget === "cloud"
+      ? (runtimeInfo?.auth_mode[currentRuntime] ?? "unavailable")
+      : hasReadyLocalForCurrent
+        ? "local_cli"
+        : currentTarget.startsWith("local:")
+          ? "unavailable"
+          : (runtimeInfo?.auth_mode[currentRuntime] ?? "unavailable");
+  const resolvedTargetLabel = (() => {
+    const resolved = activeSession?.resolved_target;
+    if (!resolved) return null;
+    if (resolved === "cloud") return "云端";
+    if (resolved.startsWith("local:")) {
+      const id = resolved.slice("local:".length);
+      const name = currentAgents.find((a) => a.id === id)?.name;
+      return name ? `本机 · ${name}` : "本机节点";
+    }
+    return null;
+  })();
   const readyReposCount = workspaceSummary
     ? workspaceSummary.repos_status.repos.filter((r) => r.ready).length
     : 0;
@@ -1107,6 +1138,19 @@ export function CodexChatView({
               >
                 {activeSession ? activeSession.title : `Agent 工作台 · ${project.name}`}
               </button>
+            )}
+
+            {resolvedTargetLabel && (
+              <span
+                title={`上次实际执行节点：${resolvedTargetLabel}`}
+                className="hidden sm:inline-flex items-center gap-1 text-[10.5px] font-medium px-1.5 py-0.5 rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 shrink-0"
+              >
+                <Icon
+                  name={activeSession?.resolved_target?.startsWith("local:") ? "monitor" : "cloud"}
+                  size={10}
+                />
+                {resolvedTargetLabel}
+              </span>
             )}
 
             {activeSession?.external_session_id && (
@@ -1487,6 +1531,7 @@ export function CodexChatView({
         <div className="shrink-0 px-4 pt-2 pb-4 bg-gradient-to-t from-[var(--surface-canvas)] via-[var(--surface-canvas)]/95 to-transparent">
           <div className="max-w-[740px] mx-auto">
             <PromptBar
+              projectId={project.id}
               input={input}
               onInputChange={setInput}
               attachments={attachments}
@@ -1504,6 +1549,7 @@ export function CodexChatView({
               composerRef={composerRef}
               model={activeConfiguredModel}
               effort={currentEffort}
+              executionTarget={currentTarget}
               settingsBusy={settingsBusy}
               onChangeModel={(rt, model, effort) => {
                 if (activeSession) {
@@ -1521,6 +1567,12 @@ export function CodexChatView({
               onChangeEffort={(effort) => {
                 if (activeSession) void handleUpdateSession({ reasoning_effort: effort });
                 else setDraftEffort(effort);
+              }}
+              onChangeExecutionTarget={(target) => {
+                setDraftTarget(target);
+                if (activeSession && target !== activeSession.execution_target) {
+                  void handleUpdateSession({ execution_target: target });
+                }
               }}
               onChangeSandboxMode={(mode) => {
                 setDraftSandboxMode(mode);

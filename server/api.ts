@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { BridgeHub } from "./bridge-hub.ts";
+import {
+  canResumeExternalSession,
+  normalizeExecutionPriority,
+  resolveChatExecutionTarget,
+  resolveCliRunBridgeTarget,
+} from "./execution-router.ts";
 import { ApiError } from "./errors.ts";
 import { projectCliConfiguration } from "./project-cli-config.ts";
 import { discoverProjectCliModels } from "./project-model-discovery.ts";
@@ -413,6 +421,16 @@ export class ApiRouter {
       const rawSubpath = pathname.slice("/api/".length).replace(/^\/+|\/+$/g, "");
       const parts = rawSubpath ? rawSubpath.split("/") : [];
 
+      // Bridge agent authenticated standalone client download (independent of operator auth)
+      if (
+        parts.length === 2 &&
+        parts[0] === "bridge" &&
+        parts[1] === "client.mjs"
+      ) {
+        await this.handleBridgeClientBundle(req, res, method);
+        return;
+      }
+
       // Bridge agent authenticated workspace file transfer (independent of operator auth)
       if (
         parts.length === 5 &&
@@ -486,6 +504,13 @@ export class ApiRouter {
       // Operator Project <-> Local Bridge agent binding endpoints
       if (parts.length >= 3 && parts[0] === "projects" && parts[2] === "agent-bindings") {
         const result = await this.handleProjectAgentBindings(req, method, parts[1], parts.slice(3));
+        this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
+      // Operator Project execution routing & priority endpoints
+      if (parts.length === 3 && parts[0] === "projects" && parts[2] === "execution-routing") {
+        const result = await this.handleProjectExecutionRouting(req, method, parts[1]);
         this.sendJson(req, res, 200, result, meta);
         return;
       }
@@ -671,11 +696,15 @@ export class ApiRouter {
       forwardedProto === "https" || this.wallet?.origin.startsWith("https://")
         ? "wss"
         : "ws";
+    const httpProto = proto === "wss" ? "https" : "http";
     const serverUrl = `${proto}://${host}/api/bridge/ws`;
+    const clientUrl = `${httpProto}://${host}/api/bridge/client.mjs`;
     const described = this.describeBridgeAgent(agent);
     return {
       agent: described,
       token,
+      client_url: clientUrl,
+      bridge_version: "2.0.0",
       quickstart_config: {
         server_url: serverUrl,
         agent_token: token,
@@ -687,8 +716,54 @@ export class ApiRouter {
         projects: {},
         models: [],
       },
-      start_command: "pnpm bridge --config ~/.config/relaydesk-bridge/config.json",
+      start_command: "node ~/.local/share/relaydesk-bridge/relaydesk-bridge.mjs --config ~/.config/relaydesk-bridge/config.json",
     };
+  }
+
+  private bridgeBundleCache: { path: string; mtimeMs: number; size: number; body: Buffer; sha256: string } | null = null;
+
+  private async handleBridgeClientBundle(
+    req: IncomingMessage,
+    res: ServerResponse,
+    method: string,
+  ): Promise<void> {
+    if (method !== "GET" && method !== "HEAD") {
+      throw new ApiError(405, "Method not allowed");
+    }
+    const urlObj = new URL(req.url ?? "/", "http://localhost");
+    this.checkBridgeAgent(req, urlObj);
+
+    const bundlePath = resolve(
+      process.env.RELAYDESK_BRIDGE_BUNDLE_PATH?.trim() || "build/bridge/relaydesk-bridge.mjs",
+    );
+    if (!existsSync(bundlePath)) {
+      throw new ApiError(503, "Bridge client bundle not built yet. Run pnpm build:bridge on the server.");
+    }
+    const st = statSync(bundlePath);
+    if (!st.isFile()) {
+      throw new ApiError(503, "Bridge client bundle is unavailable");
+    }
+    let cached = this.bridgeBundleCache;
+    if (!cached || cached.path !== bundlePath || cached.mtimeMs !== st.mtimeMs || cached.size !== st.size) {
+      const body = readFileSync(bundlePath);
+      const sha256 = createHash("sha256").update(body).digest("hex");
+      cached = { path: bundlePath, mtimeMs: st.mtimeMs, size: st.size, body, sha256 };
+      this.bridgeBundleCache = cached;
+    }
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+    res.setHeader("Content-Length", String(cached.body.length));
+    res.setHeader("X-Content-Sha256", cached.sha256);
+    res.setHeader("X-Bridge-Version", "2.0.0");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    if (method === "HEAD") {
+      res.end();
+      return;
+    }
+    res.end(cached.body);
   }
 
   private checkBridgeAgent(req: IncomingMessage, urlObj: URL): BridgeAgentSummary {
@@ -916,6 +991,88 @@ export class ApiRouter {
     }
 
     throw new ApiError(404, "Unknown project agent binding endpoint");
+  }
+
+  private async handleProjectExecutionRouting(
+    req: IncomingMessage,
+    method: string,
+    projectId: string,
+  ): Promise<unknown> {
+    this.store.getProjectRow(projectId);
+    const listDescribedAgents = () =>
+      this.store.listBridgeAgents().map((a) => this.describeBridgeAgent(a));
+
+    if (method === "GET") {
+      const routing = this.store.getProjectExecutionRouting(projectId);
+      const agents = listDescribedAgents();
+      return {
+        routing,
+        effective_priority: normalizeExecutionPriority(routing, agents),
+        agents,
+      };
+    }
+
+    if (method === "PUT" || method === "PATCH") {
+      const data = await this.readJson(req, 16 * 1024);
+      const agents = listDescribedAgents();
+      const validIds = new Set(agents.map((a) => a.id));
+      const patch: { priority?: string[]; auto_fallback?: boolean; route_cli_runs?: boolean } = {};
+
+      if ("priority" in data) {
+        if (!Array.isArray(data.priority) || data.priority.length > 100) {
+          throw new ApiError(400, "priority 必须为数组");
+        }
+        const cleaned: string[] = [];
+        const seen = new Set<string>();
+        for (const item of data.priority) {
+          if (typeof item !== "string") throw new ApiError(400, "priority 元素必须为字符串");
+          const trimmed = item.trim();
+          if (trimmed === "cloud") {
+            if (!seen.has("cloud")) {
+              seen.add("cloud");
+              cleaned.push("cloud");
+            }
+            continue;
+          }
+          if (trimmed.startsWith("local:")) {
+            const agentId = trimmed.slice("local:".length);
+            if (!validIds.has(agentId)) {
+              throw new ApiError(400, `未知的执行节点：${trimmed}`);
+            }
+            if (!seen.has(trimmed)) {
+              seen.add(trimmed);
+              cleaned.push(trimmed);
+            }
+            continue;
+          }
+          throw new ApiError(400, `无效的优先级目标：${trimmed}`);
+        }
+        patch.priority = cleaned;
+      }
+      if ("auto_fallback" in data) {
+        if (typeof data.auto_fallback !== "boolean") {
+          throw new ApiError(400, "auto_fallback 必须为布尔值");
+        }
+        patch.auto_fallback = data.auto_fallback;
+      }
+      if ("route_cli_runs" in data) {
+        if (typeof data.route_cli_runs !== "boolean") {
+          throw new ApiError(400, "route_cli_runs 必须为布尔值");
+        }
+        patch.route_cli_runs = data.route_cli_runs;
+      }
+
+      const routing = this.store.transaction(true, () =>
+        this.store.updateProjectExecutionRouting(projectId, patch),
+      );
+      return {
+        routing,
+        effective_priority: normalizeExecutionPriority(routing, agents),
+        agents,
+      };
+    }
+
+    throw new ApiError(405, "Method not allowed");
   }
 
   private async handleAuth(
@@ -1612,7 +1769,15 @@ export class ApiRouter {
 
     // GET /api/projects/:id/codex-chat/runtime
     if (subparts.length === 1 && subparts[0] === "runtime" && method === "GET") {
-      return getChatRuntimeInfo(this.store.dbPath, projectInfo.id);
+      const base = getChatRuntimeInfo(this.store.dbPath, projectInfo.id);
+      const routing = this.store.getProjectExecutionRouting(projectInfo.id);
+      const agents = this.store.listBridgeAgents().map((a) => this.describeBridgeAgent(a));
+      return {
+        ...base,
+        routing,
+        effective_priority: normalizeExecutionPriority(routing, agents),
+        agents,
+      };
     }
 
     // GET / POST /api/projects/:id/codex-chat/sessions
@@ -1761,26 +1926,24 @@ export class ApiRouter {
         throw new ApiError(409, "当前会话正在生成回复，请等待完成或先点击停止。");
       }
 
+      const localClis = detectLocalClis();
       const {
         session,
         priorMessages,
         userMessage,
         assistantMessage,
         provisionalTitle,
-        localAgentId,
-        localBinding,
+        resolvedTarget,
       } = this.store.transaction(true, () => {
         let current = this.store.getChatSession(projectInfo.id, sessionId);
-        const agentId = current.execution_target.startsWith("local:")
-          ? current.execution_target.slice("local:".length)
-          : null;
-        let binding: BridgeAgentBindingSummary | null = null;
-        if (agentId) {
-          if (!this.bridgeHub) {
-            throw new ApiError(409, "本地执行节点服务未启用");
-          }
-          binding = this.bridgeHub.assertCanRun(agentId, projectInfo.id, current.runtime);
-        }
+        const resolved = resolveChatExecutionTarget({
+          store: this.store,
+          bridgeHub: this.bridgeHub,
+          projectId: projectInfo.id,
+          executionTarget: current.execution_target || "auto",
+          runtime: current.runtime,
+          localClis: { codex: localClis.codex, claude: localClis.claude },
+        });
         const prior = this.store.listChatMessages(projectInfo.id, sessionId);
         // Auto-title session from the first user message when still using default title.
         const autoTitle =
@@ -1809,10 +1972,10 @@ export class ApiRouter {
           userMessage: userMsg,
           assistantMessage: assistantMsg,
           provisionalTitle: autoTitle,
-          localAgentId: agentId,
-          localBinding: binding,
+          resolvedTarget: resolved,
         };
       });
+      const { targetKey, localAgentId, localBinding } = resolvedTarget;
 
       const abortController = new AbortController();
       res.on("close", () => {
@@ -1870,10 +2033,21 @@ export class ApiRouter {
             })
         : Promise.resolve();
 
-      const targetKey = localAgentId ? `local:${localAgentId}` : "cloud";
-      const canResumePrior =
-        Boolean(session.external_session_id) &&
-        (session.resolved_target === targetKey || (targetKey === "cloud" && !session.resolved_target));
+      const canResumePrior = canResumeExternalSession(session, targetKey);
+      if (resolvedTarget.fallbackFrom) {
+        const destLabel = localAgentId
+          ? `本机「${resolvedTarget.agentName || localAgentId}」`
+          : "云端执行器";
+        writeEvent({
+          type: "status",
+          message: `${resolvedTarget.fallbackReason || `${resolvedTarget.fallbackFrom}不可用`}，已自动降级到${destLabel}执行`,
+        });
+      } else if (localAgentId) {
+        writeEvent({
+          type: "status",
+          message: `正在由本机节点「${resolvedTarget.agentName || localAgentId}」执行…`,
+        });
+      }
       const resolveTask = (taskId: string) => {
         try {
           const row = this.store.getTaskRow(taskId);
@@ -2213,10 +2387,36 @@ export class ApiRouter {
       // Only this authenticated operator endpoint can create a shell-capable job.
       const row = this.store.getTaskRow(parts[1]);
       const config = projectCliConfiguration(this.store.dbPath, row.project_id);
-      if (!config.configured) throw new ApiError(409, "请先在项目设置中配置 CLI 的 API Key。");
+      const localTarget = resolveCliRunBridgeTarget({
+        store: this.store,
+        bridgeHub: this.bridgeHub,
+        projectId: row.project_id,
+        runtime: config.runtime,
+        cloudConfigured: config.configured,
+      });
+      if (!config.configured && !localTarget) {
+        throw new ApiError(409, "请先在项目设置中配置 CLI 的 API Key，或连接并绑定可用的本机 Local Agent。");
+      }
       const node = data.mode === "pr_audit" ? "pr_audit" : "operator";
       const run = this.store.enqueueCliRun(row.project_id, row.id, node, body);
-      return { queued: true, node, run };
+      if (localTarget) {
+        this.dispatchCliRunToBridge({
+          projectId: row.project_id,
+          runId: run.id,
+          agentId: localTarget.agent.id,
+          agentName: localTarget.agent.name,
+          runtime: config.runtime,
+          model: config.model,
+          reasoningEffort: config.default_effort,
+          cloudFallbackAllowed: config.configured && this.store.getProjectExecutionRouting(row.project_id).auto_fallback,
+        });
+      }
+      return {
+        queued: true,
+        node,
+        run,
+        ...(localTarget ? { target: `local:${localTarget.agent.id}`, target_name: localTarget.agent.name } : { target: "cloud" }),
+      };
     }
     const row = this.store.getProjectRow(parts[1]);
     this.checkWidgetOrigin(req, row.allowed_origins, meta);
@@ -2229,6 +2429,126 @@ export class ApiRouter {
     } finally {
       this.assistantInFlight -= 1;
     }
+  }
+
+  private dispatchCliRunToBridge(options: {
+    projectId: string;
+    runId: string;
+    agentId: string;
+    agentName: string;
+    runtime: "codex" | "claude";
+    model: string;
+    reasoningEffort: ChatReasoningEffort;
+    cloudFallbackAllowed: boolean;
+  }): void {
+    if (!this.bridgeHub) return;
+    const claimed = this.store.claimCliRunById(options.projectId, options.runId);
+    if (!claimed) return;
+    const { run, lease, context } = claimed;
+    const history = context.messages
+      .slice(-15)
+      .map((m) => `[${m.author} · ${m.kind}] ${m.body.slice(0, 1200)}`)
+      .join("\n");
+    const modeHeader =
+      run.mode === "pr_audit"
+        ? "你正在本机只读代码仓库中执行 Pull Request 独立审计。请结合本地代码、工单上下文与 PR 信息，输出清晰的风险点、回归检查与结论，切勿修改本地文件。"
+        : "你正在本机只读代码仓库中回答运营/研发关于本工单的问题。请查阅真实代码后给出精准、带文件路径与行号依据的答复，切勿修改本地文件。";
+    const promptParts = [
+      modeHeader,
+      `工单 #${context.task.number}：${context.task.title}`,
+      context.task.body ? `工单描述：\n${context.task.body.slice(0, 4000)}` : "",
+      context.task.delivery_ref ? `关联交付/PR：${context.task.delivery_ref}` : "",
+      history ? `近期对话记录：\n${history}` : "",
+      `本次请求：\n${run.question}`,
+    ].filter(Boolean);
+    const systemContext = context.project.agent_instructions.trim()
+      ? `## Project Instructions\n${context.project.agent_instructions.trim().slice(0, 4000)}`
+      : "";
+    const manifest = buildWorkspaceManifest(this.store.dbPath, options.projectId);
+
+    try {
+      this.store.eventCliRun(options.projectId, run.id, {
+        event: "progress",
+        lease,
+        body: `已派发至本机节点「${options.agentName}」执行…`,
+      });
+    } catch {
+      return;
+    }
+
+    let hadProgress = false;
+    void this.bridgeHub
+      .runCliRun(
+        options.agentId,
+        {
+          run_id: run.id,
+          project_id: options.projectId,
+          mode: run.mode,
+          runtime: options.runtime,
+          model: options.model || undefined,
+          reasoning_effort: options.reasoningEffort,
+          prompt: promptParts.join("\n\n"),
+          system_context: systemContext || undefined,
+          workspace_manifest: manifest,
+        },
+        (ev) => {
+          try {
+            if (ev.event === "progress") {
+              hadProgress = true;
+              this.store.eventCliRun(options.projectId, run.id, {
+                event: "progress",
+                lease,
+                body: ev.body || `本机节点「${options.agentName}」处理中…`,
+                ...(ev.sha ? { sha: ev.sha } : {}),
+              });
+            } else if (ev.event === "heartbeat") {
+              this.store.eventCliRun(options.projectId, run.id, {
+                event: "heartbeat",
+                lease,
+                body: "",
+                ...(ev.sha ? { sha: ev.sha } : {}),
+              });
+            } else if (ev.event === "finish") {
+              this.store.eventCliRun(options.projectId, run.id, {
+                event: "finish",
+                lease,
+                body: ev.body || "已完成。",
+                ...(ev.sha ? { sha: ev.sha } : {}),
+              });
+            } else if (ev.event === "fail") {
+              if (!hadProgress && options.cloudFallbackAllowed) {
+                if (this.store.requeueCliRun(options.projectId, run.id, lease)) {
+                  return;
+                }
+              }
+              this.store.eventCliRun(options.projectId, run.id, {
+                event: "fail",
+                lease,
+                body: ev.body || "本机节点执行失败",
+                ...(ev.sha ? { sha: ev.sha } : {}),
+              });
+            }
+          } catch {
+            // Lease may have already expired or completed.
+          }
+        },
+      )
+      .catch((err) => {
+        if (!hadProgress && options.cloudFallbackAllowed) {
+          if (this.store.requeueCliRun(options.projectId, run.id, lease)) {
+            return;
+          }
+        }
+        try {
+          this.store.eventCliRun(options.projectId, run.id, {
+            event: "fail",
+            lease,
+            body: err instanceof Error ? err.message : "派发至本机节点失败",
+          });
+        } catch {
+          // ignore
+        }
+      });
   }
 
   private schedulePrescreen(project: RawProjectRow, task: RawTaskRow): void {

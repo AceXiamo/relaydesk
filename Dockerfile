@@ -6,6 +6,9 @@ RUN pnpm install --frozen-lockfile
 COPY tsconfig.json react-router.config.ts vite.config.ts ./
 COPY app/ app/
 COPY public/ public/
+COPY server/ server/
+COPY agent/bridge/ agent/bridge/
+COPY scripts/ scripts/
 RUN pnpm build
 
 FROM node:24-slim AS runtime

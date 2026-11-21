@@ -464,6 +464,8 @@ export interface BridgeAgentTokenResponse {
   token: string;
   quickstart_config: Record<string, unknown>;
   start_command: string;
+  client_url: string;
+  bridge_version?: string;
 }
 
 export interface BridgeWorkspaceManifestFile {
@@ -485,6 +487,12 @@ export interface ProjectRoutingConfig {
   priority: string[];
   auto_fallback: boolean;
   route_cli_runs: boolean;
+}
+
+export interface ProjectExecutionRoutingResponse {
+  routing: ProjectRoutingConfig;
+  effective_priority: string[];
+  agents: BridgeAgentSummary[];
 }
 
 export interface ChatContextRef {
@@ -550,6 +558,9 @@ export interface ChatRuntimeInfo {
     codex: "project_key" | "local_cli" | "unavailable";
     claude: "project_key" | "local_cli" | "unavailable";
   };
+  routing?: ProjectRoutingConfig;
+  effective_priority?: string[];
+  agents?: BridgeAgentSummary[];
 }
 
 export type UtilityAiProvider = "openai" | "anthropic";
