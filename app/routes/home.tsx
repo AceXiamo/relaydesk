@@ -90,6 +90,7 @@ function ConsoleWorkspace() {
   const [feedbackModalOpen, setFeedbackModalOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [dark, setDark] = useState(false);
   const [pendingChatContext, setPendingChatContext] = useState<{
     ref?: ChatContextRef;
@@ -104,9 +105,26 @@ function ConsoleWorkspace() {
   useEffect(() => {
     setView(readInitialView());
     setDark(document.documentElement.classList.contains("dark"));
+    try {
+      setSidebarCollapsed(localStorage.getItem("relaydesk.sidebar_collapsed") === "1");
+    } catch {
+      // ignore storage errors
+    }
     const onHash = () => setView(readInitialView());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const toggleSidebarCollapsed = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("relaydesk.sidebar_collapsed", next ? "1" : "0");
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
   }, []);
 
   const changeView = useCallback((next: WorkspaceView) => {
@@ -387,6 +405,12 @@ function ConsoleWorkspace() {
         return;
       }
 
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        toggleSidebarCollapsed();
+        return;
+      }
+
       const target = e.target as HTMLElement | null;
       const inEditable =
         target &&
@@ -443,6 +467,7 @@ function ConsoleWorkspace() {
     feedbackModalOpen,
     openTaskDetail,
     projectModalOpen,
+    toggleSidebarCollapsed,
     view,
     visibleTasks,
   ]);
@@ -498,6 +523,8 @@ function ConsoleWorkspace() {
         authStatus={authStatus}
         online={online}
         dark={dark}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={toggleSidebarCollapsed}
         mobileOpen={mobileNavOpen}
         onCloseMobile={() => setMobileNavOpen(false)}
         onSelectProject={(id) => {
@@ -517,6 +544,50 @@ function ConsoleWorkspace() {
       />
 
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
+        {/* Desktop Collapsed Sidebar Expand Strip (non-chat views or empty project) */}
+        {sidebarCollapsed && !(view === "chat" && currentProject) && (
+          <div className="hidden lg:flex shrink-0 items-center justify-between px-4 h-10 border-b border-[var(--border-subtle)] bg-[var(--surface-sidebar)]/85">
+            <div className="flex items-center gap-2 min-w-0">
+              <button
+                type="button"
+                onClick={toggleSidebarCollapsed}
+                title="展开左侧导航栏 (⌘B)"
+                aria-label="展开左侧导航栏"
+                className="inline-flex items-center gap-1.5 h-7 px-2 rounded-md text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+              >
+                <Icon name="panel-left-open" size={14} />
+                <span>展开侧边栏</span>
+              </button>
+              {currentProject && (
+                <>
+                  <span className="h-3.5 w-px bg-[var(--border-subtle)]" />
+                  <span className="text-[12px] font-medium text-[var(--text-muted)] truncate">
+                    {currentProject.name}
+                  </span>
+                </>
+              )}
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setCommandOpen(true)}
+                title="快速命令 (⌘K)"
+                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+              >
+                <Icon name="search" size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={toggleTheme}
+                title={dark ? "切换浅色主题" : "切换深色主题"}
+                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+              >
+                <Icon name={dark ? "sun" : "moon"} size={14} />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Mobile Top Bar */}
         <div className="lg:hidden shrink-0 flex items-center justify-between px-4 h-12 border-b border-[var(--border-subtle)] bg-[var(--surface-sidebar)]">
           <button
@@ -570,6 +641,8 @@ function ConsoleWorkspace() {
             onNewProject={() => setProjectModalOpen(true)}
             onOpenWorkspace={() => changeView("workspace")}
             onOpenCliSettings={() => changeView("settings")}
+            mainSidebarCollapsed={sidebarCollapsed}
+            onExpandMainSidebar={toggleSidebarCollapsed}
             onTaskCreated={(task) => {
               void refreshTasks();
               void openTaskDetail(task.id, false);

@@ -1,0 +1,926 @@
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import {
+  ZERO_WIDTH,
+  ensureTextBoundaries,
+  makeBlockId,
+  parseMarkdownToBlocks,
+  serializeBlocksToMarkdown,
+  type EditorBlock,
+} from "~/lib/chat-markdown.ts";
+import { Icon } from "../Icon.tsx";
+
+export interface RichPromptEditorHandle {
+  focus: () => void;
+}
+
+const INLINE_CODE_CLASS =
+  "inline-block align-baseline px-1.5 py-[0.5px] mx-[1px] rounded-[5px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] font-mono text-[12px] leading-[1.45] text-[var(--text-primary)]";
+
+function createInlineCodeElement(text: string): HTMLElement {
+  const el = document.createElement("code");
+  el.setAttribute("data-inline-code", "true");
+  el.className = INLINE_CODE_CLASS;
+  el.textContent = text;
+  return el;
+}
+
+function renderInlineMarkdownToDom(container: HTMLElement, text: string): void {
+  container.innerHTML = "";
+  if (!text) return;
+  const lines = text.split("\n");
+  const frag = document.createDocumentFragment();
+  const inlineRe = /`([^`\n]+)`/g;
+
+  lines.forEach((line, lineIdx) => {
+    if (lineIdx > 0) {
+      frag.appendChild(document.createElement("br"));
+    }
+    let last = 0;
+    let m: RegExpExecArray | null;
+    inlineRe.lastIndex = 0;
+    while ((m = inlineRe.exec(line)) !== null) {
+      if (m.index > last) {
+        frag.appendChild(document.createTextNode(line.slice(last, m.index)));
+      }
+      frag.appendChild(createInlineCodeElement(m[1] ?? ""));
+      last = inlineRe.lastIndex;
+    }
+    if (last < line.length) {
+      frag.appendChild(document.createTextNode(line.slice(last)));
+    } else if (last > 0) {
+      frag.appendChild(document.createTextNode(ZERO_WIDTH));
+    }
+  });
+
+  if (text.endsWith("\n")) {
+    frag.appendChild(document.createElement("br"));
+  }
+  container.appendChild(frag);
+}
+
+function serializeDomToInlineMarkdown(container: HTMLElement): string {
+  const walk = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return (node.textContent ?? "").replaceAll(ZERO_WIDTH, "");
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+    const el = node as HTMLElement;
+    const tag = el.tagName;
+    if (tag === "BR") return "\n";
+    if (tag === "CODE" || el.dataset.inlineCode === "true") {
+      const inner = (el.textContent ?? "").replaceAll(ZERO_WIDTH, "").replace(/\n/g, " ");
+      return inner ? `\`${inner}\`` : "";
+    }
+    let inner = "";
+    for (const child of Array.from(el.childNodes)) {
+      inner += walk(child);
+    }
+    if ((tag === "DIV" || tag === "P") && el !== container) {
+      return `\n${inner}`;
+    }
+    return inner;
+  };
+
+  let out = "";
+  const children = Array.from(container.childNodes);
+  for (let i = 0; i < children.length; i += 1) {
+    const child = children[i]!;
+    if (
+      i === children.length - 1 &&
+      child.nodeType === Node.ELEMENT_NODE &&
+      (child as HTMLElement).tagName === "BR" &&
+      out.endsWith("\n")
+    ) {
+      // Ignore browser-inserted trailing sentinel <br> when already ending in newline.
+      continue;
+    }
+    out += walk(child);
+  }
+  return out.replace(/^\n/, (m) => (children[0]?.nodeName === "DIV" ? "" : m));
+}
+
+function setCaretAtEnd(el: HTMLElement): void {
+  const sel = window.getSelection();
+  if (!sel) return;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function setCaretAtStart(el: HTMLElement): void {
+  const sel = window.getSelection();
+  if (!sel) return;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function getInlineCodeAncestor(node: Node | null, root: HTMLElement): HTMLElement | null {
+  let curr: Node | null = node;
+  while (curr && curr !== root) {
+    if (curr.nodeType === Node.ELEMENT_NODE) {
+      const el = curr as HTMLElement;
+      if (el.tagName === "CODE" || el.dataset.inlineCode === "true") {
+        return el;
+      }
+    }
+    curr = curr.parentNode;
+  }
+  return null;
+}
+
+function getMarkdownBeforeCaret(root: HTMLElement, range: Range): { before: string; after: string } {
+  const beforeRange = document.createRange();
+  beforeRange.selectNodeContents(root);
+  beforeRange.setEnd(range.startContainer, range.startOffset);
+  const beforeFrag = beforeRange.cloneContents();
+  const beforeDiv = document.createElement("div");
+  beforeDiv.appendChild(beforeFrag);
+
+  const afterRange = document.createRange();
+  afterRange.selectNodeContents(root);
+  afterRange.setStart(range.endContainer, range.endOffset);
+  const afterFrag = afterRange.cloneContents();
+  const afterDiv = document.createElement("div");
+  afterDiv.appendChild(afterFrag);
+
+  return {
+    before: serializeDomToInlineMarkdown(beforeDiv),
+    after: serializeDomToInlineMarkdown(afterDiv),
+  };
+}
+
+interface TextSegmentProps {
+  id: string;
+  text: string;
+  disabled: boolean;
+  showPlaceholder: boolean;
+  placeholder: string;
+  isFirst: boolean;
+  isLast: boolean;
+  hasCodeBlocks: boolean;
+  onTextChange: (id: string, nextText: string) => void;
+  onConvertToCodeBlock: (id: string, beforeText: string, lang: string, afterText: string) => void;
+  onPasteMarkdown: (id: string, beforeText: string, pasted: string, afterText: string) => void;
+  onInterceptKeyDown?: (e: React.KeyboardEvent<HTMLElement>) => boolean;
+  onSubmit: () => void;
+  onFocusPrevCode: (id: string) => void;
+  onFocusNextCode: (id: string) => void;
+  registerRef: (id: string, el: HTMLDivElement | null) => void;
+}
+
+function TextSegment({
+  id,
+  text,
+  disabled,
+  showPlaceholder,
+  placeholder,
+  isFirst,
+  isLast,
+  hasCodeBlocks,
+  onTextChange,
+  onConvertToCodeBlock,
+  onPasteMarkdown,
+  onInterceptKeyDown,
+  onSubmit,
+  onFocusPrevCode,
+  onFocusNextCode,
+  registerRef,
+}: TextSegmentProps) {
+  const divRef = useRef<HTMLDivElement | null>(null);
+  const composingRef = useRef(false);
+  const lastDomTextRef = useRef<string | null>(null);
+
+  const setRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      divRef.current = node;
+      registerRef(id, node);
+    },
+    [id, registerRef],
+  );
+
+  useLayoutEffect(() => {
+    const el = divRef.current;
+    if (!el) return;
+    if (lastDomTextRef.current === text) return;
+    renderInlineMarkdownToDom(el, text);
+    lastDomTextRef.current = text;
+  }, [text]);
+
+  const tryAutoConvertInlineCode = useCallback((el: HTMLElement): boolean => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return false;
+    const range = sel.getRangeAt(0);
+    if (!el.contains(range.startContainer)) return false;
+    if (getInlineCodeAncestor(range.startContainer, el)) return false;
+    if (range.startContainer.nodeType !== Node.TEXT_NODE) return false;
+
+    const textNode = range.startContainer as Text;
+    const raw = textNode.data;
+    const offset = range.startOffset;
+    const beforeCaret = raw.slice(0, offset);
+    const afterCaret = raw.slice(offset);
+
+    // Match `code` just closed by typing the second backtick, never matching `` or ```.
+    const match = /(^|[^`])`([^`\n]+)`$/.exec(beforeCaret);
+    if (!match) return false;
+
+    const prefixKeep = beforeCaret.slice(0, match.index + (match[1]?.length ?? 0));
+    const codeText = match[2] ?? "";
+    if (!codeText) return false;
+
+    const parent = textNode.parentNode;
+    if (!parent) return false;
+
+    const frag = document.createDocumentFragment();
+    if (prefixKeep) {
+      frag.appendChild(document.createTextNode(prefixKeep));
+    }
+    const codeEl = createInlineCodeElement(codeText);
+    frag.appendChild(codeEl);
+
+    const trailingNode = document.createTextNode(afterCaret || ZERO_WIDTH);
+    frag.appendChild(trailingNode);
+
+    parent.replaceChild(frag, textNode);
+
+    const nextRange = document.createRange();
+    nextRange.setStart(trailingNode, afterCaret ? 0 : 1);
+    nextRange.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(nextRange);
+    return true;
+  }, []);
+
+  const syncFromDom = useCallback(() => {
+    const el = divRef.current;
+    if (!el) return;
+    if (!composingRef.current) {
+      tryAutoConvertInlineCode(el);
+    }
+    // Remove empty inline code tags left behind by deleting all characters inside one.
+    for (const codeEl of Array.from(el.querySelectorAll("code[data-inline-code='true']"))) {
+      if (!(codeEl.textContent ?? "").replaceAll(ZERO_WIDTH, "")) {
+        codeEl.remove();
+      }
+    }
+    const serialized = serializeDomToInlineMarkdown(el);
+    lastDomTextRef.current = serialized;
+    onTextChange(id, serialized);
+  }, [id, onTextChange, tryAutoConvertInlineCode]);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (disabled) return;
+    if (composingRef.current || e.nativeEvent.isComposing) return;
+
+    if (onInterceptKeyDown?.(e)) {
+      return;
+    }
+
+    const el = divRef.current;
+    if (!el) return;
+    const sel = window.getSelection();
+    const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+
+    // 1. Wrap selected text with backtick -> inline code pill
+    if (e.key === "`" && !e.metaKey && !e.ctrlKey && !e.altKey && range && !range.collapsed) {
+      const selected = range.toString();
+      if (selected && !selected.includes("\n") && !getInlineCodeAncestor(range.startContainer, el)) {
+        e.preventDefault();
+        range.deleteContents();
+        const codeEl = createInlineCodeElement(selected);
+        const spacer = document.createTextNode(ZERO_WIDTH);
+        range.insertNode(spacer);
+        range.insertNode(codeEl);
+        const nextRange = document.createRange();
+        nextRange.setStart(spacer, 1);
+        nextRange.collapse(true);
+        sel!.removeAllRanges();
+        sel!.addRange(nextRange);
+        syncFromDom();
+        return;
+      }
+    }
+
+    // 2. Exit inline code smoothly with ArrowRight or closing backtick at end of <code>
+    if (range && range.collapsed) {
+      const codeAncestor = getInlineCodeAncestor(range.startContainer, el);
+      if (codeAncestor) {
+        const atCodeEnd = (() => {
+          const test = document.createRange();
+          test.selectNodeContents(codeAncestor);
+          test.setStart(range.endContainer, range.endOffset);
+          return test.toString().replaceAll(ZERO_WIDTH, "").length === 0;
+        })();
+
+        if (atCodeEnd && (e.key === "ArrowRight" || e.key === "`")) {
+          e.preventDefault();
+          let nextSibling = codeAncestor.nextSibling;
+          if (!nextSibling || nextSibling.nodeType !== Node.TEXT_NODE) {
+            const z = document.createTextNode(ZERO_WIDTH);
+            codeAncestor.after(z);
+            nextSibling = z;
+          }
+          const nextRange = document.createRange();
+          nextRange.setStart(nextSibling, nextSibling.textContent === ZERO_WIDTH ? 1 : 0);
+          nextRange.collapse(true);
+          sel!.removeAllRanges();
+          sel!.addRange(nextRange);
+          return;
+        }
+      }
+    }
+
+    // 3. Detect ``` or ```lang + Space / Enter -> convert to Code Block Card
+    if ((e.key === " " || (e.key === "Enter" && !e.shiftKey)) && range && range.collapsed) {
+      if (!getInlineCodeAncestor(range.startContainer, el)) {
+        const { before, after } = getMarkdownBeforeCaret(el, range);
+        const linesBefore = before.split("\n");
+        const currentLine = linesBefore[linesBefore.length - 1] ?? "";
+        const fenceMatch = /^```([a-zA-Z0-9_+-]*)$/.exec(currentLine);
+        if (fenceMatch) {
+          e.preventDefault();
+          const lang = fenceMatch[1] ?? "";
+          const preceding = linesBefore.slice(0, -1).join("\n");
+          const remaining = after.replace(/^\n/, "");
+          onConvertToCodeBlock(id, preceding, lang, remaining);
+          return;
+        }
+      }
+    }
+
+    // 4. Arrow navigation into adjacent code blocks
+    if (e.key === "ArrowUp" && !isFirst && range && range.collapsed) {
+      const { before } = getMarkdownBeforeCaret(el, range);
+      if (!before.includes("\n")) {
+        e.preventDefault();
+        onFocusPrevCode(id);
+        return;
+      }
+    }
+    if (e.key === "ArrowDown" && !isLast && range && range.collapsed) {
+      const { after } = getMarkdownBeforeCaret(el, range);
+      if (!after.includes("\n")) {
+        e.preventDefault();
+        onFocusNextCode(id);
+        return;
+      }
+    }
+
+    // 5. Shift+Enter inserts a clean newline; Enter submits
+    if (e.key === "Enter") {
+      if (e.shiftKey) {
+        e.preventDefault();
+        if (range) {
+          range.deleteContents();
+          const br = document.createElement("br");
+          range.insertNode(br);
+          // Ensure caret can sit on the newly created trailing line
+          if (!br.nextSibling) {
+            const sentinel = document.createElement("br");
+            br.after(sentinel);
+          }
+          const nextRange = document.createRange();
+          nextRange.setStartAfter(br);
+          nextRange.collapse(true);
+          sel!.removeAllRanges();
+          sel!.addRange(nextRange);
+          syncFromDom();
+        }
+        return;
+      }
+      e.preventDefault();
+      onSubmit();
+    }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    if (disabled) return;
+    const plain = e.clipboardData.getData("text/plain");
+    if (!plain) return;
+    e.preventDefault();
+
+    const el = divRef.current;
+    const sel = window.getSelection();
+    const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+
+    if (el && range && /^```[a-zA-Z0-9_+-]*[ \t]*\r?\n[\s\S]*?^```[ \t]*$/m.test(plain)) {
+      const { before, after } = getMarkdownBeforeCaret(el, range);
+      onPasteMarkdown(id, before, plain, after);
+      return;
+    }
+
+    // Check if user pasted right after typing ```lang on the current line
+    if (el && range && range.collapsed) {
+      const { before, after } = getMarkdownBeforeCaret(el, range);
+      const linesBefore = before.split("\n");
+      const currentLine = linesBefore[linesBefore.length - 1] ?? "";
+      const fenceMatch = /^```([a-zA-Z0-9_+-]*)$/.exec(currentLine);
+      if (fenceMatch && plain.includes("\n")) {
+        const lang = fenceMatch[1] ?? "";
+        const preceding = linesBefore.slice(0, -1).join("\n");
+        const wrapped = `\`\`\`${lang}\n${plain.replace(/\r\n/g, "\n")}\n\`\`\``;
+        onPasteMarkdown(id, preceding, wrapped, after.replace(/^\n/, ""));
+        return;
+      }
+    }
+
+    if (el && range) {
+      range.deleteContents();
+      const normalized = plain.replace(/\r\n/g, "\n");
+      const lines = normalized.split("\n");
+      const frag = document.createDocumentFragment();
+      const inlineRe = /`([^`\n]+)`/g;
+      let lastNode: Node | null = null;
+
+      lines.forEach((line, idx) => {
+        if (idx > 0) {
+          const br = document.createElement("br");
+          frag.appendChild(br);
+          lastNode = br;
+        }
+        let last = 0;
+        let m: RegExpExecArray | null;
+        inlineRe.lastIndex = 0;
+        while ((m = inlineRe.exec(line)) !== null) {
+          if (m.index > last) {
+            const tn = document.createTextNode(line.slice(last, m.index));
+            frag.appendChild(tn);
+            lastNode = tn;
+          }
+          const codeEl = createInlineCodeElement(m[1] ?? "");
+          frag.appendChild(codeEl);
+          const z = document.createTextNode(ZERO_WIDTH);
+          frag.appendChild(z);
+          lastNode = z;
+          last = inlineRe.lastIndex;
+        }
+        if (last < line.length) {
+          const tn = document.createTextNode(line.slice(last));
+          frag.appendChild(tn);
+          lastNode = tn;
+        }
+      });
+
+      range.insertNode(frag);
+      if (lastNode) {
+        const nextRange = document.createRange();
+        nextRange.setStartAfter(lastNode);
+        nextRange.collapse(true);
+        sel!.removeAllRanges();
+        sel!.addRange(nextRange);
+      }
+      syncFromDom();
+    }
+  };
+
+  return (
+    <div className="relative">
+      {showPlaceholder && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none select-none absolute inset-0 text-[13.5px] leading-[1.55] text-[var(--text-muted)] truncate"
+        >
+          {placeholder}
+        </span>
+      )}
+      <div
+        ref={setRef}
+        role="textbox"
+        aria-multiline="true"
+        aria-label="对话输入框"
+        contentEditable={!disabled}
+        suppressContentEditableWarning
+        spellCheck={false}
+        onInput={syncFromDom}
+        onCompositionStart={() => {
+          composingRef.current = true;
+        }}
+        onCompositionEnd={() => {
+          composingRef.current = false;
+          syncFromDom();
+        }}
+        onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
+        className={`w-full text-[13.5px] leading-[1.55] text-[var(--text-primary)] focus:outline-none whitespace-pre-wrap break-words ${
+          hasCodeBlocks ? "min-h-[22px]" : "min-h-[24px]"
+        } ${disabled ? "opacity-60 cursor-not-allowed" : ""}`}
+      />
+    </div>
+  );
+}
+
+interface CodeSegmentCardProps {
+  id: string;
+  lang: string;
+  code: string;
+  disabled: boolean;
+  onChange: (id: string, patch: { lang?: string; code?: string }) => void;
+  onRemove: (id: string, unwrapToText?: boolean) => void;
+  onExitBelow: (id: string) => void;
+  onExitAbove: (id: string) => void;
+  onSubmit: () => void;
+  registerRef: (id: string, el: HTMLTextAreaElement | null) => void;
+}
+
+function CodeSegmentCard({
+  id,
+  lang,
+  code,
+  disabled,
+  onChange,
+  onRemove,
+  onExitBelow,
+  onExitAbove,
+  onSubmit,
+  registerRef,
+}: CodeSegmentCardProps) {
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const setRef = useCallback(
+    (node: HTMLTextAreaElement | null) => {
+      taRef.current = node;
+      registerRef(id, node);
+    },
+    [id, registerRef],
+  );
+
+  useLayoutEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(Math.max(el.scrollHeight, 56), 240)}px`;
+  }, [code]);
+
+  const lineCount = code ? code.split("\n").length : 1;
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (disabled) return;
+    const el = e.currentTarget;
+
+    // Cmd/Ctrl + Enter submits the message directly from inside a code block
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      onSubmit();
+      return;
+    }
+
+    // Typing ``` on its own line + Enter exits the code block cleanly
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      const pos = el.selectionStart;
+      if (pos === el.selectionEnd) {
+        const before = code.slice(0, pos);
+        const after = code.slice(pos);
+        const lines = before.split("\n");
+        const currLine = lines[lines.length - 1] ?? "";
+        if (currLine.trim() === "```" && !after.trim()) {
+          e.preventDefault();
+          const trimmedCode = lines.slice(0, -1).join("\n");
+          onChange(id, { code: trimmedCode });
+          onExitBelow(id);
+          return;
+        }
+      }
+    }
+
+    // Tab inserts 2 spaces
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const start = el.selectionStart;
+      const end = el.selectionEnd;
+      const next = `${code.slice(0, start)}  ${code.slice(end)}`;
+      onChange(id, { code: next });
+      window.requestAnimationFrame(() => {
+        el.selectionStart = el.selectionEnd = start + 2;
+      });
+      return;
+    }
+
+    // Backspace on empty code block removes it
+    if (e.key === "Backspace" && !code && el.selectionStart === 0 && el.selectionEnd === 0) {
+      e.preventDefault();
+      onRemove(id, false);
+      return;
+    }
+
+    // ArrowUp on first line -> exit above
+    if (e.key === "ArrowUp" && el.selectionStart === 0 && el.selectionEnd === 0) {
+      e.preventDefault();
+      onExitAbove(id);
+      return;
+    }
+
+    // ArrowDown at very end -> exit below
+    if (e.key === "ArrowDown" && el.selectionStart === code.length && el.selectionEnd === code.length) {
+      e.preventDefault();
+      onExitBelow(id);
+    }
+  };
+
+  return (
+    <div className="my-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/90 dark:bg-[#0d0f13]/90 overflow-hidden">
+      <div className="h-7 px-2.5 border-b border-[var(--border-subtle)]/80 bg-[var(--surface-card)]/70 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Icon name="code-2" size={12} className="text-indigo-500 shrink-0" />
+          <input
+            type="text"
+            value={lang}
+            disabled={disabled}
+            onChange={(e) =>
+              onChange(id, { lang: e.target.value.replace(/[^a-zA-Z0-9_+-]/g, "").slice(0, 24) })
+            }
+            placeholder="text"
+            aria-label="代码块语言"
+            spellCheck={false}
+            className="w-20 bg-transparent text-[11px] font-mono text-[var(--text-secondary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:text-[var(--text-primary)]"
+          />
+          <span className="text-[10.5px] font-mono text-[var(--text-muted)]">
+            {lineCount} 行
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="hidden sm:inline text-[10.5px] text-[var(--text-muted)]">
+            Enter 换行 · ⌘↵ 发送
+          </span>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onRemove(id, Boolean(code.trim()))}
+            title={code.trim() ? "还原为普通文本" : "移除代码块"}
+            aria-label={code.trim() ? "还原为普通文本" : "移除代码块"}
+            className="p-0.5 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+          >
+            <Icon name="x" size={12} />
+          </button>
+        </div>
+      </div>
+      <textarea
+        ref={setRef}
+        rows={2}
+        value={code}
+        disabled={disabled}
+        spellCheck={false}
+        onChange={(e) => onChange(id, { code: e.target.value })}
+        onKeyDown={handleKeyDown}
+        placeholder="输入或粘贴代码 / 配置片段…"
+        className="w-full px-3 py-2 bg-transparent font-mono text-[12px] leading-[1.55] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] resize-none focus:outline-none rd-scroll"
+      />
+    </div>
+  );
+}
+
+interface RichPromptEditorProps {
+  value: string;
+  disabled?: boolean;
+  placeholder: string;
+  onChange: (nextMarkdown: string) => void;
+  onSubmit: () => void;
+  onInterceptKeyDown?: (e: React.KeyboardEvent<HTMLElement>) => boolean;
+}
+
+export const RichPromptEditor = forwardRef<RichPromptEditorHandle, RichPromptEditorProps>(
+  function RichPromptEditor(
+    { value, disabled = false, placeholder, onChange, onSubmit, onInterceptKeyDown },
+    ref,
+  ) {
+    const [blocks, setBlocks] = useState<EditorBlock[]>(() => parseMarkdownToBlocks(value));
+    const lastEmittedRef = useRef<string>(value);
+    const textRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+    const codeRefs = useRef<Map<string, HTMLTextAreaElement>>(new Map());
+
+    // Sync when parent changes `value` externally (clear after send, starter prompt, @mention cleanup)
+    useEffect(() => {
+      if (value === lastEmittedRef.current) return;
+      lastEmittedRef.current = value;
+      setBlocks(parseMarkdownToBlocks(value));
+    }, [value]);
+
+    const commitBlocks = useCallback(
+      (updater: (prev: EditorBlock[]) => EditorBlock[]) => {
+        setBlocks((prev) => {
+          const next = ensureTextBoundaries(updater(prev));
+          const serialized = serializeBlocksToMarkdown(next);
+          lastEmittedRef.current = serialized;
+          onChange(serialized);
+          return next;
+        });
+      },
+      [onChange],
+    );
+
+    const focusBlock = useCallback((blockId: string, position: "start" | "end" = "end") => {
+      window.requestAnimationFrame(() => {
+        const textEl = textRefs.current.get(blockId);
+        if (textEl) {
+          textEl.focus();
+          if (position === "start") setCaretAtStart(textEl);
+          else setCaretAtEnd(textEl);
+          return;
+        }
+        const codeEl = codeRefs.current.get(blockId);
+        if (codeEl) {
+          codeEl.focus();
+          const pos = position === "start" ? 0 : codeEl.value.length;
+          codeEl.selectionStart = codeEl.selectionEnd = pos;
+        }
+      });
+    }, []);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        focus: () => {
+          const lastText = [...blocks].reverse().find((b) => b.type === "text");
+          if (lastText) {
+            focusBlock(lastText.id, "end");
+          }
+        },
+      }),
+      [blocks, focusBlock],
+    );
+
+    const registerTextRef = useCallback((id: string, el: HTMLDivElement | null) => {
+      if (el) textRefs.current.set(id, el);
+      else textRefs.current.delete(id);
+    }, []);
+
+    const registerCodeRef = useCallback((id: string, el: HTMLTextAreaElement | null) => {
+      if (el) codeRefs.current.set(id, el);
+      else codeRefs.current.delete(id);
+    }, []);
+
+    const handleTextChange = useCallback(
+      (id: string, nextText: string) => {
+        commitBlocks((prev) =>
+          prev.map((b) => (b.id === id && b.type === "text" ? { ...b, text: nextText } : b)),
+        );
+      },
+      [commitBlocks],
+    );
+
+    const handleConvertToCodeBlock = useCallback(
+      (id: string, beforeText: string, lang: string, afterText: string) => {
+        const codeId = makeBlockId("c");
+        const afterId = makeBlockId("t");
+        commitBlocks((prev) => {
+          const idx = prev.findIndex((b) => b.id === id);
+          if (idx === -1) return prev;
+          const replacement: EditorBlock[] = [
+            { id, type: "text", text: beforeText },
+            { id: codeId, type: "code", lang, code: "" },
+            { id: afterId, type: "text", text: afterText },
+          ];
+          return [...prev.slice(0, idx), ...replacement, ...prev.slice(idx + 1)];
+        });
+        focusBlock(codeId, "start");
+      },
+      [commitBlocks, focusBlock],
+    );
+
+    const handlePasteMarkdown = useCallback(
+      (id: string, beforeText: string, pasted: string, afterText: string) => {
+        const combined = [beforeText, pasted, afterText].filter(Boolean).join("\n");
+        const parsed = parseMarkdownToBlocks(combined);
+        const focusTarget = parsed[parsed.length - 1]?.id;
+        commitBlocks((prev) => {
+          const idx = prev.findIndex((b) => b.id === id);
+          if (idx === -1) return prev;
+          return [...prev.slice(0, idx), ...parsed, ...prev.slice(idx + 1)];
+        });
+        if (focusTarget) focusBlock(focusTarget, "end");
+      },
+      [commitBlocks, focusBlock],
+    );
+
+    const handleCodeChange = useCallback(
+      (id: string, patch: { lang?: string; code?: string }) => {
+        commitBlocks((prev) =>
+          prev.map((b) => (b.id === id && b.type === "code" ? { ...b, ...patch } : b)),
+        );
+      },
+      [commitBlocks],
+    );
+
+    const handleRemoveCode = useCallback(
+      (id: string, unwrapToText = false) => {
+        let targetFocusId: string | null = null;
+        commitBlocks((prev) => {
+          const idx = prev.findIndex((b) => b.id === id);
+          if (idx === -1) return prev;
+          const block = prev[idx]!;
+          const prevBlock = prev[idx - 1];
+          targetFocusId = prevBlock?.id ?? null;
+          if (unwrapToText && block.type === "code" && block.code.trim()) {
+            const unwrapped: EditorBlock = { id: makeBlockId("t"), type: "text", text: block.code };
+            return [...prev.slice(0, idx), unwrapped, ...prev.slice(idx + 1)];
+          }
+          return [...prev.slice(0, idx), ...prev.slice(idx + 1)];
+        });
+        if (targetFocusId) focusBlock(targetFocusId, "end");
+      },
+      [commitBlocks, focusBlock],
+    );
+
+    const handleExitCodeAbove = useCallback(
+      (id: string) => {
+        const idx = blocks.findIndex((b) => b.id === id);
+        const prevBlock = idx > 0 ? blocks[idx - 1] : null;
+        if (prevBlock) focusBlock(prevBlock.id, "end");
+      },
+      [blocks, focusBlock],
+    );
+
+    const handleExitCodeBelow = useCallback(
+      (id: string) => {
+        const idx = blocks.findIndex((b) => b.id === id);
+        const nextBlock = idx >= 0 && idx < blocks.length - 1 ? blocks[idx + 1] : null;
+        if (nextBlock) focusBlock(nextBlock.id, "start");
+      },
+      [blocks, focusBlock],
+    );
+
+    const handleFocusPrevCode = useCallback(
+      (id: string) => {
+        const idx = blocks.findIndex((b) => b.id === id);
+        const prevBlock = idx > 0 ? blocks[idx - 1] : null;
+        if (prevBlock) focusBlock(prevBlock.id, "end");
+      },
+      [blocks, focusBlock],
+    );
+
+    const handleFocusNextCode = useCallback(
+      (id: string) => {
+        const idx = blocks.findIndex((b) => b.id === id);
+        const nextBlock = idx >= 0 && idx < blocks.length - 1 ? blocks[idx + 1] : null;
+        if (nextBlock) focusBlock(nextBlock.id, "start");
+      },
+      [blocks, focusBlock],
+    );
+
+    const hasCodeBlocks = blocks.some((b) => b.type === "code");
+    const isCompletelyEmpty =
+      !hasCodeBlocks && blocks.every((b) => b.type === "text" && !b.text.replaceAll(ZERO_WIDTH, ""));
+
+    return (
+      <div
+        className="w-full px-3.5 pt-3 pb-2 max-h-[260px] overflow-y-auto rd-scroll cursor-text"
+        onClick={(e) => {
+          if (e.target === e.currentTarget && !disabled) {
+            const lastText = [...blocks].reverse().find((b) => b.type === "text");
+            if (lastText) focusBlock(lastText.id, "end");
+          }
+        }}
+      >
+        {blocks.map((block, idx) =>
+          block.type === "text" ? (
+            <TextSegment
+              key={block.id}
+              id={block.id}
+              text={block.text}
+              disabled={disabled}
+              showPlaceholder={isCompletelyEmpty && idx === 0}
+              placeholder={placeholder}
+              isFirst={idx === 0}
+              isLast={idx === blocks.length - 1}
+              hasCodeBlocks={hasCodeBlocks}
+              onTextChange={handleTextChange}
+              onConvertToCodeBlock={handleConvertToCodeBlock}
+              onPasteMarkdown={handlePasteMarkdown}
+              onInterceptKeyDown={onInterceptKeyDown}
+              onSubmit={onSubmit}
+              onFocusPrevCode={handleFocusPrevCode}
+              onFocusNextCode={handleFocusNextCode}
+              registerRef={registerTextRef}
+            />
+          ) : (
+            <CodeSegmentCard
+              key={block.id}
+              id={block.id}
+              lang={block.lang}
+              code={block.code}
+              disabled={disabled}
+              onChange={handleCodeChange}
+              onRemove={handleRemoveCode}
+              onExitBelow={handleExitCodeBelow}
+              onExitAbove={handleExitCodeAbove}
+              onSubmit={onSubmit}
+              registerRef={registerCodeRef}
+            />
+          ),
+        )}
+      </div>
+    );
+  },
+);

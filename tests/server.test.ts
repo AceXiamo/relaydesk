@@ -8,6 +8,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { startRelaydeskServer, type RunningRelaydeskServer } from "../server.ts";
 import { Store } from "../server/store.ts";
 import { WalletAuth } from "../server/wallet.ts";
+import * as discoveryService from "../server/project-model-discovery.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -204,7 +205,7 @@ describe("Project CLI configuration", () => {
     const route = `${prefix}/cli-config`;
     const agent = { Authorization: `Bearer ${p.agent_key}` };
     const claim = (ready: boolean) => jsonReq(`${prefix}/agent/cli/claim`, "POST", { protocol: 2, runtime: "codex", managed: true, ready }, agent);
-    const initial = { runtime: "codex", endpoint: "", model: "", public_ai_enabled: false, configured: false, github_configured: false, online: false, ready: false, managed: false, last_seen_at: null };
+    const initial = { runtime: "codex", endpoint: "", model: "", models: [], default_effort: "default", public_ai_enabled: false, configured: false, github_configured: false, online: false, ready: false, managed: false, last_seen_at: null };
     expect((await jsonReq(route, "GET", undefined, operator)).json).toEqual(initial);
     for (const token of [p.agent_key, p.intake_key, p.bot_key]) {
       const h = { Authorization: `Bearer ${token}` };
@@ -227,6 +228,51 @@ describe("Project CLI configuration", () => {
     expect((await jsonReq(route, "GET", undefined, operator)).json.ready).toBe(true);
     expect((await jsonReq(route, "PATCH", { api_key: "" }, operator)).json).toMatchObject({ configured: false, github_configured: true, ready: false });
     expect((await jsonReq(`${srv.url}/api/projects/${other.id}/cli-config`, "GET", undefined, operator)).json).toEqual(initial);
+  });
+});
+
+describe("cloud model and session endpoints", () => {
+  it("authenticates discovery and accepts a catalog above 16 KiB", async () => {
+    const srv = await startApiServer({ adminToken: "operator-model-fixture" });
+    const auth = { Authorization: "Bearer operator-model-fixture" };
+    const created = await jsonReq(`${srv.url}/api/projects`, "POST", { name: "Catalog", repo: "example/catalog" }, auth);
+    const project = created.json.project as { id: string; agent_key: string };
+    const prefix = `${srv.url}/api/projects/${project.id}`;
+    const route = `${prefix}/cli-config`;
+    const discovery = `${route}/discover-models`;
+    expect((await jsonReq(discovery, "POST", {}, { Authorization: `Bearer ${project.agent_key}` })).status).toBe(401);
+    expect((await jsonReq(discovery, "POST", undefined, auth)).status).toBe(400);
+    expect((await jsonReq(discovery, "POST", { endpoint: "https://localhost", api_key: "test-fixture" }, auth)).status).toBe(400);
+    const discover = vi.spyOn(discoveryService, "discoverProjectCliModels").mockResolvedValueOnce([{ id: "fixture", runtime: "codex" }]);
+    try {
+      const found = await jsonReq(discovery, "POST", {}, auth);
+      expect(found.status).toBe(200);
+      expect(found.json).toEqual({ models: [{ id: "fixture", runtime: "codex" }] });
+    } finally { discover.mockRestore(); }
+    const models = Array.from({ length: 50 }, (_, i) => ({ id: `model-${i}`, runtime: "codex", label: "型".repeat(120) }));
+    const result = await jsonReq(route, "PATCH", { models, default_effort: "medium" }, auth);
+    expect(result.status).toBe(200);
+    expect((await jsonReq(`${prefix}/codex-chat/runtime`, "GET", undefined, auth)).json.project_cli).toMatchObject({ models, default_effort: "medium" });
+    expect((await jsonReq(route, "PATCH", { model: "a".repeat(65536) }, auth)).status).toBe(413);
+  });
+
+  it("validates model, effort and target on create and update", async () => {
+    const srv = await startApiServer();
+    const created = await jsonReq(`${srv.url}/api/projects`, "POST", { name: "Sessions", repo: "example/sessions" });
+    const project = created.json.project as { id: string };
+    const sessions = `${srv.url}/api/projects/${project.id}/codex-chat/sessions`;
+    const selection = { model: "custom/model", reasoning_effort: "high", execution_target: "cloud" };
+    const session = (await jsonReq(sessions, "POST", selection)).json.session as { id: string };
+    expect(session).toMatchObject({ ...selection, resolved_target: "" });
+    const detail = `${sessions}/${session.id}`;
+    for (const field of [{ model: "--help" }, { model: 42 }, { reasoning_effort: null }, { reasoning_effort: "xhigh" }, { execution_target: "local:" }]) {
+      expect((await jsonReq(sessions, "POST", field)).status).toBe(400);
+      expect((await jsonReq(detail, "PATCH", field)).status).toBe(400);
+    }
+    const patch = { model: "", reasoning_effort: "off", execution_target: "local:dev-machine" };
+    expect((await jsonReq(detail, "PATCH", patch)).json.session).toMatchObject(patch);
+    expect((await jsonReq(sessions)).json.sessions).toEqual([expect.objectContaining(patch)]);
+    expect((await jsonReq(`${detail}/messages`, "POST", { content: "hello" })).status).toBe(409);
   });
 });
 

@@ -1,6 +1,11 @@
+import { createHash } from "node:crypto";
+import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { BridgeHub } from "./bridge-hub.ts";
 import { ApiError } from "./errors.ts";
 import { projectCliConfiguration } from "./project-cli-config.ts";
+import { discoverProjectCliModels } from "./project-model-discovery.ts";
+import { effortLabels, validCatalogId } from "../app/lib/model-catalog.ts";
 import { projectPublicAiEnabled } from "./project-ai-provider.ts";
 import {
   Store,
@@ -49,31 +54,53 @@ import {
   testR2Connection,
   uploadProjectImage,
 } from "./r2.ts";
+import {
+  deleteStoredUtilityAiConfig,
+  getEffectiveUtilityAiConfig,
+  readStoredUtilityAiConfig,
+  saveStoredUtilityAiConfig,
+  toUtilityAiConfigStatus,
+  validateUtilityAiEndpoint,
+  validateUtilityAiKey,
+  validateUtilityAiModel,
+  validateUtilityAiProvider,
+} from "./utility-ai-config.ts";
+import {
+  buildFallbackSessionTitle,
+  generateSessionTitle,
+  testUtilityAiConnection,
+} from "./utility-ai.ts";
 import { getProjectReposStatus, syncProjectRepos } from "./repo-workspace.ts";
 import {
   addWorkspaceExternalDatasource,
   browseProjectRepoFiles,
+  buildWorkspaceManifest,
   createWorkspaceDirectory,
   createWorkspaceSqliteDatabase,
   deleteWorkspaceDatabase,
   deleteWorkspaceFile,
   detectLocalDbClients,
+  getWorkspaceDatasourceRuntimeEnv,
   getWorkspaceSummary,
   inspectWorkspaceSqliteSchema,
   listWorkspaceDatabases,
   listWorkspaceFiles,
   queryWorkspaceSqlite,
+  streamBridgeWorkspaceFile,
   readProjectRepoFileContent,
   readWorkspaceFile,
   readWorkspaceFileDownload,
   readWorkspaceHandbook,
   updateWorkspaceExternalDatasource,
   uploadWorkspaceFile,
+  writeBridgeWorkspaceFile,
   writeWorkspaceHandbook,
   writeWorkspaceTextFile,
 } from "./workspace.ts";
 import {
   abortChatSessionRun,
+  buildAttachmentContext,
+  buildResumePrompt,
   detectLocalClis,
   getChatRuntimeInfo,
   isChatSessionRunning,
@@ -89,8 +116,13 @@ import {
 import type {
   AuthMode,
   AuthStatusPayload,
+  BridgeAgentBindingSummary,
+  BridgeAgentPatch,
+  BridgeAgentSummary,
+  BridgeAgentTokenResponse,
   ChatContextRef,
-  ChatRuntime,
+  ChatReasoningEffort,
+  ChatSessionRecord,
   ChatSandboxMode,
   ChatStreamEvent,
   GithubOwnerInfo,
@@ -98,8 +130,37 @@ import type {
   WorkspaceDatabaseKind,
 } from "../app/lib/types.ts";
 
+function chatModelSelection(data: Record<string, unknown>) {
+  const fields: Partial<Pick<ChatSessionRecord, "runtime" | "model" | "reasoning_effort" | "execution_target">> = {};
+  if ("runtime" in data) {
+    if (data.runtime !== "codex" && data.runtime !== "claude") throw new ApiError(400, "运行工具无效");
+    fields.runtime = data.runtime;
+  }
+  if ("model" in data) {
+    if (data.model !== "" && !validCatalogId(data.model)) throw new ApiError(400, "模型 ID 无效");
+    fields.model = data.model;
+  }
+  if ("reasoning_effort" in data) {
+    if (typeof data.reasoning_effort !== "string" || !Object.hasOwn(effortLabels, data.reasoning_effort)) {
+      throw new ApiError(400, "思考强度无效");
+    }
+    fields.reasoning_effort = data.reasoning_effort as ChatReasoningEffort;
+  }
+  if ("execution_target" in data) {
+    const target = data.execution_target;
+    if (typeof target !== "string" || !/^(?:auto|cloud|local:[a-zA-Z0-9_-]{1,128})$/.test(target)) {
+      throw new ApiError(400, "执行节点无效");
+    }
+    fields.execution_target = target;
+  }
+  return fields;
+}
+
+const MAX_BRIDGE_FILE_BYTES = 20 * 1024 * 1024;
+
 export interface ApiContextOptions {
   store: Store;
+  bridgeHub?: BridgeHub | null;
   adminToken?: string;
   wallet?: WalletAuth | null;
   bindHost?: string;
@@ -107,6 +168,7 @@ export interface ApiContextOptions {
 
 export class ApiRouter {
   readonly store: Store;
+  readonly bridgeHub: BridgeHub | null;
   readonly adminToken: string;
   readonly wallet: WalletAuth | null;
   readonly bindHost: string;
@@ -118,6 +180,7 @@ export class ApiRouter {
 
   constructor(options: ApiContextOptions) {
     this.store = options.store;
+    this.bridgeHub = options.bridgeHub ?? null;
     this.adminToken = options.adminToken ?? "";
     this.wallet = options.wallet ?? null;
     this.bindHost = options.bindHost ?? "127.0.0.1";
@@ -343,12 +406,27 @@ export class ApiRouter {
 
     try {
       const method = (req.method ?? "GET").toUpperCase();
-      if (!["GET", "POST", "PATCH", "DELETE", "OPTIONS", "HEAD"].includes(method)) {
+      if (!["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"].includes(method)) {
         throw new ApiError(405, "Method not allowed");
       }
 
       const rawSubpath = pathname.slice("/api/".length).replace(/^\/+|\/+$/g, "");
       const parts = rawSubpath ? rawSubpath.split("/") : [];
+
+      // Bridge agent authenticated workspace file transfer (independent of operator auth)
+      if (
+        parts.length === 5 &&
+        parts[0] === "bridge" &&
+        parts[1] === "projects" &&
+        parts[3] === "workspace" &&
+        parts[4] === "file"
+      ) {
+        const handled = await this.handleBridgeWorkspaceFile(req, res, method, parts[2]);
+        if (handled !== undefined) {
+          this.sendJson(req, res, 200, handled, meta);
+        }
+        return;
+      }
 
       if (parts[0] === "auth") {
         const result = await this.handleAuth(req, method, parts.slice(1), meta);
@@ -364,6 +442,12 @@ export class ApiRouter {
 
       if (parts[0] === "r2") {
         const result = await this.handleR2(req, method, parts.slice(1), meta);
+        this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
+      if (parts[0] === "utility-ai") {
+        const result = await this.handleUtilityAi(req, method, parts.slice(1), meta);
         this.sendJson(req, res, 200, result, meta);
         return;
       }
@@ -392,9 +476,32 @@ export class ApiRouter {
         this.checkOperator(req, meta);
       }
 
+      // Operator Local Bridge agent management endpoints
+      if (parts.length >= 2 && parts[0] === "bridge" && parts[1] === "agents") {
+        const result = await this.handleBridgeAgents(req, method, parts.slice(2));
+        this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
+      // Operator Project <-> Local Bridge agent binding endpoints
+      if (parts.length >= 3 && parts[0] === "projects" && parts[2] === "agent-bindings") {
+        const result = await this.handleProjectAgentBindings(req, method, parts[1], parts.slice(3));
+        this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
+      if (parts.length === 4 && parts[0] === "projects" && parts[2] === "cli-config" && parts[3] === "discover-models" && method === "POST") {
+        const project = this.store.getProjectRow(parts[1]);
+        const hasBody = Number(req.headers["content-length"]) > 0 || req.headers["transfer-encoding"] !== undefined;
+        const options = hasBody ? await this.readJson(req, 16 * 1024) : {};
+        const models = await discoverProjectCliModels(this.store.dbPath, project.id, options);
+        this.sendJson(req, res, 200, { models }, meta);
+        return;
+      }
+
       if (parts.length === 3 && parts[0] === "projects" && parts[2] === "cli-config" && (method === "GET" || method === "PATCH")) {
         const project = this.store.getProjectRow(parts[1]);
-        const patch = method === "PATCH" ? await this.readJson(req, 16384) : undefined;
+        const patch = method === "PATCH" ? await this.readJson(req, 64 * 1024) : undefined;
         const config = projectCliConfiguration(this.store.dbPath, project.id, patch);
         const presence = this.cliPresence.get(project.id);
         const online = !!presence && Date.now() - presence.seen < 90_000;
@@ -545,6 +652,270 @@ export class ApiRouter {
       }
       this.sendJson(req, res, 500, { error: "Internal server error" }, meta);
     }
+  }
+
+  private describeBridgeAgent(agent: BridgeAgentSummary): BridgeAgentSummary {
+    return this.bridgeHub ? this.bridgeHub.describe(agent) : agent;
+  }
+
+  private buildBridgeTokenResponse(
+    req: IncomingMessage,
+    agent: BridgeAgentSummary,
+    token: string,
+  ): BridgeAgentTokenResponse {
+    const host = req.headers.host || `${this.bindHost}:4310`;
+    const forwardedProto = typeof req.headers["x-forwarded-proto"] === "string"
+      ? req.headers["x-forwarded-proto"].split(",")[0].trim().toLowerCase()
+      : "";
+    const proto =
+      forwardedProto === "https" || this.wallet?.origin.startsWith("https://")
+        ? "wss"
+        : "ws";
+    const serverUrl = `${proto}://${host}/api/bridge/ws`;
+    const described = this.describeBridgeAgent(agent);
+    return {
+      agent: described,
+      token,
+      quickstart_config: {
+        server_url: serverUrl,
+        agent_token: token,
+        agent_name: described.name,
+        max_concurrency: described.max_concurrency,
+        accept_cli_runs: described.accept_cli_runs,
+        auto_detect_cli_configs: true,
+        allowed_roots: [],
+        projects: {},
+        models: [],
+      },
+      start_command: "pnpm bridge --config ~/.config/relaydesk-bridge/config.json",
+    };
+  }
+
+  private checkBridgeAgent(req: IncomingMessage, urlObj: URL): BridgeAgentSummary {
+    if (urlObj.searchParams.has("token")) {
+      throw new ApiError(401, "Bridge token must be sent in Authorization header");
+    }
+    const match = /^Bearer (rdbr_[a-zA-Z0-9_-]+)$/i.exec(req.headers.authorization ?? "");
+    const agent = match ? this.store.findBridgeAgentByToken(match[1]) : null;
+    if (!agent) {
+      throw new ApiError(401, "Invalid bridge agent token");
+    }
+    return agent;
+  }
+
+  private async handleBridgeWorkspaceFile(
+    req: IncomingMessage,
+    res: ServerResponse,
+    method: string,
+    projectId: string,
+  ): Promise<unknown> {
+    const urlObj = new URL(req.url ?? "/", "http://localhost");
+    const agent = this.checkBridgeAgent(req, urlObj);
+    const binding = this.store.getProjectAgentBinding(projectId, agent.id);
+    if (!binding?.enabled || !binding.path_ok) throw new ApiError(403, "节点未绑定有效项目目录");
+    const filePath = urlObj.searchParams.get("path") ?? "";
+
+    if (method === "GET") {
+      const { stream, size, sha256 } = streamBridgeWorkspaceFile(this.store.dbPath, projectId, filePath);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.setHeader("Content-Length", String(size));
+      res.setHeader("X-Content-Sha256", sha256);
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      try { await pipeline(stream, res); }
+      catch (err) { if (!res.destroyed && !res.headersSent) throw err; }
+      return undefined;
+    }
+
+    if (method === "PUT") {
+      const headerRunId =
+        typeof req.headers["x-relaydesk-run-id"] === "string"
+          ? req.headers["x-relaydesk-run-id"].trim()
+          : "";
+      const requestedId = headerRunId || urlObj.searchParams.get("run_id")?.trim();
+      const runId = this.bridgeHub?.writeLeaseId(agent.id, projectId, requestedId);
+      if (!this.bridgeHub || !runId) {
+        throw new ApiError(403, "没有有效的写入租约");
+      }
+      const bytes = await this.readBinary(req, MAX_BRIDGE_FILE_BYTES);
+      // Re-verify token, binding, and active write lease after buffering the upload body (prevent TOCTOU on abort/disconnect/rotation).
+      const rechecked = this.checkBridgeAgent(req, urlObj);
+      if (rechecked.id !== agent.id || !this.bridgeHub.hasActiveWriteLease(agent.id, projectId, runId)) {
+        throw new ApiError(403, "没有有效的写入租约");
+      }
+      writeBridgeWorkspaceFile(this.store.dbPath, projectId, filePath, bytes);
+      return {
+        ok: true,
+        size: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      };
+    }
+
+    throw new ApiError(405, "Method not allowed");
+  }
+
+  private async handleBridgeAgents(
+    req: IncomingMessage,
+    method: string,
+    subparts: string[],
+  ): Promise<unknown> {
+    if (subparts.length === 0) {
+      if (method === "GET") {
+        const agents = this.store.listBridgeAgents().map((a) => this.describeBridgeAgent(a));
+        return { agents };
+      }
+      if (method === "POST") {
+        const data = await this.readJson(req, 16 * 1024);
+        const name = field(data, "name", 120);
+        const { agent, token } = this.store.transaction(true, () =>
+          this.store.createBridgeAgent(name),
+        );
+        return this.buildBridgeTokenResponse(req, agent, token);
+      }
+      throw new ApiError(405, "Method not allowed");
+    }
+
+    const agentId = subparts[0];
+    if (subparts.length === 1) {
+      if (method === "PATCH") {
+        const data = await this.readJson(req, 16 * 1024);
+        const patch: BridgeAgentPatch = {};
+        if ("name" in data) {
+          if (typeof data.name !== "string" || !data.name.trim()) {
+            throw new ApiError(400, "节点名称无效");
+          }
+          patch.name = data.name.trim().slice(0, 120);
+        }
+        if ("max_concurrency" in data) {
+          if (typeof data.max_concurrency !== "number") {
+            throw new ApiError(400, "并发上限无效");
+          }
+          patch.max_concurrency = data.max_concurrency;
+        }
+        if ("accept_cli_runs" in data) {
+          if (typeof data.accept_cli_runs !== "boolean") {
+            throw new ApiError(400, "accept_cli_runs 必须为布尔值");
+          }
+          patch.accept_cli_runs = data.accept_cli_runs;
+        }
+        const agent = this.store.transaction(true, () =>
+          this.store.updateBridgeAgent(agentId, patch),
+        );
+        return { agent: this.describeBridgeAgent(agent) };
+      }
+      if (method === "DELETE") {
+        this.store.transaction(true, () => this.store.deleteBridgeAgent(agentId));
+        this.bridgeHub?.disconnect(agentId, 4002, "Agent deleted");
+        return { ok: true };
+      }
+      throw new ApiError(405, "Method not allowed");
+    }
+
+    if (subparts.length === 2 && subparts[1] === "rotate-token" && method === "POST") {
+      const { agent, token } = this.store.transaction(true, () =>
+        this.store.rotateBridgeAgentToken(agentId),
+      );
+      this.bridgeHub?.disconnect(agentId, 4001, "Token rotated");
+      return this.buildBridgeTokenResponse(req, agent, token);
+    }
+
+    if (subparts.length === 2 && subparts[1] === "refresh" && method === "POST") {
+      if (!this.bridgeHub) {
+        throw new ApiError(503, "Bridge hub unavailable");
+      }
+      this.bridgeHub.refresh(agentId);
+      return { ok: true };
+    }
+
+    throw new ApiError(404, "Unknown bridge agent endpoint");
+  }
+
+  private async handleProjectAgentBindings(
+    req: IncomingMessage,
+    method: string,
+    projectId: string,
+    subparts: string[],
+  ): Promise<unknown> {
+    if (subparts.length === 0 && method === "GET") {
+      this.store.getProjectRow(projectId);
+      return { bindings: this.store.listProjectAgentBindings(projectId) };
+    }
+
+    if (subparts.length === 1 && method === "PATCH") {
+      const agentId = subparts[0];
+      this.store.getProjectRow(projectId);
+      if (!this.store.getBridgeAgent(agentId)) {
+        throw new ApiError(404, "本机节点不存在");
+      }
+      const data = await this.readJson(req, 16 * 1024);
+
+      let workdir: string | undefined;
+      if ("workdir" in data) {
+        if (
+          typeof data.workdir !== "string" ||
+          !data.workdir.trim() ||
+          data.workdir.length > 4096 ||
+          /[\x00-\x1f]/.test(data.workdir)
+        ) {
+          throw new ApiError(400, "项目目录路径无效");
+        }
+        workdir = data.workdir.trim();
+      }
+      let allowDatasourceSecrets: boolean | undefined;
+      if ("allow_datasource_secrets" in data) {
+        if (typeof data.allow_datasource_secrets !== "boolean") {
+          throw new ApiError(400, "allow_datasource_secrets 必须为布尔值");
+        }
+        allowDatasourceSecrets = data.allow_datasource_secrets;
+      }
+      let enabled: boolean | undefined;
+      if ("enabled" in data) {
+        if (typeof data.enabled !== "boolean") {
+          throw new ApiError(400, "enabled 必须为布尔值");
+        }
+        enabled = data.enabled;
+      }
+
+      if (workdir !== undefined && workdir !== this.store.getProjectAgentBinding(projectId, agentId)?.workdir) {
+        if (!this.bridgeHub) {
+          throw new ApiError(409, "本机节点离线，无法校验目录");
+        }
+        const confirmed = await this.bridgeHub.bindProject(agentId, projectId, workdir);
+        if (!confirmed.path_ok) {
+          throw new ApiError(400, confirmed.path_error || "本机节点拒绝了该目录绑定");
+        }
+        const binding = this.store.transaction(true, () => {
+          const latest = this.store.getProjectAgentBinding(projectId, agentId);
+          if (!latest || !latest.path_ok || latest.workdir !== confirmed.workdir) {
+            throw new ApiError(409, "项目目录绑定状态已变更，请重试");
+          }
+          if (allowDatasourceSecrets !== undefined || enabled !== undefined) {
+            return this.store.upsertProjectAgentBinding(projectId, agentId, {
+              ...(allowDatasourceSecrets !== undefined
+                ? { allow_datasource_secrets: allowDatasourceSecrets }
+                : {}),
+              ...(enabled !== undefined ? { enabled } : {}),
+            });
+          }
+          return latest;
+        });
+        return { binding };
+      }
+
+      const binding = this.store.transaction(true, () =>
+        this.store.upsertProjectAgentBinding(projectId, agentId, {
+          ...(allowDatasourceSecrets !== undefined
+            ? { allow_datasource_secrets: allowDatasourceSecrets }
+            : {}),
+          ...(enabled !== undefined ? { enabled } : {}),
+        }),
+      );
+      return { binding };
+    }
+
+    throw new ApiError(404, "Unknown project agent binding endpoint");
   }
 
   private async handleAuth(
@@ -928,6 +1299,66 @@ export class ApiRouter {
     throw new ApiError(404, "Unknown R2 settings endpoint");
   }
 
+  private async handleUtilityAi(
+    req: IncomingMessage,
+    method: string,
+    subparts: string[],
+    meta: { adminChallenge?: boolean },
+  ): Promise<unknown> {
+    this.checkOperator(req, meta);
+    if (subparts.length === 0 && method === "GET") {
+      return toUtilityAiConfigStatus(getEffectiveUtilityAiConfig(this.store.dbPath));
+    }
+    if (method !== "POST") {
+      throw new ApiError(405, "Method not allowed");
+    }
+    const data = await this.readJson(req, 16 * 1024);
+
+    if (subparts.length === 0) {
+      const provider = validateUtilityAiProvider(data.provider ?? "openai");
+      const endpoint = validateUtilityAiEndpoint(data.endpoint ?? "");
+      const model = validateUtilityAiModel(data.model);
+      const rawApiKey = validateUtilityAiKey(data.api_key ?? "");
+      const existing = readStoredUtilityAiConfig(this.store.dbPath);
+      const destinationChanged =
+        Boolean(existing?.api_key) &&
+        (provider !== existing!.provider || endpoint !== existing!.endpoint);
+      const apiKey = rawApiKey || (!destinationChanged ? existing?.api_key || "" : "");
+      if (!apiKey) {
+        throw new ApiError(
+          400,
+          destinationChanged
+            ? "切换协议或 API 地址时，请重新输入对应的 API Key。"
+            : "请填写 API Key。",
+        );
+      }
+      saveStoredUtilityAiConfig(this.store.dbPath, {
+        provider,
+        endpoint,
+        api_key: apiKey,
+        model,
+      });
+      return toUtilityAiConfigStatus(getEffectiveUtilityAiConfig(this.store.dbPath));
+    }
+
+    if (subparts.length === 1 && subparts[0] === "disconnect") {
+      deleteStoredUtilityAiConfig(this.store.dbPath);
+      return toUtilityAiConfigStatus(getEffectiveUtilityAiConfig(this.store.dbPath));
+    }
+
+    if (subparts.length === 1 && subparts[0] === "test") {
+      return await testUtilityAiConnection(this.store.dbPath, {
+        provider:
+          data.provider !== undefined ? validateUtilityAiProvider(data.provider) : undefined,
+        endpoint: typeof data.endpoint === "string" ? data.endpoint : undefined,
+        model: typeof data.model === "string" ? data.model : undefined,
+        api_key: typeof data.api_key === "string" ? data.api_key : undefined,
+      });
+    }
+
+    throw new ApiError(404, "Unknown utility AI settings endpoint");
+  }
+
   private async handleProjectRepos(
     method: string,
     projectId: string,
@@ -1195,23 +1626,16 @@ export class ApiRouter {
       if (method === "POST") {
         const data = await this.readJson(req, 16 * 1024);
         const runtimeInfo = getChatRuntimeInfo(this.store.dbPath, projectInfo.id);
-        const runtime: ChatRuntime =
-          data.runtime === "claude"
-            ? "claude"
-            : data.runtime === "codex"
-              ? "codex"
-              : runtimeInfo.project_cli.runtime;
-        const model =
-          typeof data.model === "string"
-            ? data.model
-            : runtime === runtimeInfo.project_cli.runtime
-              ? runtimeInfo.project_cli.model
-              : "";
+        const selection = chatModelSelection(data);
+        const runtime = selection.runtime ?? runtimeInfo.project_cli.runtime;
+        const local = selection.execution_target?.startsWith("local:");
+        const model = selection.model ?? (!local && runtime === runtimeInfo.project_cli.runtime ? runtimeInfo.project_cli.model : "");
         const sandboxMode: ChatSandboxMode =
           data.sandbox_mode === "workspace-write" ? "workspace-write" : "read-only";
         const networkAccess = data.network_access === true;
         const session = this.store.transaction(true, () =>
           this.store.createChatSession(projectInfo.id, {
+            ...selection,
             title: typeof data.title === "string" ? data.title : undefined,
             runtime,
             model,
@@ -1236,27 +1660,29 @@ export class ApiRouter {
       }
       if (method === "PATCH") {
         const data = await this.readJson(req, 16 * 1024);
-        const session = this.store.transaction(true, () =>
-          this.store.updateChatSession(projectInfo.id, sessionId, {
+        const selection = chatModelSelection(data);
+        const sandbox = data.sandbox_mode === "read-only" || data.sandbox_mode === "workspace-write" ? data.sandbox_mode : undefined;
+        const network = typeof data.network_access === "boolean" ? data.network_access : undefined;
+        const session = this.store.transaction(true, () => {
+          const current = this.store.getChatSession(projectInfo.id, sessionId);
+          // Apply permission changes on a fresh invocation; resume reuses the previous sandbox.
+          const permissionsChanged = (sandbox !== undefined && sandbox !== current.sandbox_mode) ||
+            (network !== undefined && network !== current.network_access);
+          return this.store.updateChatSession(projectInfo.id, sessionId, {
             title: typeof data.title === "string" ? data.title : undefined,
-            runtime:
-              data.runtime === "codex" || data.runtime === "claude" ? data.runtime : undefined,
-            model: typeof data.model === "string" ? data.model : undefined,
-            sandbox_mode:
-              data.sandbox_mode === "read-only" || data.sandbox_mode === "workspace-write"
-                ? data.sandbox_mode
-                : undefined,
-            network_access:
-              typeof data.network_access === "boolean" ? data.network_access : undefined,
-          }),
-        );
+            ...selection,
+            sandbox_mode: sandbox,
+            network_access: network,
+            ...(permissionsChanged && { external_session_id: "" }),
+          });
+        });
         return { session };
       }
       if (method === "DELETE") {
+        const removed = this.store.transaction(true, () => this.store.deleteChatSession(projectInfo.id, sessionId));
         abortChatSessionRun(sessionId);
-        return this.store.transaction(true, () =>
-          this.store.deleteChatSession(projectInfo.id, sessionId),
-        );
+        this.bridgeHub?.abortChatSessionRun(sessionId);
+        return removed;
       }
       throw new ApiError(405, "Method not allowed");
     }
@@ -1270,8 +1696,39 @@ export class ApiRouter {
     ) {
       const sessionId = subparts[1];
       this.store.transaction(false, () => this.store.getChatSession(projectInfo.id, sessionId));
-      const aborted = abortChatSessionRun(sessionId);
+      const aborted =
+        abortChatSessionRun(sessionId) ||
+        Boolean(this.bridgeHub?.abortChatSessionRun(sessionId));
       return { aborted };
+    }
+
+    // POST /api/projects/:id/codex-chat/sessions/:sessionId/title
+    if (
+      subparts.length === 3 &&
+      subparts[0] === "sessions" &&
+      subparts[2] === "title" &&
+      method === "POST"
+    ) {
+      const sessionId = subparts[1];
+      const { session, messages } = this.store.transaction(false, () => ({
+        session: this.store.getChatSession(projectInfo.id, sessionId),
+        messages: this.store.listChatMessages(projectInfo.id, sessionId),
+      }));
+      const firstUser = messages.find((m) => m.role === "user" && m.content.trim());
+      if (!firstUser) {
+        return { session, generated: false };
+      }
+      const firstAssistant = messages.find((m) => m.role === "assistant" && m.content.trim());
+      const aiTitle = await generateSessionTitle(this.store.dbPath, {
+        projectId: projectInfo.id,
+        userMessage: firstUser.content,
+        assistantReply: firstAssistant?.content,
+      });
+      const nextTitle = aiTitle || buildFallbackSessionTitle(firstUser.content);
+      const updated = this.store.transaction(true, () =>
+        this.store.updateChatSession(projectInfo.id, sessionId, { title: nextTitle }),
+      );
+      return { session: updated, generated: Boolean(aiTitle) };
     }
 
     // POST /api/projects/:id/codex-chat/sessions/:sessionId/messages (SSE stream)
@@ -1300,44 +1757,62 @@ export class ApiRouter {
         attachments.push({ kind, label: label || ref, ref, ...(repo ? { repo } : {}) });
       }
 
-      if (isChatSessionRunning(sessionId)) {
+      if (isChatSessionRunning(sessionId) || this.bridgeHub?.isChatSessionRunning(sessionId)) {
         throw new ApiError(409, "当前会话正在生成回复，请等待完成或先点击停止。");
       }
 
-      const { session, priorMessages, userMessage, assistantMessage } = this.store.transaction(
-        true,
-        () => {
-          let current = this.store.getChatSession(projectInfo.id, sessionId);
-          const prior = this.store.listChatMessages(projectInfo.id, sessionId);
-          // Auto-title session from the first user message when still using default title.
-          const autoTitle =
-            prior.length === 0 && (!current.title || current.title === "新对话")
-              ? content.replace(/\s+/g, " ").trim().slice(0, 36)
-              : undefined;
-          current = this.store.updateChatSession(projectInfo.id, sessionId, {
-            ...(autoTitle ? { title: autoTitle } : {}),
-            status: "running",
-          });
-          const userMsg = this.store.addChatMessage(sessionId, {
-            role: "user",
-            content,
-            attachments,
-            status: "done",
-          });
-          const assistantMsg = this.store.addChatMessage(sessionId, {
-            role: "assistant",
-            content: "",
-            events: [],
-            status: "streaming",
-          });
-          return {
-            session: current,
-            priorMessages: prior,
-            userMessage: userMsg,
-            assistantMessage: assistantMsg,
-          };
-        },
-      );
+      const {
+        session,
+        priorMessages,
+        userMessage,
+        assistantMessage,
+        provisionalTitle,
+        localAgentId,
+        localBinding,
+      } = this.store.transaction(true, () => {
+        let current = this.store.getChatSession(projectInfo.id, sessionId);
+        const agentId = current.execution_target.startsWith("local:")
+          ? current.execution_target.slice("local:".length)
+          : null;
+        let binding: BridgeAgentBindingSummary | null = null;
+        if (agentId) {
+          if (!this.bridgeHub) {
+            throw new ApiError(409, "本地执行节点服务未启用");
+          }
+          binding = this.bridgeHub.assertCanRun(agentId, projectInfo.id, current.runtime);
+        }
+        const prior = this.store.listChatMessages(projectInfo.id, sessionId);
+        // Auto-title session from the first user message when still using default title.
+        const autoTitle =
+          prior.length === 0 && (!current.title || current.title === "新对话")
+            ? buildFallbackSessionTitle(content)
+            : undefined;
+        current = this.store.updateChatSession(projectInfo.id, sessionId, {
+          ...(autoTitle ? { title: autoTitle } : {}),
+          status: "running",
+        });
+        const userMsg = this.store.addChatMessage(sessionId, {
+          role: "user",
+          content,
+          attachments,
+          status: "done",
+        });
+        const assistantMsg = this.store.addChatMessage(sessionId, {
+          role: "assistant",
+          content: "",
+          events: [],
+          status: "streaming",
+        });
+        return {
+          session: current,
+          priorMessages: prior,
+          userMessage: userMsg,
+          assistantMessage: assistantMsg,
+          provisionalTitle: autoTitle,
+          localAgentId: agentId,
+          localBinding: binding,
+        };
+      });
 
       const abortController = new AbortController();
       res.on("close", () => {
@@ -1367,25 +1842,136 @@ export class ApiRouter {
         assistant_message_id: assistantMessage.id,
       });
 
+      // Asynchronously refine the session title with the global utility model (or project fallback).
+      const titlePromise = provisionalTitle
+        ? generateSessionTitle(this.store.dbPath, {
+            projectId: projectInfo.id,
+            userMessage: content,
+          })
+            .then((aiTitle) => {
+              if (!aiTitle || aiTitle === provisionalTitle) return;
+              const updated = this.store.transaction(true, () => {
+                try {
+                  const latest = this.store.getChatSession(projectInfo.id, sessionId);
+                  if (latest.title !== provisionalTitle) return null;
+                  return this.store.updateChatSession(projectInfo.id, sessionId, {
+                    title: aiTitle,
+                  });
+                } catch {
+                  return null;
+                }
+              });
+              if (updated) {
+                writeEvent({ type: "session_updated", session: updated });
+              }
+            })
+            .catch(() => {
+              // Non-fatal: keep provisional fallback title
+            })
+        : Promise.resolve();
+
+      const targetKey = localAgentId ? `local:${localAgentId}` : "cloud";
+      const canResumePrior =
+        Boolean(session.external_session_id) &&
+        (session.resolved_target === targetKey || (targetKey === "cloud" && !session.resolved_target));
+      const resolveTask = (taskId: string) => {
+        try {
+          const row = this.store.getTaskRow(taskId);
+          return row.project_id === projectInfo.id ? toTaskView(row) : null;
+        } catch {
+          return null;
+        }
+      };
+
       try {
-        const result = await runWebCliChatTurn({
-          dbPath: this.store.dbPath,
-          project: projectInfo,
-          session,
-          prompt: content,
-          attachments,
-          priorMessages,
-          signal: abortController.signal,
-          resolveTask: (taskId) => {
-            try {
-              const row = this.store.getTaskRow(taskId);
-              return row.project_id === projectInfo.id ? toTaskView(row) : null;
-            } catch {
-              return null;
+        let result;
+        if (localAgentId) {
+          const workspaceManifest = buildWorkspaceManifest(this.store.dbPath, projectInfo.id);
+          const datasourceRuntime = getWorkspaceDatasourceRuntimeEnv(this.store.dbPath, projectInfo.id);
+          const attachmentContext = buildAttachmentContext(
+            this.store.dbPath,
+            projectInfo,
+            attachments.filter(att => att.kind !== "file" || workspaceManifest.files.some(file => file.path === att.ref)),
+            workspaceManifest.databases,
+            resolveTask,
+          );
+          const contextBlocks: string[] = [];
+          if (!canResumePrior) {
+            if (projectInfo.agent_instructions.trim()) {
+              contextBlocks.push(`## Project Instructions\n${projectInfo.agent_instructions.trim().slice(0, 4000)}`);
             }
-          },
-          onEvent: writeEvent,
-        });
+            if (workspaceManifest.databases.length > 0) {
+              const dbLines = workspaceManifest.databases.map((db) => {
+                if (db.source === "workspace_file") {
+                  return `- [SQLite] ${db.name}: path=$RELAYDESK_SPACE_DIR/files/${db.file_path} (${db.table_count ?? 0} tables)`;
+                }
+                const envPart =
+                  localBinding?.allow_datasource_secrets && db.has_connection_url && db.env_var
+                    ? `env=$${db.env_var}`
+                    : "credentials not exported to this device";
+                const accessPart = db.read_only ? "STRICT READ-ONLY" : "read-write";
+                const notePart = db.notes ? `\n  Notes: ${db.notes.slice(0, 1000)}` : "";
+                return `- [${db.kind.toUpperCase()}] ${db.name}: ${envPart}, endpoint=${db.host_preview || "external"}, access=${accessPart}${notePart}`;
+              });
+              contextBlocks.push(`## Project Databases\n${dbLines.join("\n")}`);
+            }
+            if (priorMessages.length > 0) {
+              const historyLines = priorMessages.slice(-8).map((msg) => {
+                const label = msg.role === "user" ? "User" : "Assistant";
+                return `[${label}]: ${msg.content.slice(0, 1500)}`;
+              });
+              contextBlocks.push(`## Previous Conversation Summary\n${historyLines.join("\n")}`);
+            }
+            if (attachmentContext) {
+              contextBlocks.push(`## Explicitly Attached Context\n${attachmentContext}`);
+            }
+          }
+          result = await this.bridgeHub!.runChatTurn(
+            localAgentId,
+            {
+              session_id: sessionId,
+              project_id: projectInfo.id,
+              runtime: session.runtime,
+              model: session.model,
+              reasoning_effort: session.reasoning_effort,
+              sandbox_mode: session.sandbox_mode,
+              network_access: session.network_access,
+              resume_session_id: canResumePrior ? session.external_session_id : "",
+              prompt: canResumePrior ? buildResumePrompt(content, attachmentContext) : content,
+              system_context: canResumePrior ? "" : contextBlocks.join("\n\n"),
+              workspace_manifest: workspaceManifest,
+              ...(localBinding?.allow_datasource_secrets
+                ? {
+                    datasource_env: datasourceRuntime.env,
+                    pg_read_only_enforced: datasourceRuntime.pgReadOnlyEnforced,
+                  }
+                : {}),
+            },
+            writeEvent,
+            abortController.signal,
+            datasourceRuntime.secrets,
+          );
+        } else {
+          result = await runWebCliChatTurn({
+            dbPath: this.store.dbPath,
+            project: projectInfo,
+            session: canResumePrior ? session : { ...session, external_session_id: "" },
+            prompt: content,
+            attachments,
+            priorMessages,
+            signal: abortController.signal,
+            resolveTask,
+            onEvent: writeEvent,
+          });
+        }
+
+        // Wait briefly for concurrent title generation if it is almost done.
+        if (provisionalTitle) {
+          await Promise.race([
+            titlePromise,
+            new Promise((resolve) => setTimeout(resolve, 600)),
+          ]);
+        }
 
         const saved = this.store.transaction(true, () => {
           const updatedMsg = this.store.updateChatMessage(assistantMessage.id, {
@@ -1396,8 +1982,19 @@ export class ApiRouter {
             events: result.events,
             status: result.status,
           });
+          const current = this.store.getChatSession(projectInfo.id, sessionId);
+          const canResume =
+            current.runtime === session.runtime &&
+            current.sandbox_mode === session.sandbox_mode &&
+            current.network_access === session.network_access;
+          const nextExternalId = !canResume
+            ? ""
+            : result.status === "done"
+              ? result.externalSessionId
+              : canResumePrior ? result.externalSessionId || current.external_session_id : current.external_session_id;
           const updatedSession = this.store.updateChatSession(projectInfo.id, sessionId, {
-            external_session_id: result.externalSessionId,
+            external_session_id: nextExternalId,
+            ...(result.status === "done" && { resolved_target: targetKey }),
             status: result.status === "error" ? "error" : "idle",
           });
           return { updatedMsg, updatedSession };
@@ -1413,6 +2010,11 @@ export class ApiRouter {
           });
         }
       } catch (err) {
+        // A DELETE during the turn removes the session and messages before the runner settles.
+        if (err instanceof ApiError && err.status === 404) {
+          writeEvent({ type: "error", error: "对话已删除或不可用" });
+          return;
+        }
         const errMsg = err instanceof Error ? err.message : "对话执行异常";
         const savedMsg = this.store.transaction(true, () => {
           const msg = this.store.updateChatMessage(assistantMessage.id, {

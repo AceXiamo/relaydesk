@@ -1,0 +1,333 @@
+import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, readdirSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import type { Duplex } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { startBridgeDaemon } from "../agent/bridge/index.ts";
+import { getProjectFilesDir } from "../server/workspace.ts";
+import { bearer, fixture, operator, sha256, type Fixture } from "./bridge-fixture.ts";
+
+// Use real OS processes rather than mocking spawn: cancellation must also reap grandchildren.
+const fakeCli = `#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+const args = process.argv.slice(2);
+if (args.includes('--version') || args.includes('-v')) { console.log('codex-cli 1.0.0'); process.exit(0); }
+if (args.includes('--help')) { console.log('test codex help'); process.exit(0); }
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const prompt = Buffer.concat(chunks).toString();
+const space = process.env.RELAYDESK_SPACE_DIR;
+const emit = obj => console.log(JSON.stringify(obj));
+const claude = args.includes('stream-json');
+if (claude) emit({ type: 'system', session_id: 'local-claude-thread' });
+else emit({ type: 'thread.started', thread_id: 'local-fixture-thread' });
+const dbUrl = process.env.RELAYDESK_DB_FIXTURE ?? '';
+const facts = { cwd: process.cwd(), space, args, hasHistory: prompt.includes('historical-fixture'),
+  hasRef: prompt.includes('workspace reference marker'), hasDbEnv: Boolean(dbUrl), pg: process.env.PGOPTIONS,
+  handbook: existsSync(join(space,'HANDBOOK.md')) ? readFileSync(join(space,'HANDBOOK.md'),'utf8') : null };
+if (existsSync(join(space,'files','large.bin'))) facts.digest = createHash('sha256').update(readFileSync(join(space,'files','large.bin'))).digest('hex');
+if (existsSync(join(space,'files','sample.sqlite'))) {
+  const db = new DatabaseSync(join(space,'files','sample.sqlite'), { readOnly: true });
+  facts.sqlite = db.prepare('SELECT marker FROM fixture').get().marker;
+  db.close();
+}
+writeFileSync('facts.json', JSON.stringify(facts));
+if (prompt.includes('MAKE_CHANGES')) {
+  writeFileSync(join(space, 'HANDBOOK.md'), 'updated handbook');
+  writeFileSync(join(space, 'files', 'output.txt'), 'result from local workspace');
+  writeFileSync(join(space, 'files', 'large.bin'), Buffer.alloc(2 * 1024 * 1024 + 1, 0xa5));
+  writeFileSync(join(space, 'files', '.env'), 'do not publish');
+}
+if (prompt.includes('BLOCK_UNTIL_CANCELLED')) {
+  const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); console.log("ready"); setInterval(() => {}, 30000)'], { stdio: ['ignore', 'pipe', 'ignore'] });
+  await new Promise(resolve => child.stdout.once('data', resolve));
+  writeFileSync('pids.json', JSON.stringify([process.pid, child.pid]));
+  await new Promise(() => setInterval(() => {}, 30000));
+}
+if (claude) {
+  emit({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'fixture reasoning' } } });
+  emit({ type: 'result', result: 'fixture Claude reply' });
+  process.exit(0);
+}
+emit({ type: 'item.completed', item: { id: 'tool', type: 'command_execution', command: 'fixture', aggregated_output: 'tool:' + dbUrl, exit_code: 0 } });
+emit({ type: 'item.completed', item: { id: 'msg', type: 'agent_message', text: 'fixture-reply:' + dbUrl } });
+`;
+
+const privateCatalogValue = ["private", "fixture", "config", "value"].join("-");
+let f: Fixture;
+let daemon: Awaited<ReturnType<typeof startBridgeDaemon>> | undefined;
+beforeEach(async () => {
+  f = await fixture();
+  vi.stubEnv("HOME", join(f.root, "home"));
+  vi.stubEnv("CODEX_HOME", undefined);
+});
+afterEach(async () => {
+  try { await daemon?.close(); } finally { daemon = undefined; vi.unstubAllEnvs(); await f.close(); }
+});
+
+async function start(roots = true) {
+  const p = await f.project();
+  const { id, token } = await f.register();
+  const homeDir = join(f.root, "home");
+  const cacheDir = join(f.root, "cache");
+  const allowed = join(f.root, "allowed");
+  const repo = join(allowed, "repo");
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(join(homeDir, ".claude"), { recursive: true });
+  mkdirSync(join(homeDir, ".codex"), { recursive: true });
+  writeFileSync(join(homeDir, ".claude", "settings.json"), JSON.stringify({ model: "detected-claude", env: { ANTHROPIC_API_KEY: privateCatalogValue } }));
+  writeFileSync(join(homeDir, ".codex", "config.toml"), 'model = "detected-codex"\nmodel_reasoning_effort = "medium"\n');
+  const bin = join(f.root, "fake-codex.mjs");
+  writeFileSync(bin, fakeCli, { mode: 0o755 });
+  const configPath = join(f.root, "config.json");
+  const config = { server_url: f.wsUrl, agent_token: token, agent_name: "Fixture", auto_detect_cli_configs: true,
+    allowed_roots: roots ? [allowed] : [], max_concurrency: 1,
+    projects: { [p]: { workdir: repo } }, runtimes: { codex: { bin }, claude: { bin } },
+    models: [{ id: "detected-codex", runtime: "codex", context_window: 543210, effort_levels: ["low", "high"] }] };
+  writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+  daemon = await startBridgeDaemon({ configPath, cacheDir, homeDir, reconnectMinMs: 30, reconnectMaxMs: 100 });
+  const agent = async () => (await f.ok("/bridge/agents")).agents.find((a: { id: string }) => a.id === id);
+  await expect.poll(async () => (await agent())?.runtimes?.codex?.available, { timeout: 5000 }).toBe(true);
+  return { id, p, token, configPath, cacheDir, repo, allowed, agent, bindPath: `/projects/${p}/agent-bindings/${id}` };
+}
+
+const facts = (repo: string) => JSON.parse(readFileSync(join(repo, "facts.json"), "utf8"));
+function alive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    // A container's PID 1 may not reap an already-terminated orphan immediately.
+    return process.platform !== "linux" || !/\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8"));
+  } catch { return false; }
+}
+
+describe("real bridge daemon + HTTP chat", () => {
+  it("merges native catalogs, hot reloads config, and accepts only real directories inside allowed roots", async () => {
+    const { p, token, configPath, allowed, agent, bindPath } = await start();
+    const summary = await agent();
+    expect(summary.models).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "detected-claude", runtime: "claude" }),
+      expect.objectContaining({ id: "detected-codex", context_window: 543210, effort_levels: ["low", "high"] }),
+    ]));
+    expect(JSON.stringify(summary)).not.toContain(privateCatalogValue);
+    expect(JSON.stringify(summary)).not.toContain(token);
+    const fresh = join(allowed, "second-repo");
+    mkdirSync(fresh);
+    const { binding } = await f.ok(bindPath, "PATCH", { workdir: fresh });
+    expect(realpathSync(binding.workdir)).toBe(realpathSync(fresh));
+    expect(binding.path_ok).toBe(true);
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(realpathSync(config.projects[p].workdir)).toBe(realpathSync(fresh));
+    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+    const outside = join(f.root, "outside");
+    mkdirSync(outside);
+    symlinkSync(outside, join(allowed, "points-outside"), "dir");
+    for (const workdir of [outside, join(allowed, "points-outside"), join(allowed, "absent")]) {
+      expect((await f.api(bindPath, "PATCH", { workdir })).status).toBeGreaterThanOrEqual(400);
+      expect(realpathSync(JSON.parse(readFileSync(configPath, "utf8")).projects[p].workdir)).toBe(realpathSync(fresh));
+    }
+    config.models.push({ id: "hot-loaded", runtime: "codex", context_window: 99000 });
+    writeFileSync(configPath, JSON.stringify(config));
+    await expect.poll(async () => (await agent()).models, { timeout: 6000 }).toContainEqual(expect.objectContaining({ id: "hot-loaded", context_window: 99000 }));
+  });
+
+  it("revalidates locally configured project paths when allowed roots change", async () => {
+    const { p, id, configPath } = await start();
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    const elsewhere = join(f.root, "different-root");
+    mkdirSync(elsewhere);
+    config.allowed_roots = [elsewhere];
+    writeFileSync(configPath, JSON.stringify(config));
+    await expect.poll(async () => (await f.ok("/bridge/agents")).agents.find((a: { id: string }) => a.id === id).bindings[0].path_ok,
+      { timeout: 6000 }).toBe(false);
+    const session = await f.session(p, id);
+    expect((await f.api(`${session.path}/messages`, "POST", { content: "Do not run" })).status).toBe(409);
+  });
+
+  it("cannot remotely change a locally declared workdir without allowed roots", async () => {
+    const { bindPath, p, repo, configPath } = await start(false);
+    const workdir = join(f.root, "another");
+    mkdirSync(workdir);
+    expect((await f.api(bindPath, "PATCH", { workdir })).ok).toBe(false);
+    expect(realpathSync(JSON.parse(readFileSync(configPath, "utf8")).projects[p].workdir)).toBe(realpathSync(repo));
+  });
+
+  it("mounts the shadow space, resumes on the same machine, and writes back only permitted changes", async () => {
+    const { p, id, repo, token, cacheDir } = await start();
+    const w = `/projects/${p}/workspace`;
+    await f.ok(`${w}/handbook`, "POST", { content: "fixture handbook" });
+    await f.ok(`${w}/file`, "POST", { path: "reference.md", content: "workspace reference marker" });
+    const large = Buffer.alloc(2 * 1024 * 1024 + 1, 0x9c);
+    const binary = async (name: string, bytes: Buffer) => {
+      const res = await fetch(`${f.srv.url}/api${w}/upload?path=${name}`, { method: "POST", headers: bearer(operator), body: new Uint8Array(bytes) });
+      expect(res.ok).toBe(true);
+    };
+    await binary("large.bin", large);
+    const dbPath = join(f.root, "fixture.sqlite");
+    const db = new DatabaseSync(dbPath);
+    try { db.exec("CREATE TABLE fixture(marker TEXT); INSERT INTO fixture VALUES ('sqlite-marker')"); } finally { db.close(); }
+    await binary("sample.sqlite", readFileSync(dbPath));
+    const huge = join(getProjectFilesDir(f.dbPath, p), "oversized.bin");
+    writeFileSync(huge, "");
+    truncateSync(huge, 20 * 1024 * 1024 + 1);
+    const s = await f.session(p, id);
+    const attachment = { kind: "file", ref: "reference.md", label: "reference.md" };
+    const text = await (await s.turn("Read attachment and mirror", [attachment])).text();
+    expect(text).toContain("event: tool");
+    expect(text).toContain("event: done");
+    const observed = facts(repo);
+    expect(observed).toMatchObject({ cwd: realpathSync(repo), hasRef: true, handbook: "fixture handbook", digest: sha256(large), sqlite: "sqlite-marker" });
+    expect(realpathSync(observed.space)).toBe(realpathSync(join(cacheDir, p)));
+    expect(existsSync(join(observed.space, "files", "oversized.bin"))).toBe(false);
+    expect(observed.args).toContain("--add-dir");
+    expect(observed.args[observed.args.indexOf("--add-dir") + 1]).toBe(observed.space);
+    expect(readdirSync(repo)).toEqual(["facts.json"]);
+    expect((await s.detail()).session).toMatchObject({ resolved_target: `local:${id}`, external_session_id: "local-fixture-thread" });
+    const mirrorFile = join(observed.space, "files", "large.bin");
+    await f.ok(`${w}/handbook`, "POST", { content: "new cloud handbook" });
+    await f.ok(`${w}/file?path=reference.md`, "DELETE");
+    const previousMtime = statSync(mirrorFile).mtimeMs;
+    expect(await (await s.turn("Follow up")).text()).toContain("event: done");
+    expect(facts(repo).args).toEqual(expect.arrayContaining(["resume", "local-fixture-thread"]));
+    expect(statSync(mirrorFile).mtimeMs).toBe(previousMtime);
+    expect(facts(repo).handbook).toBe("new cloud handbook");
+    expect(existsSync(join(observed.space, "files", "reference.md"))).toBe(false);
+    // A misbehaving CLI can write its own cache, but read-only turns must never publish it.
+    expect(await (await s.turn("MAKE_CHANGES")).text()).toContain("event: done");
+    expect((await f.ok(`${w}/handbook`)).handbook.content).toBe("new cloud handbook");
+    expect((await f.api(`${w}/file?path=output.txt`)).status).toBe(404);
+    const write = await f.session(p, id, "workspace-write");
+    expect(await (await write.turn("MAKE_CHANGES")).text()).toContain("event: done");
+    expect((await f.ok(`${w}/handbook`)).handbook.content).toBe("new cloud handbook");
+    expect((await f.ok(`${w}/file?path=output.txt`)).file.content).toBe("result from local workspace");
+    const uploaded = await fetch(`${f.srv.url}/api/bridge/projects/${p}/workspace/file?path=files/large.bin`, { headers: bearer(token) });
+    expect(sha256(Buffer.from(await uploaded.arrayBuffer()))).toBe(sha256(Buffer.alloc(large.length, 0xa5)));
+    expect((await f.ok(`${w}/files`)).files.map((e: { path: string }) => e.path)).not.toContain(".env");
+    expect((await fetch(`${f.srv.url}/api/bridge/projects/${p}/workspace/file?path=files/output.txt`, { method: "PUT", headers: bearer(token), body: "late change" })).status).toBe(403);
+  });
+
+  it("normalizes a local Claude stream and keeps its read-only tool set", async () => {
+    const { id, p, repo } = await start();
+    const s = await f.session(p, id);
+    await f.ok(s.path, "PATCH", { runtime: "claude", model: "detected-claude", reasoning_effort: "high" });
+    const text = await (await s.turn("Inspect local sources")).text();
+    expect(text).toContain("event: reasoning");
+    expect(text).toContain("fixture Claude reply");
+    expect((await s.detail()).session).toMatchObject({ resolved_target: `local:${id}`, external_session_id: "local-claude-thread" });
+    const { args, space } = facts(repo);
+    expect(args[args.indexOf("--add-dir") + 1]).toBe(space);
+    expect(args[args.indexOf("--allowedTools") + 1].split(",")).not.toContain("Write");
+  });
+
+  it.each(["symlink", "hardlink"])("refuses a %s in the shadow cache and leaves the external file untouched", async (kind) => {
+    const { id, p, cacheDir, repo } = await start();
+    await f.ok(`/projects/${p}/workspace/file`, "POST", { path: "notes.txt", content: "cloud copy" });
+    const dir = join(cacheDir, p, "files");
+    mkdirSync(dir, { recursive: true });
+    const outside = join(f.root, "outside.txt");
+    writeFileSync(outside, "outside copy");
+    (kind === "symlink" ? symlinkSync : linkSync)(outside, join(dir, "notes.txt"));
+    const s = await f.session(p, id, "workspace-write");
+    expect(await (await s.turn("Read the mirror")).text()).toContain("event: error");
+    expect((await s.detail()).messages.at(-1).status).toBe("error");
+    expect(readFileSync(outside, "utf8")).toBe("outside copy");
+    expect(existsSync(join(repo, "facts.json"))).toBe(false);
+  });
+
+  it("rejects a downloaded file if its bytes changed after the manifest was built", async () => {
+    const { id, p, cacheDir, repo } = await start();
+    const size = 2 * 1024 * 1024 + 1;
+    const source = join(getProjectFilesDir(f.dbPath, p, true), "changing.bin");
+    writeFileSync(source, Buffer.alloc(size, 1));
+    let changed = false;
+    f.srv.server.prependListener("request", req => {
+      if (req.url?.startsWith(`/api/bridge/projects/${p}/workspace/file?`)) {
+        changed = true;
+        writeFileSync(source, Buffer.alloc(size, 2));
+      }
+    });
+    const s = await f.session(p, id);
+    expect(await (await s.turn("Read the changing file")).text()).toContain("event: error");
+    expect(changed).toBe(true);
+    expect(existsSync(join(cacheDir, p, "files", "changing.bin"))).toBe(false);
+    expect(existsSync(join(repo, "facts.json"))).toBe(false);
+  });
+
+  it("starts fresh with conversation history when the last successful turn ran on a different machine", async () => {
+    const { id, p, repo } = await start();
+    const s = await f.session(p, id);
+    f.srv.store.updateChatSession(p, s.id, { resolved_target: "cloud", external_session_id: "old-cloud-thread" });
+    f.srv.store.addChatMessage(s.id, { role: "user", content: "historical-fixture" });
+    f.srv.store.addChatMessage(s.id, { role: "assistant", content: "previous cloud answer" });
+    expect(await (await s.turn("Continue after switching nodes")).text()).toContain("event: done");
+    expect(facts(repo).hasHistory).toBe(true);
+    expect(facts(repo).args).not.toContain("resume");
+    expect(facts(repo).args).not.toContain("old-cloud-thread");
+    expect((await s.detail()).session).toMatchObject({ resolved_target: `local:${id}`, external_session_id: "local-fixture-thread" });
+  });
+
+  it("never exports datasource credentials by default; opted-in turns enforce read-only PG and redact output", async () => {
+    const { id, p, repo, configPath, cacheDir, bindPath } = await start();
+    const url = "postgresql://fixture:only-in-memory@db.example.invalid/fixture";
+    await f.ok(`/projects/${p}/workspace/databases`, "POST", { mode: "external", kind: "postgres", name: "Fixture", connection_url: url });
+    const s = await f.session(p, id);
+    expect(await (await s.turn("Check datasource")).text()).toContain("event: done");
+    expect(facts(repo).hasDbEnv).toBe(false);
+    await f.ok(bindPath, "PATCH", { allow_datasource_secrets: true });
+    const text = await (await s.turn("Repeat datasource check")).text();
+    expect(text).toContain("event: done");
+    expect(facts(repo)).toMatchObject({ hasDbEnv: true, pg: expect.stringContaining("default_transaction_read_only=on") });
+    const saved = JSON.stringify(await s.detail());
+    for (const value of [saved, text]) {
+      expect(value).toContain("[redacted]");
+      expect(value).not.toContain("only-in-memory");
+    }
+    expect(readFileSync(configPath, "utf8")).not.toContain("only-in-memory");
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    config.projects[p].allow_datasource_secrets = false;
+    config.models.push({ runtime: "codex", id: "local-opt-out-applied" });
+    writeFileSync(configPath, JSON.stringify(config));
+    await expect.poll(async () => (await f.ok("/bridge/agents")).agents[0].models, { timeout: 5000 })
+      .toContainEqual(expect.objectContaining({ id: "local-opt-out-applied" }));
+    expect(await (await s.turn("Check local opt-out")).text()).toContain("event: done");
+    expect(facts(repo).hasDbEnv).toBe(false);
+    for (const path of readdirSync(cacheDir, { recursive: true, encoding: "utf8" })) {
+      const file = join(cacheDir, path);
+      if (statSync(file).isFile()) expect(readFileSync(file).includes(Buffer.from("only-in-memory"))).toBe(false);
+    }
+  });
+
+  it.each(["abort", "disconnect"] as const)("%s closes the running SSE response and kills the entire child process group", async (action) => {
+    const connections: Duplex[] = [];
+    f.srv.server.on("upgrade", (_req, socket) => connections.push(socket));
+    const { id, p, repo, token } = await start();
+    const s = await f.session(p, id, "workspace-write");
+    const response = await s.turn("BLOCK_UNTIL_CANCELLED");
+    const finished = response.text();
+    await expect.poll(() => existsSync(join(repo, "pids.json"))).toBe(true);
+    const pids: number[] = JSON.parse(readFileSync(join(repo, "pids.json"), "utf8"));
+    try {
+      expect(pids.map(alive)).toEqual([true, true]);
+      if (action === "abort") expect((await f.ok(`${s.path}/abort`, "POST", {})).aborted).toBe(true);
+      else connections[0].destroy();
+      const text = await finished;
+      const detail = await s.detail();
+      expect(detail.messages.at(-1).status).toBe(action === "abort" ? "aborted" : "error");
+      expect(text).toContain(action === "abort" ? "event: done" : "event: error");
+      await expect.poll(() => pids.map(alive), { timeout: 6000 }).toEqual([false, false]);
+      const put = await fetch(`${f.srv.url}/api/bridge/projects/${p}/workspace/file?path=files/cancel.txt`, { method: "PUT", headers: bearer(token), body: "late" });
+      expect(put.status).toBe(403);
+      if (action === "disconnect") {
+        await expect.poll(() => connections.length, { timeout: 4000 }).toBeGreaterThan(1);
+        await expect.poll(async () => (await f.ok("/bridge/agents")).agents[0].online).toBe(true);
+        const next = await f.session(p, id);
+        expect(await (await next.turn("First turn after reconnect")).text()).toContain("event: done");
+      }
+    } finally {
+      for (const pid of pids) { if (alive(pid)) process.kill(pid, "SIGKILL"); }
+    }
+  });
+});

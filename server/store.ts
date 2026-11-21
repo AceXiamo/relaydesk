@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { ApiError } from "./errors.ts";
@@ -7,6 +7,9 @@ import type {
   AgentProjectInfo,
   AgentQueueItem,
   AgentQueuePayload,
+  BridgeAgentSummary,
+  BridgeAgentPatch,
+  BridgeAgentBindingSummary,
   ChatContextRef,
   ChatMessageRecord,
   ChatRuntime,
@@ -15,6 +18,7 @@ import type {
   ChatToolEvent,
   DeliveryMode,
   ProjectDetail,
+  ProjectRoutingConfig,
   ProjectSummary,
   TaskMessage,
   TaskPriority,
@@ -59,8 +63,26 @@ CREATE TABLE IF NOT EXISTS projects (
     agent_instructions TEXT NOT NULL DEFAULT '',
     automation_paused INTEGER NOT NULL DEFAULT 0,
     delivery_mode TEXT NOT NULL DEFAULT 'direct_push',
-    widget_code_context INTEGER NOT NULL DEFAULT 1
+    widget_code_context INTEGER NOT NULL DEFAULT 1,
+    execution_routing_json TEXT NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS bridge_agents (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE, token_prefix TEXT NOT NULL DEFAULT '',
+    hostname TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL DEFAULT '', bridge_version TEXT NOT NULL DEFAULT '',
+    max_concurrency INTEGER NOT NULL DEFAULT 2, accept_cli_runs INTEGER NOT NULL DEFAULT 1,
+    runtimes_json TEXT NOT NULL DEFAULT '{}', models_json TEXT NOT NULL DEFAULT '[]', capabilities_json TEXT NOT NULL DEFAULT '{}',
+    last_seen_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bridge_agent_token_prefix ON bridge_agents(token_prefix);
+CREATE TABLE IF NOT EXISTS project_agent_bindings (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES bridge_agents(id) ON DELETE CASCADE,
+    workdir TEXT NOT NULL DEFAULT '', path_ok INTEGER NOT NULL DEFAULT 0, path_error TEXT NOT NULL DEFAULT '',
+    allow_datasource_secrets INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL,
+    PRIMARY KEY(project_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS agent_bound_projects ON project_agent_bindings(agent_id, project_id);
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
     number INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
@@ -99,6 +121,9 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     title TEXT NOT NULL,
     runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude')),
     model TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT 'default',
+    execution_target TEXT NOT NULL DEFAULT 'auto',
+    resolved_target TEXT NOT NULL DEFAULT '',
     sandbox_mode TEXT NOT NULL DEFAULT 'read-only' CHECK(sandbox_mode IN ('read-only','workspace-write')),
     network_access INTEGER NOT NULL DEFAULT 0,
     external_session_id TEXT NOT NULL DEFAULT '',
@@ -292,6 +317,7 @@ export interface RawProjectRow {
   automation_paused?: number;
   delivery_mode?: string;
   widget_code_context?: number;
+  execution_routing_json: string;
 }
 
 export interface RawTaskRow {
@@ -420,6 +446,52 @@ export function toTaskView(row: RawTaskRow): TaskRecord {
   return result;
 }
 
+const BRIDGE_AGENT_FIELDS = `id, name, token_prefix, hostname, platform, bridge_version, max_concurrency,
+  accept_cli_runs, runtimes_json, models_json, capabilities_json, last_seen_at, created_at, updated_at`;
+
+type BridgeAgentRow = Pick<BridgeAgentSummary, "id" | "name" | "token_prefix" | "hostname" | "platform" |
+  "bridge_version" | "max_concurrency" | "last_seen_at" | "created_at" | "updated_at"> & {
+  accept_cli_runs: number; runtimes_json: string; models_json: string; capabilities_json: string;
+};
+
+function bridgeAgentSummary(row: BridgeAgentRow, bindings: BridgeAgentBindingSummary[]): BridgeAgentSummary {
+  const { accept_cli_runs, runtimes_json, models_json, capabilities_json, ...fields } = row;
+  // Only the hub can report live connections or active runs.
+  return { ...fields, online: false, active_runs: 0, bindings,
+    accept_cli_runs: Boolean(accept_cli_runs), runtimes: JSON.parse(runtimes_json),
+    models: JSON.parse(models_json), capabilities: JSON.parse(capabilities_json) };
+}
+
+type BindingRow = Omit<BridgeAgentBindingSummary, "path_ok" | "enabled" | "allow_datasource_secrets"> & {
+  path_ok: number; enabled: number; allow_datasource_secrets: number;
+};
+
+function bindingView(row: BindingRow): BridgeAgentBindingSummary {
+  return { ...row, path_ok: Boolean(row.path_ok), enabled: Boolean(row.enabled),
+    allow_datasource_secrets: Boolean(row.allow_datasource_secrets) };
+}
+
+type BridgeTelemetry = Partial<Pick<BridgeAgentSummary, "hostname" | "platform" | "bridge_version" |
+  "max_concurrency" | "accept_cli_runs" | "runtimes" | "models" | "capabilities" | "last_seen_at">>;
+type BindingPatch = Partial<Pick<BridgeAgentBindingSummary, "workdir" | "path_ok" | "path_error" |
+  "allow_datasource_secrets" | "enabled">>;
+
+const BINDING_SELECT = `SELECT b.*, p.name AS project_name FROM project_agent_bindings b JOIN projects p ON p.id = b.project_id`;
+
+function verifyBridgeLimits(patch: BridgeAgentPatch) {
+  if (patch.max_concurrency !== undefined && (!Number.isSafeInteger(patch.max_concurrency) || patch.max_concurrency < 1)) {
+    throw new ApiError(400, "max_concurrency must be a positive integer");
+  }
+  if (patch.accept_cli_runs !== undefined && typeof patch.accept_cli_runs !== "boolean") {
+    throw new ApiError(400, "accept_cli_runs must be a boolean");
+  }
+}
+
+function bridgeToken() {
+  const token = `rdbr_${randomBytes(24).toString("hex")}`;
+  return { token, hash: createHash("sha256").update(token).digest("hex"), prefix: token.slice(0, 12) };
+}
+
 export class Store {
   readonly dbPath: string;
   private db: DatabaseSync;
@@ -463,6 +535,9 @@ export class Store {
         "ALTER TABLE projects ADD COLUMN widget_code_context INTEGER NOT NULL DEFAULT 1",
       );
     }
+    if (!cols.some((c) => c.name === "execution_routing_json")) {
+      this.db.exec("ALTER TABLE projects ADD COLUMN execution_routing_json TEXT NOT NULL DEFAULT '{}'");
+    }
     const taskCols = this.db
       .prepare("PRAGMA table_info(tasks)")
       .all() as Array<{ name: string }>;
@@ -492,6 +567,17 @@ export class Store {
         "ALTER TABLE chat_sessions ADD COLUMN network_access INTEGER NOT NULL DEFAULT 0",
       );
     }
+    if (!chatSessionCols.some((c) => c.name === "reasoning_effort")) {
+      this.db.exec("ALTER TABLE chat_sessions ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'default'");
+    }
+    if (!chatSessionCols.some((c) => c.name === "execution_target")) {
+      this.db.exec("ALTER TABLE chat_sessions ADD COLUMN execution_target TEXT NOT NULL DEFAULT 'auto'");
+    }
+    if (!chatSessionCols.some((c) => c.name === "resolved_target")) {
+      this.db.exec("ALTER TABLE chat_sessions ADD COLUMN resolved_target TEXT NOT NULL DEFAULT ''");
+    }
+    // Before routing existed, only the cloud runner could have issued a thread ID.
+    this.db.exec("UPDATE chat_sessions SET resolved_target = 'cloud' WHERE resolved_target = '' AND external_session_id != ''");
     const unmigrated = this.db
       .prepare("SELECT id, repo FROM projects WHERE (repos IS NULL OR repos = '' OR repos = '[]') AND repo != ''")
       .all() as Array<{ id: string; repo: string }>;
@@ -560,6 +646,135 @@ export class Store {
       .get(projectId) as unknown as RawProjectRow | undefined;
     if (!row) throw new ApiError(404, "Record not found");
     return row;
+  }
+
+  createBridgeAgent(name: string): { agent: BridgeAgentSummary; token: string } {
+    const label = field({ name }, "name", 100);
+    const { token, hash, prefix } = bridgeToken();
+    const id = uuidHex();
+    const now = nowIso();
+    this.db.prepare(`INSERT INTO bridge_agents (id, name, token_hash, token_prefix, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)`).run(id, label, hash, prefix, now, now);
+    return { agent: this.requireBridgeAgent(id), token };
+  }
+
+  getBridgeAgent(agentId: string): BridgeAgentSummary | null {
+    const row = this.db.prepare(`SELECT ${BRIDGE_AGENT_FIELDS} FROM bridge_agents WHERE id = ?`).get(agentId) as unknown as BridgeAgentRow | undefined;
+    return row ? bridgeAgentSummary(row, this.listAgentBindings(agentId)) : null;
+  }
+
+  private requireBridgeAgent(agentId: string) {
+    const agent = this.getBridgeAgent(agentId);
+    if (!agent) throw new ApiError(404, "Bridge agent not found");
+    return agent;
+  }
+
+  listBridgeAgents(): BridgeAgentSummary[] {
+    const rows = this.db.prepare(`SELECT ${BRIDGE_AGENT_FIELDS} FROM bridge_agents ORDER BY created_at, rowid`).all() as unknown as BridgeAgentRow[];
+    const bindings = this.db.prepare(`${BINDING_SELECT} ORDER BY p.name, p.id`).all() as unknown as BindingRow[];
+    const grouped = new Map<string, BridgeAgentBindingSummary[]>();
+    for (const row of bindings) {
+      if (!grouped.has(row.agent_id)) grouped.set(row.agent_id, []);
+      grouped.get(row.agent_id)!.push(bindingView(row));
+    }
+    return rows.map(row => bridgeAgentSummary(row, grouped.get(row.id) ?? []));
+  }
+
+  findBridgeAgentByToken(rawToken: string): BridgeAgentSummary | null {
+    if (typeof rawToken !== "string" || !/^rdbr_[a-f0-9]{48}$/.test(rawToken)) return null;
+    const hash = createHash("sha256").update(rawToken).digest("hex");
+    const candidates = this.db.prepare("SELECT id, token_hash FROM bridge_agents WHERE token_prefix = ?").all(rawToken.slice(0, 12));
+    const match = candidates.find(row => safeEqual(String(row.token_hash), hash));
+    return match ? this.getBridgeAgent(String(match.id)) : null;
+  }
+
+  updateBridgeAgent(agentId: string, patch: BridgeAgentPatch): BridgeAgentSummary {
+    const agent = this.requireBridgeAgent(agentId);
+    if (Object.keys(patch).some(key => !["name", "max_concurrency", "accept_cli_runs"].includes(key))) {
+      throw new ApiError(400, "Unknown bridge agent setting");
+    }
+    verifyBridgeLimits(patch);
+    const name = patch.name === undefined ? agent.name : field({ name: patch.name }, "name", 100);
+    this.db.prepare("UPDATE bridge_agents SET name = ?, max_concurrency = ?, accept_cli_runs = ?, updated_at = ? WHERE id = ?")
+      .run(name, patch.max_concurrency ?? agent.max_concurrency, Number(patch.accept_cli_runs ?? agent.accept_cli_runs), nowIso(), agentId);
+    return this.requireBridgeAgent(agentId);
+  }
+
+  rotateBridgeAgentToken(agentId: string): { agent: BridgeAgentSummary; token: string } {
+    const { token, hash, prefix } = bridgeToken();
+    const { changes } = this.db.prepare("UPDATE bridge_agents SET token_hash = ?, token_prefix = ?, updated_at = ? WHERE id = ?")
+      .run(hash, prefix, nowIso(), agentId);
+    if (!changes) throw new ApiError(404, "Bridge agent not found");
+    return { agent: this.requireBridgeAgent(agentId), token };
+  }
+
+  deleteBridgeAgent(agentId: string): void {
+    if (!this.db.prepare("DELETE FROM bridge_agents WHERE id = ?").run(agentId).changes) throw new ApiError(404, "Bridge agent not found");
+  }
+
+  updateBridgeAgentTelemetry(agentId: string, telemetry: BridgeTelemetry): void {
+    verifyBridgeLimits(telemetry);
+    const json = (v: unknown) => v === undefined ? null : JSON.stringify(v);
+    const now = nowIso();
+    const { changes } = this.db.prepare(`UPDATE bridge_agents SET hostname = coalesce(?, hostname), platform = coalesce(?, platform),
+      bridge_version = coalesce(?, bridge_version), max_concurrency = coalesce(?, max_concurrency), accept_cli_runs = coalesce(?, accept_cli_runs),
+      runtimes_json = coalesce(?, runtimes_json), models_json = coalesce(?, models_json), capabilities_json = coalesce(?, capabilities_json),
+      last_seen_at = ?, updated_at = ? WHERE id = ?`).run(telemetry.hostname ?? null, telemetry.platform ?? null,
+        telemetry.bridge_version ?? null, telemetry.max_concurrency ?? null, telemetry.accept_cli_runs === undefined ? null : Number(telemetry.accept_cli_runs),
+        json(telemetry.runtimes), json(telemetry.models), json(telemetry.capabilities), telemetry.last_seen_at ?? now, now, agentId);
+    if (!changes) throw new ApiError(404, "Bridge agent not found");
+  }
+
+  listProjectAgentBindings(projectId: string): BridgeAgentBindingSummary[] {
+    const rows = this.db.prepare(`${BINDING_SELECT} WHERE b.project_id = ? ORDER BY b.agent_id`).all(projectId) as unknown as BindingRow[];
+    return rows.map(bindingView);
+  }
+
+  listAgentBindings(agentId: string): BridgeAgentBindingSummary[] {
+    const rows = this.db.prepare(`${BINDING_SELECT} WHERE b.agent_id = ? ORDER BY p.name, p.id`).all(agentId) as unknown as BindingRow[];
+    return rows.map(bindingView);
+  }
+
+  getProjectAgentBinding(projectId: string, agentId: string): BridgeAgentBindingSummary | null {
+    const row = this.db.prepare(`${BINDING_SELECT} WHERE b.project_id = ? AND b.agent_id = ?`).get(projectId, agentId) as unknown as BindingRow | undefined;
+    return row ? bindingView(row) : null;
+  }
+
+  upsertProjectAgentBinding(projectId: string, agentId: string, patch: BindingPatch): BridgeAgentBindingSummary {
+    this.getProjectRow(projectId);
+    this.requireBridgeAgent(agentId);
+    const previous = this.getProjectAgentBinding(projectId, agentId);
+    const workdir = patch.workdir ?? previous?.workdir ?? "";
+    const samePath = previous?.workdir === workdir;
+    const pathOk = Boolean(workdir && (patch.path_ok ?? (samePath && previous?.path_ok)));
+    this.db.prepare(`INSERT INTO project_agent_bindings(project_id, agent_id, workdir, path_ok, path_error, allow_datasource_secrets, enabled, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, agent_id) DO UPDATE SET workdir = excluded.workdir,
+      path_ok = excluded.path_ok, path_error = excluded.path_error, allow_datasource_secrets = excluded.allow_datasource_secrets,
+      enabled = excluded.enabled, updated_at = excluded.updated_at`).run(projectId, agentId, workdir, Number(pathOk),
+        patch.path_error ?? (samePath ? previous.path_error : ""), Number(patch.allow_datasource_secrets ?? previous?.allow_datasource_secrets ?? false),
+        Number(patch.enabled ?? previous?.enabled ?? true), nowIso());
+    return this.getProjectAgentBinding(projectId, agentId)!;
+  }
+
+  getProjectExecutionRouting(projectId: string): ProjectRoutingConfig {
+    const stored: Partial<ProjectRoutingConfig> = JSON.parse(this.getProjectRow(projectId).execution_routing_json);
+    return {
+      priority: stored.priority ?? [],
+      auto_fallback: stored.auto_fallback ?? true,
+      route_cli_runs: stored.route_cli_runs ?? true,
+    };
+  }
+
+  updateProjectExecutionRouting(projectId: string, patch: Partial<ProjectRoutingConfig>): ProjectRoutingConfig {
+    const current = this.getProjectExecutionRouting(projectId);
+    const routing = {
+      priority: patch.priority ?? current.priority,
+      auto_fallback: patch.auto_fallback ?? current.auto_fallback,
+      route_cli_runs: patch.route_cli_runs ?? current.route_cli_runs,
+    };
+    this.db.prepare("UPDATE projects SET execution_routing_json = ? WHERE id = ?")
+      .run(JSON.stringify(routing), projectId);
+    return routing;
   }
 
   getTaskRow(taskId: string): RawTaskRow {
@@ -1626,13 +1841,9 @@ export class Store {
 
   createChatSession(
     projectId: string,
-    data: {
-      title?: string;
-      runtime?: ChatRuntime;
-      model?: string;
-      sandbox_mode?: ChatSandboxMode;
-      network_access?: boolean;
-    } = {},
+    data: Partial<Pick<ChatSessionRecord,
+      "title" | "runtime" | "model" | "reasoning_effort" | "execution_target" | "sandbox_mode" | "network_access"
+    >> = {},
   ): ChatSessionRecord {
     this.getProjectRow(projectId);
     const title =
@@ -1649,25 +1860,21 @@ export class Store {
     const now = nowIso();
     this.db
       .prepare(
-        `INSERT INTO chat_sessions(id, project_id, title, runtime, model, sandbox_mode, network_access, external_session_id, status, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, '', 'idle', ?, ?)`,
+        `INSERT INTO chat_sessions(id, project_id, title, runtime, model, reasoning_effort, execution_target, sandbox_mode, network_access, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, projectId, title, runtime, model, sandboxMode, networkAccess, now, now);
+      .run(id, projectId, title, runtime, model, data.reasoning_effort ?? "default",
+        data.execution_target ?? "auto", sandboxMode, networkAccess, now, now);
     return this.getChatSession(projectId, id);
   }
 
   updateChatSession(
     projectId: string,
     sessionId: string,
-    patch: {
-      title?: string;
-      runtime?: ChatRuntime;
-      model?: string;
-      sandbox_mode?: ChatSandboxMode;
-      network_access?: boolean;
-      external_session_id?: string;
-      status?: "idle" | "running" | "error";
-    },
+    patch: Partial<Pick<ChatSessionRecord,
+      "title" | "runtime" | "model" | "reasoning_effort" | "execution_target" | "resolved_target" |
+      "sandbox_mode" | "network_access" | "external_session_id" | "status"
+    >>,
   ): ChatSessionRecord {
     const current = this.getChatSession(projectId, sessionId);
     const title =
@@ -1694,31 +1901,25 @@ export class Store {
       typeof patch.network_access === "boolean"
         ? patch.network_access
         : current.network_access;
-    // Switching runtime, sandbox mode, or network access invalidates the prior CLI thread id.
-    let externalSessionId =
-      patch.external_session_id !== undefined
-        ? String(patch.external_session_id).trim().slice(0, 200)
-        : current.external_session_id;
-    if (
-      patch.external_session_id === undefined &&
-      (runtime !== current.runtime ||
-        sandboxMode !== current.sandbox_mode ||
-        networkAccess !== current.network_access)
-    ) {
-      externalSessionId = "";
-    }
+    // External thread IDs belong to a particular CLI runtime.
+    const externalSessionId = runtime !== current.runtime ? "" :
+      (patch.external_session_id?.trim().slice(0, 200) ?? current.external_session_id);
     const status = patch.status ?? current.status;
     const now = nowIso();
     this.db
       .prepare(
         `UPDATE chat_sessions
-         SET title = ?, runtime = ?, model = ?, sandbox_mode = ?, network_access = ?, external_session_id = ?, status = ?, updated_at = ?
+         SET title = ?, runtime = ?, model = ?, reasoning_effort = ?, execution_target = ?, resolved_target = ?,
+             sandbox_mode = ?, network_access = ?, external_session_id = ?, status = ?, updated_at = ?
          WHERE id = ? AND project_id = ?`,
       )
       .run(
         title,
         runtime,
         model,
+        patch.reasoning_effort ?? current.reasoning_effort,
+        patch.execution_target ?? current.execution_target,
+        patch.resolved_target ?? (current.resolved_target || (externalSessionId ? "cloud" : "")),
         sandboxMode,
         networkAccess ? 1 : 0,
         externalSessionId,

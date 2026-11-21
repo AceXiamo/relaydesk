@@ -1,8 +1,15 @@
 import type {
   AuthStatusPayload,
+  BridgeAgentBindingSummary,
+  BridgeAgentPatch,
+  BridgeAgentSummary,
+  BridgeAgentTokenResponse,
+  BridgeBindingPatch,
   ChatContextRef,
   ChatMessageRecord,
   ChatRuntime,
+  ChatReasoningEffort,
+  ModelCatalogItem,
   ChatRuntimeInfo,
   ChatSandboxMode,
   ChatSessionRecord,
@@ -28,6 +35,9 @@ import type {
   TaskPriority,
   TaskRecord,
   TaskStatus,
+  UtilityAiConfigStatus,
+  UtilityAiProvider,
+  UtilityAiTestResult,
   WorkspaceDatabaseEntry,
   WorkspaceDatabaseKind,
   WorkspaceDbClientInfo,
@@ -120,8 +130,23 @@ export const api = {
       payload,
     ),
 
+  listBridgeAgents: () => request<{ agents: BridgeAgentSummary[] }>("/api/bridge/agents"),
+  createBridgeAgent: (name: string) => request<BridgeAgentTokenResponse>("/api/bridge/agents", "POST", { name }),
+  updateBridgeAgent: (agentId: string, patch: BridgeAgentPatch) =>
+    request<{ agent: BridgeAgentSummary }>(`/api/bridge/agents/${encodeURIComponent(agentId)}`, "PATCH", patch),
+  rotateBridgeAgentToken: (agentId: string) =>
+    request<BridgeAgentTokenResponse>(`/api/bridge/agents/${encodeURIComponent(agentId)}/rotate-token`, "POST", {}),
+  refreshBridgeAgent: (agentId: string) =>
+    request<{ ok: true }>(`/api/bridge/agents/${encodeURIComponent(agentId)}/refresh`, "POST", {}),
+  deleteBridgeAgent: (agentId: string) =>
+    request<{ ok: true }>(`/api/bridge/agents/${encodeURIComponent(agentId)}`, "DELETE"),
+  updateProjectAgentBinding: (projectId: string, agentId: string, patch: BridgeBindingPatch) =>
+    request<{ binding: BridgeAgentBindingSummary }>(`/api/projects/${encodeURIComponent(projectId)}/agent-bindings/${encodeURIComponent(agentId)}`, "PATCH", patch),
+
   getProjectCliConfig: (projectId: string) =>
     request<ProjectCliStatus>(`/api/projects/${encodeURIComponent(projectId)}/cli-config`),
+  discoverProjectCliModels: (projectId: string, values: { runtime?: ChatRuntime; endpoint?: string; api_key?: string } = {}) =>
+    request<{ models: ModelCatalogItem[] }>(`/api/projects/${encodeURIComponent(projectId)}/cli-config/discover-models`, "POST", values),
   updateProjectCliConfig: (projectId: string, settings: ProjectCliPatch) =>
     request<ProjectCliStatus>(
       `/api/projects/${encodeURIComponent(projectId)}/cli-config`,
@@ -266,6 +291,22 @@ export const api = {
   }) => request<R2TestResult>("/api/r2/test", "POST", payload ?? {}),
   disconnectR2Config: () =>
     request<R2ConfigStatus>("/api/r2/disconnect", "POST", {}),
+
+  getUtilityAiConfig: () => request<UtilityAiConfigStatus>("/api/utility-ai"),
+  saveUtilityAiConfig: (payload: {
+    provider: UtilityAiProvider;
+    endpoint?: string;
+    model: string;
+    api_key?: string;
+  }) => request<UtilityAiConfigStatus>("/api/utility-ai", "POST", payload),
+  testUtilityAiConfig: (payload?: {
+    provider?: UtilityAiProvider;
+    endpoint?: string;
+    model?: string;
+    api_key?: string;
+  }) => request<UtilityAiTestResult>("/api/utility-ai/test", "POST", payload ?? {}),
+  disconnectUtilityAiConfig: () =>
+    request<UtilityAiConfigStatus>("/api/utility-ai/disconnect", "POST", {}),
 
   getProjectReposStatus: (projectId: string) =>
     request<ProjectReposSyncStatus>(
@@ -444,6 +485,8 @@ export const api = {
       title?: string;
       runtime?: ChatRuntime;
       model?: string;
+      reasoning_effort?: ChatReasoningEffort;
+      execution_target?: string;
       sandbox_mode?: ChatSandboxMode;
       network_access?: boolean;
     },
@@ -464,6 +507,8 @@ export const api = {
       title?: string;
       runtime?: ChatRuntime;
       model?: string;
+      reasoning_effort?: ChatReasoningEffort;
+      execution_target?: string;
       sandbox_mode?: ChatSandboxMode;
       network_access?: boolean;
     },
@@ -481,6 +526,12 @@ export const api = {
   abortCodexChatSession: (projectId: string, sessionId: string) =>
     request<{ aborted: boolean }>(
       `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}/abort`,
+      "POST",
+      {},
+    ),
+  regenerateCodexChatSessionTitle: (projectId: string, sessionId: string) =>
+    request<{ session: ChatSessionRecord; generated: boolean }>(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}/title`,
       "POST",
       {},
     ),

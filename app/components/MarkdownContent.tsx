@@ -10,6 +10,7 @@ import {
 } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { preserveSoftLineBreaks } from "~/lib/chat-markdown.ts";
 import { Icon } from "./Icon.tsx";
 
 function cn(...parts: Array<string | false | null | undefined>): string {
@@ -204,12 +205,14 @@ function CodeBlockCard({
 export interface MarkdownContentProps {
   content: string;
   compact?: boolean;
+  preserveLineBreaks?: boolean;
   className?: string;
 }
 
 export function MarkdownContent({
   content,
   compact = false,
+  preserveLineBreaks = false,
   className,
 }: MarkdownContentProps) {
   const components = useMemo<Components>(
@@ -478,6 +481,8 @@ export function MarkdownContent({
 
   if (!content.trim()) return null;
 
+  const renderedContent = preserveLineBreaks ? preserveSoftLineBreaks(content) : content;
+
   return (
     <div
       className={cn(
@@ -491,7 +496,7 @@ export function MarkdownContent({
         urlTransform={safeUrlTransform}
         components={components}
       >
-        {content}
+        {renderedContent}
       </Markdown>
     </div>
   );

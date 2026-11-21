@@ -30,7 +30,7 @@ else:
 
 MAX_REPLY = 16000
 MAX_INPUT = 512 * 1024
-MAX_SETTINGS = 32 * 1024
+MAX_SETTINGS = 64 * 1024
 DEFAULT_SETTINGS_FILE = '/run/relaydesk/cli/settings.json'
 HANDBOOK = Path('/run/relaydesk/handbook.md')
 DISPOSABLE = '仅供讨论与验证；临时工作区已丢弃，没有交付代码改动。'

@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequestListener } from "@react-router/node";
 import type { ServerBuild } from "react-router";
 import { ApiRouter } from "./server/api.ts";
+import { BridgeHub, type BridgeHubOptions } from "./server/bridge-hub.ts";
 import { Store } from "./server/store.ts";
 import { WalletAuth } from "./server/wallet.ts";
 
@@ -80,12 +81,14 @@ export interface RelaydeskServerOptions {
   dev?: boolean;
   publicDir?: string;
   apiOnly?: boolean;
+  bridgeHubOptions?: BridgeHubOptions;
 }
 
 export interface RunningRelaydeskServer {
   server: Server;
   store: Store;
   api: ApiRouter;
+  bridgeHub: BridgeHub;
   port: number;
   url: string;
   close: () => Promise<void>;
@@ -106,8 +109,9 @@ export async function startRelaydeskServer(
   }
 
   const store = new Store(dbPath);
+  const bridgeHub = new BridgeHub(store, options.bridgeHubOptions);
   const api = new ApiRouter({
-    store,
+    store, bridgeHub,
     adminToken: options.adminToken ?? "",
     wallet: options.wallet ?? null,
     bindHost: host,
@@ -268,6 +272,10 @@ export async function startRelaydeskServer(
     void handleRequest(req, res);
   });
 
+  server.on("upgrade", (req, socket, head) => {
+    if (req.url?.split("?", 1)[0] === "/api/bridge/ws") bridgeHub.handleUpgrade(req, socket, head);
+  });
+
   await new Promise<void>((resolvePromise, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => {
@@ -281,6 +289,7 @@ export async function startRelaydeskServer(
   const url = `http://${host}:${actualPort}`;
 
   const close = async () => {
+    await bridgeHub.close();
     if (viteDevServer) {
       await viteDevServer.close();
     }
@@ -290,7 +299,7 @@ export async function startRelaydeskServer(
     store.close();
   };
 
-  return { server, store, api, port: actualPort, url, close };
+  return { server, store, api, bridgeHub, port: actualPort, url, close };
 }
 
 function parseCliArgs(argv: string[]) {

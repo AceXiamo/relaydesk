@@ -1,8 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { redactSecrets } from "./cli-stream-parser.ts";
 import {
   closeSync,
   constants,
+  createReadStream,
   existsSync,
   fstatSync,
   lstatSync,
@@ -10,6 +12,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -456,8 +459,13 @@ export function readWorkspaceFileDownload(
   };
 }
 
-function assertWorkspaceQuota(filesDir: string, incomingBytes: number, existingPath?: string) {
-  const { totalBytes, fileCount } = scanWorkspaceTree(filesDir);
+function assertWorkspaceQuota(filesDir: string, incomingBytes: number, existingPath?: string, requireCompleteScan = false) {
+  const { entries, totalBytes, fileCount } = scanWorkspaceTree(filesDir);
+  // The listing counts directories towards its cap. Never authorize an untrusted
+  // upload from an incomplete view of existing files and total disk usage.
+  if (requireCompleteScan && entries.length >= MAX_WORKSPACE_FILES && fileCount !== entries.length) {
+    throw new ApiError(413, "项目空间目录条目已达上限");
+  }
   let existingSize = 0;
   let isNewFile = true;
   if (existingPath && existsSync(existingPath)) {
@@ -893,9 +901,13 @@ export function listWorkspaceDatabases(
   projectId: string,
 ): WorkspaceDatabaseEntry[] {
   if (dbPath === ":memory:") return [];
-  const results: WorkspaceDatabaseEntry[] = [];
   const filesDir = getProjectFilesDir(dbPath, projectId, false);
   const { entries } = scanWorkspaceTree(filesDir);
+  return listDatabasesForFiles(dbPath, projectId, filesDir, entries);
+}
+
+function listDatabasesForFiles(dbPath: string, projectId: string, filesDir: string, entries: WorkspaceFileEntry[]): WorkspaceDatabaseEntry[] {
+  const results: WorkspaceDatabaseEntry[] = [];
   for (const entry of entries) {
     if (entry.type === "file" && entry.is_sqlite) {
       const abs = join(filesDir, entry.path);
@@ -1407,6 +1419,136 @@ export function queryWorkspaceSqlite(
       // ignore
     }
   }
+}
+
+/* Bridge paths are wire paths relative to the space, never host filesystem paths. */
+function bridgeFilePath(dbPath: string, projectId: string, path: string) {
+  const root = getProjectWorkspaceRoot(dbPath, projectId);
+  if (typeof path !== "string" || (path !== "HANDBOOK.md" && !path.startsWith("files/"))) {
+    throw new ApiError(400, "仅允许访问 HANDBOOK.md 或 files/ 中的文件");
+  }
+  if (path !== "HANDBOOK.md") {
+    const rel = path.slice(6);
+    if (normalizeWorkspaceRelPath(rel) !== rel || /[:\\]/.test(rel) ||
+        rel.split("/").some(part => part.startsWith(".") || /^(?:auth|datasources)\.json$/i.test(part)) ||
+        // Repository browsing excludes all SQLite files. The space explicitly shares
+        // SQLite databases, but the remaining sensitive-name rules must still apply.
+        isSensitivePath(rel.toLowerCase().replace(/\.(sqlite3?|db)$/i, ".workspace-data"))) {
+      throw new ApiError(403, "不允许同步此路径");
+    }
+  }
+  const target = join(root, path);
+  checkBridgeDirs(dirname(root), dirname(target));
+  const st = lstatSync(target, { throwIfNoEntry: false });
+  if (st && (!st.isFile() || st.nlink !== 1)) throw new ApiError(403, "不允许访问链接或特殊文件");
+  return target;
+}
+
+function checkBridgeDirs(base: string, parent: string, create = false) {
+  let dir = base;
+  for (const part of ["", ...relative(base, parent).split(sep)]) {
+    dir = join(dir, part);
+    if (create) {
+      try { mkdirSync(dir, { mode: 0o700 }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    }
+    const st = lstatSync(dir, { throwIfNoEntry: false });
+    if (st && !st.isDirectory()) throw new ApiError(403, "工作区目录无效或包含符号链接");
+  }
+}
+
+function openBridgeFile(dbPath: string, projectId: string, path: string, maxBytes: number) {
+  const file = bridgeFilePath(dbPath, projectId, path);
+  let fd: number;
+  try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch (error) { if (isMissing(error)) throw new ApiError(404, "文件不存在"); throw error; }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.nlink !== 1) throw new ApiError(403, "不允许访问链接或特殊文件");
+    const limit = path === "HANDBOOK.md" ? Math.min(maxBytes, MAX_HANDBOOK_BYTES) : maxBytes;
+    if (st.size > limit) throw new ApiError(413, "文件超出传输大小限制");
+    return { file, fd, size: st.size, updated_at: st.mtime.toISOString() };
+  } catch (err) { closeSync(fd); throw err; }
+}
+
+function readBridgeChunks(fd: number, size: number, onChunk: (bytes: Buffer, position: number) => void) {
+  const scratch = Buffer.allocUnsafe(Math.min(size, 64 * 1024));
+  for (let pos = 0; pos < size;) {
+    const n = readSync(fd, scratch, 0, Math.min(scratch.length, size - pos), pos);
+    if (!n) throw new ApiError(409, "文件在同步过程中发生变化");
+    onChunk(scratch.subarray(0, n), pos);
+    pos += n;
+  }
+}
+function bridgeDigest(fd: number, size: number) {
+  const hash = createHash("sha256");
+  readBridgeChunks(fd, size, chunk => { hash.update(chunk); });
+  return hash.digest("hex");
+}
+export function readBridgeWorkspaceFile(dbPath: string, projectId: string, path: string, maxBytes = MAX_UPLOAD_BYTES): Buffer {
+  const { fd, size } = openBridgeFile(dbPath, projectId, path, maxBytes);
+  try {
+    const bytes = Buffer.allocUnsafe(size);
+    readBridgeChunks(fd, size, (chunk, pos) => { chunk.copy(bytes, pos); });
+    return bytes;
+  } finally { closeSync(fd); }
+}
+export function streamBridgeWorkspaceFile(dbPath: string, projectId: string, path: string) {
+  const { file, fd, size } = openBridgeFile(dbPath, projectId, path, MAX_UPLOAD_BYTES);
+  try {
+    const sha256 = bridgeDigest(fd, size);
+    return { size, sha256, stream: createReadStream(file, { fd, start: 0, ...(size > 0 ? { end: size - 1 } : {}) }) };
+  } catch (err) { closeSync(fd); throw err; }
+}
+
+export function writeBridgeWorkspaceFile(dbPath: string, projectId: string, path: string, bytes: Buffer) {
+  if (!Buffer.isBuffer(bytes)) throw new ApiError(400, "文件内容无效");
+  if (!path.startsWith("files/")) throw new ApiError(403, "本机节点只能写入 files/ 下的文件");
+  if (bytes.length > MAX_UPLOAD_BYTES) throw new ApiError(413, "文件超出传输大小限制");
+  const file = bridgeFilePath(dbPath, projectId, path);
+  assertWorkspaceQuota(getProjectFilesDir(dbPath, projectId), bytes.length, file, true);
+  const root = getProjectWorkspaceRoot(dbPath, projectId);
+  checkBridgeDirs(dirname(root), dirname(file), true);
+  const tmp = join(dirname(file), `.relaydesk-${randomUUID()}.tmp`);
+  try {
+    writeFileSync(tmp, bytes, { flag: "wx", mode: 0o600 });
+    renameSync(tmp, file);
+  } finally { rmSync(tmp, { force: true }); }
+}
+
+export function buildWorkspaceManifest(dbPath: string, projectId: string) {
+  const files: Array<{ path: string; size: number; updated_at: string; mtime: string; sha256: string }> = [];
+  let handbook: { size: number; sha256: string; updated_at: string } | null = null;
+  const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+  if (dbPath === ":memory:") return { handbook, handbook_sha256: null, files, databases: [] };
+  const root = getProjectWorkspaceRoot(dbPath, projectId);
+  try {
+    const bytes = readBridgeWorkspaceFile(dbPath, projectId, "HANDBOOK.md");
+    handbook = { size: bytes.length, sha256: digest(bytes), updated_at: lstatSync(join(root, "HANDBOOK.md")).mtime.toISOString() };
+  } catch (error) { if (!(error instanceof ApiError && error.status === 404)) throw error; }
+  // Check the files root before the generic listing (which resolves its realpath).
+  const filesDir = join(root, "files");
+  checkBridgeDirs(dirname(root), filesDir);
+  const permitted: WorkspaceFileEntry[] = [];
+  for (const entry of listWorkspaceFiles(dbPath, projectId).files) {
+    if (entry.type !== "file") continue;
+    try {
+      const wirePath = `files/${entry.path}`;
+      const { fd, size, updated_at } = openBridgeFile(dbPath, projectId, wirePath, Number.MAX_SAFE_INTEGER);
+      try {
+        files.push({ path: entry.path, size, updated_at, mtime: updated_at, sha256: bridgeDigest(fd, size) });
+      } finally { closeSync(fd); }
+      permitted.push(entry);
+    } catch (error) {
+      if (!(error instanceof ApiError && [400, 403, 404].includes(error.status))) throw error;
+    }
+  }
+  const { secrets } = getWorkspaceDatasourceRuntimeEnv(dbPath, projectId);
+  const databases = listDatabasesForFiles(dbPath, projectId, filesDir, permitted).map(db => ({
+    ...db, name: redactSecrets(db.name, secrets), notes: redactSecrets(db.notes, secrets),
+    host_preview: db.kind === "sqlite" && db.source === "external" ? "" : redactSecrets(db.host_preview, secrets),
+  }));
+  return { handbook, handbook_sha256: handbook?.sha256 ?? null, files, databases };
 }
 
 /* -------------------------------------------------------------------------- */

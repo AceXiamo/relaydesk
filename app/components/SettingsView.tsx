@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ProjectCliSettingsCard } from "./ProjectCliSettingsCard.tsx";
+import { UtilityAiSettingsCard } from "./UtilityAiSettingsCard.tsx";
+import { LocalAgentsSettingsCard } from "./LocalAgentsSettingsCard.tsx";
 import { Icon } from "./Icon.tsx";
 import {
   GithubOwnerAvatar,
@@ -728,6 +730,9 @@ export function SettingsView({
         {mode === "settings" && (
           <>
             {project && <ProjectCliSettingsCard key={project.id} projectId={project.id} projectName={project.name} />}
+
+            <LocalAgentsSettingsCard />
+            <UtilityAiSettingsCard />
 
             {/* 1.5 Cloudflare R2 Screenshot Storage */}
             <form

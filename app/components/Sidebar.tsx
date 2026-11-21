@@ -17,6 +17,8 @@ interface SidebarProps {
   authStatus: AuthStatusPayload | null;
   online: boolean;
   dark: boolean;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
   mobileOpen: boolean;
   onCloseMobile: () => void;
   onSelectProject: (id: string) => void;
@@ -35,6 +37,8 @@ export function Sidebar({
   authStatus,
   online,
   dark,
+  collapsed = false,
+  onToggleCollapse,
   mobileOpen,
   onCloseMobile,
   onSelectProject,
@@ -157,7 +161,7 @@ export function Sidebar({
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
           <button
             type="button"
             onClick={onOpenCommand}
@@ -174,6 +178,17 @@ export function Sidebar({
           >
             <Icon name={dark ? "sun" : "moon"} size={14} />
           </button>
+          {onToggleCollapse && (
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              title="收起左侧导航栏 (⌘B)"
+              aria-label="收起左侧导航栏"
+              className="hidden lg:inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+            >
+              <Icon name="panel-left-close" size={14} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -526,7 +541,7 @@ export function Sidebar({
 
   return (
     <>
-      <div className="hidden lg:flex h-full">{content}</div>
+      {!collapsed && <div className="hidden lg:flex h-full">{content}</div>}
       {mobileOpen && (
         <div className="fixed inset-0 z-50 lg:hidden flex">
           <div

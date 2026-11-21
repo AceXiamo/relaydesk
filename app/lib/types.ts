@@ -124,6 +124,8 @@ export interface ProjectCliSettings {
   endpoint: string;
   model: string;
   public_ai_enabled: boolean;
+  models?: ModelCatalogItem[];
+  default_effort?: ChatReasoningEffort;
 }
 
 export interface ProjectCliStatus extends ProjectCliSettings {
@@ -401,6 +403,89 @@ export interface WorkspaceRepoFileContent {
 
 export type ChatRuntime = "codex" | "claude";
 export type ChatSandboxMode = "read-only" | "workspace-write";
+export type ChatReasoningEffort = "default" | "off" | "low" | "medium" | "high" | "max";
+
+export interface ModelCatalogItem {
+  id: string;
+  label?: string;
+  runtime: ChatRuntime;
+  provider?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  supports_effort?: boolean;
+  effort_levels?: Array<Exclude<ChatReasoningEffort, "default">>;
+  default_effort?: Exclude<ChatReasoningEffort, "default">;
+  is_default?: boolean;
+  tags?: string[];
+  source?: "bridge_config" | "cli_config" | "cloud_config" | "detected";
+}
+
+export interface BridgeAgentBindingSummary {
+  project_id: string;
+  project_name?: string;
+  agent_id: string;
+  workdir: string;
+  path_ok: boolean;
+  path_error: string;
+  enabled: boolean;
+  allow_datasource_secrets: boolean;
+  updated_at: string;
+}
+
+export interface BridgeRuntimeStatus {
+  available: boolean;
+  version?: string;
+  default_model?: string;
+  default_effort?: ChatReasoningEffort;
+}
+
+export interface BridgeAgentSummary {
+  id: string;
+  name: string;
+  token_prefix: string;
+  hostname: string;
+  platform: string;
+  bridge_version: string;
+  max_concurrency: number;
+  accept_cli_runs: boolean;
+  online: boolean;
+  active_runs: number;
+  bindings: BridgeAgentBindingSummary[];
+  runtimes: Partial<Record<ChatRuntime, BridgeRuntimeStatus>>;
+  models: ModelCatalogItem[];
+  capabilities: { allowed_roots_enabled?: boolean; db_clients?: string[] };
+  last_seen_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BridgeAgentTokenResponse {
+  agent: BridgeAgentSummary;
+  token: string;
+  quickstart_config: Record<string, unknown>;
+  start_command: string;
+}
+
+export interface BridgeWorkspaceManifestFile {
+  path: string;
+  size: number;
+  sha256: string;
+  updated_at: string;
+}
+
+export interface BridgeWorkspaceManifest {
+  handbook?: Omit<BridgeWorkspaceManifestFile, "path"> | null;
+  files: BridgeWorkspaceManifestFile[];
+}
+
+export type BridgeAgentPatch = Partial<Pick<BridgeAgentSummary, "name" | "max_concurrency" | "accept_cli_runs">>;
+export type BridgeBindingPatch = Partial<Pick<BridgeAgentBindingSummary, "workdir" | "allow_datasource_secrets" | "enabled">>;
+
+export interface ProjectRoutingConfig {
+  priority: string[];
+  auto_fallback: boolean;
+  route_cli_runs: boolean;
+}
 
 export interface ChatContextRef {
   kind: "file" | "repo_file" | "database" | "task";
@@ -426,6 +511,9 @@ export interface ChatSessionRecord {
   model: string;
   sandbox_mode: ChatSandboxMode;
   network_access: boolean;
+  execution_target: string;
+  resolved_target: string;
+  reasoning_effort: ChatReasoningEffort;
   external_session_id: string;
   status: "idle" | "running" | "error";
   created_at: string;
@@ -455,6 +543,8 @@ export interface ChatRuntimeInfo {
     configured: boolean;
     endpoint: string;
     model: string;
+    models: ModelCatalogItem[];
+    default_effort: ChatReasoningEffort;
   };
   auth_mode: {
     codex: "project_key" | "local_cli" | "unavailable";
@@ -462,8 +552,29 @@ export interface ChatRuntimeInfo {
   };
 }
 
+export type UtilityAiProvider = "openai" | "anthropic";
+
+export interface UtilityAiConfigStatus {
+  configured: boolean;
+  source: "workspace" | "env" | "none";
+  provider: UtilityAiProvider;
+  endpoint: string;
+  model: string;
+  has_api_key: boolean;
+  api_key_preview: string;
+}
+
+export interface UtilityAiTestResult {
+  ok: boolean;
+  provider: UtilityAiProvider;
+  model: string;
+  latency_ms: number;
+  reply_preview: string;
+}
+
 export type ChatStreamEvent =
   | { type: "session"; session: ChatSessionRecord; user_message: ChatMessageRecord; assistant_message_id: string }
+  | { type: "session_updated"; session: ChatSessionRecord }
   | { type: "status"; message: string; external_session_id?: string }
   | { type: "reasoning"; text: string }
   | { type: "tool"; event: ChatToolEvent }

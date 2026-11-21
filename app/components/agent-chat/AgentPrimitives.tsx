@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { builtinModels, effortLabels, validCatalogId } from "~/lib/model-catalog.ts";
 import type {
   ChatContextRef,
+  ChatReasoningEffort,
+  ModelCatalogItem,
   ChatRuntime,
   ChatRuntimeInfo,
   ChatSandboxMode,
@@ -11,6 +14,9 @@ import type {
 } from "~/lib/types.ts";
 import { Icon } from "../Icon.tsx";
 import { LivePulseDot } from "../ui.tsx";
+import { RichPromptEditor, type RichPromptEditorHandle } from "./RichPromptEditor.tsx";
+
+export type { RichPromptEditorHandle };
 
 function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -135,24 +141,36 @@ export function ThinkingTrace({
   startedAt?: number;
   durationMs?: number;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  // null = follow automatic lifecycle (open while actively reasoning, collapse once settled);
+  // explicit user click always overrides so the trace can be collapsed or expanded at any time.
+  const [userPref, setUserPref] = useState<"expanded" | "collapsed" | null>(null);
 
-  // Auto-collapse once settled if user didn't open it explicitly
   const hasEntries = entries.length > 0;
+  const hasReasoning = entries.some((e) => e.kind === "reasoning");
   if (!active && !hasEntries) return null;
+
+  const isOpen = hasEntries && (userPref !== null ? userPref === "expanded" : active && hasReasoning);
 
   const settledSummary = durationMs
     ? `已思考 ${formatElapsed(durationMs)}`
-    : entries.length > 0
-      ? `推理过程 · ${entries.length} 条记录`
-      : "已完成推理";
+    : hasReasoning
+      ? "深度思考过程"
+      : entries.length > 0
+        ? `推理过程 · ${entries.length} 条记录`
+        : "已完成推理";
+
+  const handleToggle = () => {
+    if (!hasEntries) return;
+    setUserPref(isOpen ? "collapsed" : "expanded");
+  };
 
   return (
     <div className="mb-2.5">
       <button
         type="button"
-        onClick={() => hasEntries && setExpanded((v) => !v)}
-        disabled={!hasEntries && !active}
+        onClick={handleToggle}
+        disabled={!hasEntries}
+        aria-expanded={isOpen}
         className={cn(
           "group inline-flex items-center gap-2 py-1 pr-2 rounded-lg text-left transition-colors",
           hasEntries
@@ -173,20 +191,25 @@ export function ThinkingTrace({
           </span>
         )}
         {hasEntries && (
-          <Icon
-            name="chevron-down"
-            size={13}
-            className={cn(
-              "text-[var(--text-muted)] transition-transform duration-200",
-              expanded ? "rotate-180" : "rotate-0",
-            )}
-          />
+          <span className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)] group-hover:text-[var(--text-secondary)]">
+            <span className={cn("transition-opacity", isOpen ? "opacity-80" : "opacity-0 group-hover:opacity-100")}>
+              {isOpen ? "收起" : "展开"}
+            </span>
+            <Icon
+              name="chevron-down"
+              size={13}
+              className={cn(
+                "text-[var(--text-muted)] transition-transform duration-200",
+                isOpen ? "rotate-180" : "rotate-0",
+              )}
+            />
+          </span>
         )}
       </button>
 
-      {hasEntries && (expanded || (active && entries.some((e) => e.kind === "reasoning"))) && (
-        <div className="mt-1.5 ml-1 pl-3 border-l border-[var(--border-subtle)] space-y-1.5 animate-fade-in">
-          {(expanded ? entries : entries.slice(-2)).map((item) => (
+      {isOpen && (
+        <div className="mt-1.5 ml-1 pl-3 pr-1 border-l border-[var(--border-subtle)] space-y-1.5 max-h-72 overflow-y-auto rd-scroll animate-fade-in">
+          {entries.map((item) => (
             <div
               key={item.id}
               className={cn(
@@ -447,6 +470,15 @@ export function ToolChipsGroup({
               +{hiddenCount} 更多工具调用
             </button>
           )}
+          {!isStreaming && showAll && events.length > MAX_COLLAPSED_ITEMS && (
+            <button
+              type="button"
+              onClick={() => setShowAll(false)}
+              className="w-full px-3 py-1.5 text-left text-[11.5px] font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]/60 transition-colors cursor-pointer"
+            >
+              收起多余工具调用
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -597,7 +629,304 @@ interface MentionEntry {
   ref: ChatContextRef;
 }
 
-export interface PromptBarProps {
+const effortLevels = ["off", "low", "medium", "high", "max"] as const;
+const contextSize = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+
+function catalogForRuntime(
+  runtime: ChatRuntime,
+  settings: ChatRuntimeInfo["project_cli"] | undefined,
+  selectedModel: string,
+): ModelCatalogItem[] {
+  const suggestions = builtinModels.filter((item) => item.runtime === runtime);
+  const catalog = new Map<string, ModelCatalogItem>();
+  for (const item of settings?.models ?? []) {
+    if (item.runtime === runtime)
+      catalog.set(item.id, { ...suggestions.find((s) => s.id === item.id), ...item });
+  }
+  const projectDefault = settings?.runtime === runtime ? settings.model : "";
+  for (const id of [projectDefault, selectedModel]) {
+    if (id && !catalog.has(id)) catalog.set(id, suggestions.find((s) => s.id === id) ?? { id, runtime });
+  }
+  for (const item of suggestions) {
+    if (!catalog.has(item.id)) catalog.set(item.id, item);
+  }
+  return [...catalog.values()];
+}
+
+interface ModelControlsProps {
+  runtime: ChatRuntime;
+  runtimeInfo: ChatRuntimeInfo | null;
+  model: string;
+  effort: ChatReasoningEffort;
+  onChangeModel: (runtime: ChatRuntime, model: string, effort: ChatReasoningEffort) => void;
+  onChangeEffort: (effort: ChatReasoningEffort) => void;
+}
+
+function ModelControls({
+  runtime,
+  runtimeInfo,
+  model,
+  effort,
+  onChangeModel,
+  onChangeEffort,
+  open,
+  setOpen,
+  disabled,
+  onOpenCliSettings,
+}: ModelControlsProps & {
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  disabled: boolean;
+  onOpenCliSettings: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [index, setIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listId = useId();
+  const settings = runtimeInfo?.project_cli;
+  const catalog = useMemo(() => catalogForRuntime(runtime, settings, model), [runtime, settings, model]);
+  const current = catalog.find((item) => item.id === model);
+  const levels = current?.effort_levels ?? effortLevels;
+  const adjustable = current?.supports_effort !== false && levels.length > 0;
+  const displayedEffort =
+    adjustable && (effort === "default" || levels.includes(effort)) ? effort : "default";
+  const configuredModel = settings?.runtime === runtime ? settings.model : "";
+  const search = query.trim();
+  const matches = catalog.filter((item) =>
+    `${item.id} ${item.label ?? ""}`.toLowerCase().includes(search.toLowerCase()),
+  );
+  const exact = matches.find((item) => item.id === search);
+  const options: ModelCatalogItem[] = validCatalogId(search)
+    ? [exact ?? { runtime, id: search, label: "使用自定义模型" }, ...matches.filter((item) => item !== exact)]
+    : matches;
+  if (!search && !configuredModel) options.push({ runtime, id: "", label: "使用 CLI 默认模型" });
+  const selectedIndex = Math.min(index, options.length - 1);
+  const ready = runtimeInfo && runtimeInfo.auth_mode[runtime] !== "unavailable";
+
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open, runtime]);
+
+  const close = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+  const choose = (rt: ChatRuntime, id: string, closeAfter: boolean) => {
+    const entry = (rt === runtime ? catalog : catalogForRuntime(rt, settings, id)).find(
+      (item) => item.id === id,
+    );
+    const nextEffort =
+      entry?.supports_effort === false ||
+      (effort !== "default" && entry?.effort_levels && !entry.effort_levels.includes(effort))
+        ? "default"
+        : effort;
+    if (rt !== runtime || id !== model || effort !== nextEffort) onChangeModel(rt, id, nextEffort);
+    setQuery("");
+    setIndex(0);
+    if (closeAfter) close();
+  };
+  const pillClass =
+    "inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] disabled:opacity-50 cursor-pointer";
+  return (
+    <div
+      className="contents"
+      onBlur={(e) => {
+        if (open && e.relatedTarget && !e.currentTarget.contains(e.relatedTarget)) setOpen(false);
+      }}
+      onKeyDown={(e) => {
+        if (open && e.key === "Escape" && !e.nativeEvent.isComposing) {
+          e.preventDefault();
+          close();
+        }
+      }}
+    >
+      <button
+        type="button"
+        ref={triggerRef}
+        disabled={disabled}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title={`切换运行工具与模型：${model || "CLI 默认"}`}
+        className={cn(pillClass, open && "bg-[var(--surface-hover)]")}
+        onClick={() => {
+          setQuery("");
+          setIndex(0);
+          setOpen(!open);
+        }}
+      >
+        <LivePulseDot tone={ready ? "emerald" : "zinc"} active={!!ready} />
+        <span>{runtime === "codex" ? "Codex" : "Claude"}</span>
+        <span className="max-w-[90px] sm:max-w-[135px] truncate font-mono text-[11px] text-[var(--text-muted)]">
+          {current?.label || model || "默认模型"}
+        </span>
+        <Icon name="chevron-down" size={11} />
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          aria-label="选择运行工具与模型"
+          className="absolute left-0 bottom-full mb-2 z-30 w-full max-w-[360px] rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up"
+        >
+          <div className="flex gap-1 p-1.5 border-b border-[var(--border-subtle)]">
+            {(["claude", "codex"] as const).map((rt) => (
+              <button
+                key={rt}
+                type="button"
+                disabled={disabled}
+                aria-pressed={runtime === rt}
+                onClick={() =>
+                  choose(rt, runtime === rt ? model : settings?.runtime === rt ? settings.model : "", false)
+                }
+                className={cn(
+                  "flex-1 rounded-lg px-2 py-1.5 text-[12px] font-medium transition-colors",
+                  runtime === rt
+                    ? "bg-[var(--surface-hover)] text-[var(--text-primary)]"
+                    : "text-[var(--text-muted)] hover:text-[var(--text-primary)]",
+                )}
+              >
+                {rt === "claude" ? "Claude Code" : "Codex CLI"}
+              </button>
+            ))}
+          </div>
+          <label className="mx-3 flex items-center gap-2 py-2 text-[var(--text-muted)]">
+            <Icon name="search" size={14} />
+            <input
+              ref={inputRef}
+              role="combobox"
+              aria-label="搜索或输入模型 ID"
+              aria-autocomplete="list"
+              aria-expanded="true"
+              aria-controls={listId}
+              aria-activedescendant={selectedIndex >= 0 ? `${listId}-${selectedIndex}` : undefined}
+              value={query}
+              maxLength={160}
+              placeholder="搜索或输入模型 ID…"
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-[var(--text-primary)] focus:outline-none"
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setIndex(0);
+              }}
+              onKeyDown={(e) => {
+                if (disabled || e.nativeEvent.isComposing || !options.length) return;
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  choose(runtime, options[selectedIndex].id, true);
+                }
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  const next =
+                    (selectedIndex + options.length + (e.key === "ArrowDown" ? 1 : -1)) % options.length;
+                  setIndex(next);
+                  document.getElementById(`${listId}-${next}`)?.scrollIntoView({ block: "nearest" });
+                }
+              }}
+            />
+            <kbd className="font-mono text-[10px]">↑↓ ↵</kbd>
+          </label>
+          <div
+            role="listbox"
+            id={listId}
+            aria-label="可选模型"
+            className="max-h-[min(38vh,16rem)] overflow-y-auto rd-scroll px-1.5 pb-1.5"
+          >
+            {!options.length && <p className="px-2.5 py-2 text-xs text-[var(--text-muted)]">无匹配模型。自定义 ID 须使用可见 ASCII 字符，不能含空格或以连字符开头。</p>}
+            {options.map((item, i) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={model === item.id}
+                id={`${listId}-${i}`}
+                key={item.id}
+                tabIndex={-1}
+                disabled={disabled}
+                onMouseDown={(e) => e.preventDefault()}
+                onMouseEnter={() => setIndex(i)}
+                onClick={() => choose(runtime, item.id, true)}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left",
+                  selectedIndex === i && "bg-[var(--surface-hover)]",
+                )}
+              >
+                <span className="min-w-0 flex-1">
+                  {item.label && (
+                    <span className="block truncate text-[12px] font-medium text-[var(--text-primary)]">
+                      {item.label}
+                    </span>
+                  )}
+                  {item.id && (
+                    <span
+                      title={item.id}
+                      className="block truncate font-mono text-[11.5px] text-[var(--text-secondary)]"
+                    >
+                      {item.id}
+                    </span>
+                  )}
+                </span>
+                {item.context_window && (
+                  <span
+                    title={`${item.context_window.toLocaleString()} 个上下文 token`}
+                    className="rounded border border-[var(--border-subtle)] px-1 font-mono text-[10px] text-[var(--text-muted)]"
+                  >
+                    {contextSize.format(item.context_window)}
+                  </span>
+                )}
+                {(configuredModel ? item.id === configuredModel : item.is_default) && (
+                  <span className="text-[10px] text-[var(--text-muted)]">默认</span>
+                )}
+                {item.id === model && <Icon name="check" size={13} className="text-indigo-500" />}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              close();
+              onOpenCliSettings();
+            }}
+            className="flex w-full items-center gap-1.5 border-t border-[var(--border-subtle)] px-3 py-2 text-[11.5px] text-[var(--text-muted)] hover:bg-[var(--surface-hover)]"
+          >
+            <Icon name="sliders-horizontal" size={12} /> 项目模型设置
+          </button>
+        </div>
+      )}
+      <label
+        title={!adjustable ? "该模型不支持调节思考强度" : "调整思考强度"}
+        className={cn(
+          pillClass,
+          "relative focus-within:ring-2 focus-within:ring-[var(--rd-ring)]",
+          (!adjustable || disabled) && "opacity-50",
+        )}
+      >
+        <Icon name="sparkles" size={12} />
+        <span>{effortLabels[displayedEffort]}</span>
+        <Icon name="chevron-down" size={10} />
+        <select
+          aria-label={adjustable ? "思考强度" : "该模型不支持调节思考强度"}
+          disabled={!adjustable || disabled}
+          value={displayedEffort}
+          onFocus={() => setOpen(false)}
+          onChange={(e) => onChangeEffort(e.target.value as ChatReasoningEffort)}
+          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+        >
+          <option value="default">
+            {effortLabels.default}
+            {settings?.runtime === runtime && settings.default_effort && settings.default_effort !== "default"
+              ? `（项目：${effortLabels[settings.default_effort]}）`
+              : ""}
+          </option>
+          {levels.map((level) => (
+            <option key={level} value={level}>
+              {effortLabels[level]}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
+}
+
+export interface PromptBarProps extends ModelControlsProps {
   input: string;
   onInputChange: (value: string) => void;
   attachments: ChatContextRef[];
@@ -605,15 +934,13 @@ export interface PromptBarProps {
   workspaceFiles: WorkspaceFileEntry[];
   workspaceDatabases: WorkspaceDatabaseEntry[];
   openTasks: TaskRecord[];
-  runtime: ChatRuntime;
-  runtimeInfo: ChatRuntimeInfo | null;
+  settingsBusy: boolean;
   sandboxMode: ChatSandboxMode;
   networkAccess: boolean;
   streaming: boolean;
   statusLine: string;
   authUnavailable: boolean;
-  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
-  onChangeRuntime: (rt: ChatRuntime) => void;
+  composerRef: React.RefObject<RichPromptEditorHandle | null>;
   onChangeSandboxMode: (mode: ChatSandboxMode) => void;
   onToggleNetworkAccess: () => void;
   onOpenCliSettings: () => void;
@@ -638,8 +965,12 @@ export function PromptBar({
   streaming,
   statusLine,
   authUnavailable,
-  textareaRef,
-  onChangeRuntime,
+  composerRef,
+  model,
+  effort,
+  settingsBusy,
+  onChangeModel,
+  onChangeEffort,
   onChangeSandboxMode,
   onToggleNetworkAccess,
   onOpenCliSettings,
@@ -654,15 +985,6 @@ export function PromptBar({
   const [slashQuery, setSlashQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const barRef = useRef<HTMLDivElement>(null);
-
-  // Auto-resize textarea smoothly
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    const next = Math.min(Math.max(el.scrollHeight, 44), 184);
-    el.style.height = `${next}px`;
-  }, [input, textareaRef]);
 
   // Close popovers on outside click
   useEffect(() => {
@@ -775,7 +1097,7 @@ export function PromptBar({
     }
     setMentionQuery("");
     setPopover("none");
-    textareaRef.current?.focus();
+    composerRef.current?.focus();
   };
 
   const pickSlash = (cmd: SlashCommandItem) => {
@@ -797,28 +1119,28 @@ export function PromptBar({
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleInterceptKeyDown = (e: React.KeyboardEvent<HTMLElement>): boolean => {
     if (popover === "mention" && filteredMentions.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setActiveIndex((i) => (i + 1) % filteredMentions.length);
-        return;
+        return true;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
         setActiveIndex((i) => (i - 1 + filteredMentions.length) % filteredMentions.length);
-        return;
+        return true;
       }
       if (e.key === "Enter" && !e.nativeEvent.isComposing) {
         e.preventDefault();
         const chosen = filteredMentions[activeIndex % filteredMentions.length];
         if (chosen) pickMention(chosen);
-        return;
+        return true;
       }
       if (e.key === "Escape") {
         e.preventDefault();
         setPopover("none");
-        return;
+        return true;
       }
     }
 
@@ -826,40 +1148,36 @@ export function PromptBar({
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setActiveIndex((i) => (i + 1) % filteredSlash.length);
-        return;
+        return true;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
         setActiveIndex((i) => (i - 1 + filteredSlash.length) % filteredSlash.length);
-        return;
+        return true;
       }
       if (e.key === "Enter" && !e.nativeEvent.isComposing) {
         e.preventDefault();
         const chosen = filteredSlash[activeIndex % filteredSlash.length];
         if (chosen) pickSlash(chosen);
-        return;
+        return true;
       }
       if (e.key === "Escape") {
         e.preventDefault();
         setPopover("none");
-        return;
+        return true;
       }
     }
 
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-      e.preventDefault();
-      if (!streaming && input.trim() && !authUnavailable) {
-        onSend();
-      }
+    return false;
+  };
+
+  const handleSubmitFromEditor = () => {
+    if (!streaming && !settingsBusy && input.trim() && !authUnavailable) {
+      onSend();
     }
   };
 
-  const activeModel =
-    runtimeInfo?.project_cli.runtime === runtime && runtimeInfo.project_cli.model
-      ? runtimeInfo.project_cli.model
-      : "";
-  const runtimeMode = runtimeInfo?.auth_mode[runtime] ?? "unavailable";
-  const canSend = !streaming && Boolean(input.trim()) && !authUnavailable;
+  const canSend = !streaming && !settingsBusy && Boolean(input.trim()) && !authUnavailable;
 
   return (
     <div ref={barRef} className="relative">
@@ -1010,83 +1328,6 @@ export function PromptBar({
         </div>
       )}
 
-      {/* Runtime / Model Popover */}
-      {popover === "runtime" && (
-        <div className="absolute left-0 sm:left-20 bottom-full mb-2 z-30 w-[260px] rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up">
-          <div className="px-3 py-1.5 border-b border-[var(--border-subtle)] text-[11px] font-medium text-[var(--text-muted)] bg-[var(--surface-subtle)]/50">
-            选择对话运行引擎
-          </div>
-          <div className="p-1.5 space-y-0.5">
-            {(
-              [
-                {
-                  id: "claude" as const,
-                  name: "Claude Code",
-                  desc: "Anthropic 兼容端点 · 工具链稳定",
-                },
-                {
-                  id: "codex" as const,
-                  name: "Codex CLI",
-                  desc: "OpenAI Responses API · 沙箱隔离",
-                },
-              ]
-            ).map((opt) => {
-              const mode = runtimeInfo?.auth_mode[opt.id] ?? "unavailable";
-              const isSelected = runtime === opt.id;
-              const optModel =
-                runtimeInfo?.project_cli.runtime === opt.id && runtimeInfo.project_cli.model
-                  ? runtimeInfo.project_cli.model
-                  : "";
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  disabled={streaming}
-                  onClick={() => {
-                    onChangeRuntime(opt.id);
-                    setPopover("none");
-                  }}
-                  className={cn(
-                    "w-full px-2.5 py-2 rounded-lg flex items-start justify-between gap-2 text-left transition-colors cursor-pointer",
-                    isSelected ? "bg-indigo-500/10" : "hover:bg-[var(--surface-hover)]",
-                  )}
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 text-[12.5px] font-medium text-[var(--text-primary)]">
-                      <LivePulseDot
-                        tone={mode === "unavailable" ? "zinc" : "emerald"}
-                        active={mode !== "unavailable"}
-                      />
-                      <span>{opt.name}</span>
-                    </div>
-                    <div className="text-[11px] text-[var(--text-muted)] mt-0.5 truncate">
-                      {optModel ? `模型：${optModel}` : opt.desc}
-                    </div>
-                  </div>
-                  {isSelected && <Icon name="check" size={14} className="text-indigo-500 mt-0.5 shrink-0" />}
-                </button>
-              );
-            })}
-          </div>
-          <div className="border-t border-[var(--border-subtle)] p-1.5">
-            <button
-              type="button"
-              onClick={() => {
-                setPopover("none");
-                onOpenCliSettings();
-              }}
-              className="w-full px-2.5 py-1.5 rounded-lg flex items-center justify-between text-[11.5px] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition cursor-pointer"
-            >
-              <span className="inline-flex items-center gap-1.5">
-                <Icon name="sliders-horizontal" size={12} />
-                配置 API 地址与自定义模型
-              </span>
-              <Icon name="chevron-right" size={12} className="text-[var(--text-muted)]" />
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Main Composer Card */}
       <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] shadow-[var(--rd-shadow-md)] focus-within:border-[var(--border-strong)] focus-within:ring-2 focus-within:ring-[var(--rd-ring)]/40 transition-all">
         {/* Attached Context Chips inside Composer */}
@@ -1122,16 +1363,15 @@ export function PromptBar({
           </div>
         )}
 
-        {/* Auto-growing Prompt Textarea */}
-        <textarea
-          ref={textareaRef}
-          rows={1}
+        {/* Rich Markdown Composer (auto-converts `inline` & ```code blocks```) */}
+        <RichPromptEditor
+          ref={composerRef}
           value={input}
           disabled={streaming}
-          onChange={(e) => handleChange(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={`向 ${runtime === "codex" ? "Codex" : "Claude"} 提问，输入 @ 引用文件/数据库，或 / 使用快捷指令…`}
-          className="w-full px-3.5 pt-3 pb-2 bg-transparent text-[13.5px] leading-[1.55] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] resize-none focus:outline-none max-h-[184px] rd-scroll"
+          onChange={handleChange}
+          onSubmit={handleSubmitFromEditor}
+          onInterceptKeyDown={handleInterceptKeyDown}
+          placeholder={`向 ${runtime === "codex" ? "Codex" : "Claude"} 提问，支持 \`代码\` / \`\`\` 代码块、@ 引用、/ 快捷指令…`}
         />
 
         {/* Bottom Action Pill Bar */}
@@ -1184,36 +1424,17 @@ export function PromptBar({
 
             <span className="h-3.5 w-px bg-[var(--border-subtle)] mx-0.5" />
 
-            {/* Compact Runtime / Model Pill */}
-            <button
-              type="button"
-              disabled={streaming}
-              onClick={() => setPopover((p) => (p === "runtime" ? "none" : "runtime"))}
-              className={cn(
-                "inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50",
-                popover === "runtime"
-                  ? "bg-[var(--surface-hover)] text-[var(--text-primary)]"
-                  : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
-              )}
-              title="切换 CLI 运行工具与模型"
-            >
-              <LivePulseDot
-                tone={runtimeMode === "unavailable" ? "zinc" : "emerald"}
-                active={runtimeMode !== "unavailable"}
-              />
-              <span>{runtime === "codex" ? "Codex" : "Claude"}</span>
-              {activeModel && (
-                <span className="hidden md:inline font-mono text-[11px] text-[var(--text-muted)] max-w-[120px] truncate">
-                  · {activeModel}
-                </span>
-              )}
-              <Icon name="chevron-down" size={11} className="text-[var(--text-muted)]" />
-            </button>
+            <ModelControls
+              runtime={runtime} runtimeInfo={runtimeInfo} model={model} effort={effort}
+              onChangeModel={onChangeModel} onChangeEffort={onChangeEffort}
+              open={popover === "runtime"} setOpen={(open) => setPopover(open ? "runtime" : "none")}
+              disabled={streaming || settingsBusy} onOpenCliSettings={onOpenCliSettings}
+            />
 
             {/* Sandbox Mode Toggle Pill */}
             <button
               type="button"
-              disabled={streaming}
+              disabled={streaming || settingsBusy}
               onClick={() =>
                 onChangeSandboxMode(sandboxMode === "read-only" ? "workspace-write" : "read-only")
               }
@@ -1240,7 +1461,7 @@ export function PromptBar({
             {runtime === "codex" && (
               <button
                 type="button"
-                disabled={streaming}
+                disabled={streaming || settingsBusy}
                 onClick={onToggleNetworkAccess}
                 title={
                   networkAccess
