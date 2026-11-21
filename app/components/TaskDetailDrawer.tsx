@@ -11,9 +11,11 @@ import {
   OwnerChip,
   PriorityBadge,
   ResolutionBadge,
+  Select,
   SourceBadge,
   StatusBadge,
   useToast,
+  type SelectOption,
 } from "./ui.tsx";
 import { api } from "~/lib/api.ts";
 import {
@@ -774,61 +776,97 @@ export function TaskDetailDrawer({
 
                     {/* Status instant selector */}
                     {task.owner !== "agent" && (
-                      <label className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
+                      <div className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
                         <span>状态</span>
-                        <select
-                          aria-label="修改任务状态"
+                        <Select<TaskStatus>
+                          ariaLabel="修改任务状态"
+                          size="sm"
+                          variant="elevated"
+                          minMenuWidth={148}
+                          className="h-8"
                           value={task.status}
                           disabled={busyAction !== null}
-                          onChange={(e) =>
+                          onChange={(nextStatus) =>
                             void runAction(
                               "status",
                               {
                                 action: "status",
                                 version: task.version,
-                                status: e.target.value as TaskStatus,
+                                status: nextStatus,
                               },
-                              `状态已更新为「${STATUS_LABELS[e.target.value as TaskStatus]}」`,
+                              `状态已更新为「${STATUS_LABELS[nextStatus]}」`,
                             )
                           }
-                          className="h-8 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[12.5px] text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 cursor-pointer"
-                        >
-                          {availableStatuses.map((s) => (
-                            <option key={s} value={s}>
-                              {STATUS_LABELS[s]}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
+                          options={
+                            availableStatuses.map((s) => ({
+                              value: s,
+                              label: STATUS_LABELS[s],
+                              dotClassName:
+                                s === "triage"
+                                  ? "bg-zinc-400"
+                                  : s === "ready"
+                                    ? "bg-indigo-500 dark:bg-indigo-400"
+                                    : s === "working"
+                                      ? "bg-amber-500 dark:bg-amber-400"
+                                      : s === "handoff"
+                                        ? "bg-violet-500 dark:bg-violet-400"
+                                        : s === "waiting"
+                                          ? "bg-rose-500 dark:bg-rose-400"
+                                          : s === "review"
+                                            ? "bg-emerald-500 dark:bg-emerald-400"
+                                            : "bg-zinc-400 dark:bg-zinc-500",
+                            })) satisfies SelectOption<TaskStatus>[]
+                          }
+                        />
+                      </div>
                     )}
 
                     {/* Priority instant selector */}
-                    <label className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
+                    <div className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
                       <span>优先级</span>
-                      <select
-                        aria-label="修改优先级"
+                      <Select<TaskPriority>
+                        ariaLabel="修改优先级"
+                        size="sm"
+                        variant="elevated"
+                        minMenuWidth={136}
+                        className="h-8"
                         value={task.priority}
                         disabled={busyAction !== null}
-                        onChange={(e) =>
+                        onChange={(nextPriority) =>
                           void runAction(
                             "priority",
                             {
                               action: "priority",
                               version: task.version,
-                              priority: e.target.value as TaskPriority,
+                              priority: nextPriority,
                             },
-                            `优先级已调整为「${PRIORITY_LABELS[e.target.value as TaskPriority]}」`,
+                            `优先级已调整为「${PRIORITY_LABELS[nextPriority]}」`,
                           )
                         }
-                        className="h-8 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[12.5px] text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 cursor-pointer"
-                      >
-                        {PRIORITY_ORDER.map((p) => (
-                          <option key={p} value={p}>
-                            {PRIORITY_LABELS[p]}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                        options={
+                          PRIORITY_ORDER.map((p) => ({
+                            value: p,
+                            label: PRIORITY_LABELS[p],
+                            icon:
+                              p === "urgent"
+                                ? "alert-triangle"
+                                : p === "high"
+                                  ? "signal-high"
+                                  : p === "normal"
+                                    ? "signal-medium"
+                                    : "signal-low",
+                            iconClassName:
+                              p === "urgent"
+                                ? "text-rose-600 dark:text-rose-400"
+                                : p === "high"
+                                  ? "text-amber-600 dark:text-amber-400"
+                                  : p === "normal"
+                                    ? "text-zinc-500 dark:text-zinc-300"
+                                    : "text-zinc-400 dark:text-zinc-500",
+                          })) satisfies SelectOption<TaskPriority>[]
+                        }
+                      />
+                    </div>
                   </div>
 
                   {task.owner === "agent" && task.status === "handoff" && (
@@ -1047,24 +1085,52 @@ export function TaskDetailDrawer({
                   {aiConfig && (
                     <div className="flex items-center gap-1.5 flex-wrap justify-end">
                       {aiConfig.configured && (
-                        <select
-                          aria-label="选择对话模型或节点"
+                        <Select
+                          ariaLabel="选择对话模型或节点"
+                          size="xs"
+                          variant="pill"
+                          align="end"
+                          mono
+                          minMenuWidth={256}
+                          maxMenuWidth={320}
+                          className="h-6.5 max-w-[240px]"
                           value={discussTarget}
-                          onChange={(e) => setDiscussTarget(e.target.value)}
-                          className="h-6.5 max-w-[240px] px-2 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[11px] font-mono text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 cursor-pointer"
-                        >
-                          <option value="operator">
-                            对话节点 · {operatorResolved?.model || aiConfig.model}
-                          </option>
-                          <option value="pr_audit">
-                            PR 审计 · {prAuditResolved?.model || aiConfig.model}
-                          </option>
-                          {aiProfiles.map((p) => (
-                            <option key={p.id} value={`profile:${p.id}`}>
-                              {p.name} · {p.model}
-                            </option>
-                          ))}
-                        </select>
+                          onChange={setDiscussTarget}
+                          options={
+                            [
+                              {
+                                value: "operator",
+                                label: "对话节点",
+                                triggerLabel: `对话节点 · ${operatorResolved?.model || aiConfig.model}`,
+                                description:
+                                  operatorResolved?.model || aiConfig.model,
+                                icon: "message-square",
+                                group: "工作流节点",
+                              },
+                              {
+                                value: "pr_audit",
+                                label: "PR 审计",
+                                triggerLabel: `PR 审计 · ${prAuditResolved?.model || aiConfig.model}`,
+                                description:
+                                  prAuditResolved?.model || aiConfig.model,
+                                icon: "git-pull-request",
+                                group: "工作流节点",
+                              },
+                              ...aiProfiles.map((p) => ({
+                                value: `profile:${p.id}`,
+                                label: p.name,
+                                triggerLabel: `${p.name} · ${p.model}`,
+                                description: p.model,
+                                badge:
+                                  p.id === aiConfig.active_profile_id
+                                    ? "默认"
+                                    : undefined,
+                                icon: "cpu",
+                                group: "已配置模型",
+                              })),
+                            ] satisfies SelectOption[]
+                          }
+                        />
                       )}
                       <button
                         type="button"
@@ -1439,19 +1505,25 @@ export function TaskDetailDrawer({
                         onSubmit={handleMerge}
                         className="mt-3 p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] space-y-3"
                       >
-                        <select
-                          required
+                        <Select
+                          ariaLabel="选择要并入的主任务"
+                          fullWidth
+                          size="md"
+                          variant="elevated"
+                          maxMenuWidth={560}
+                          placeholder="选择要并入的主任务…"
                           value={mergeTarget}
-                          onChange={(e) => setMergeTarget(e.target.value)}
-                          className="w-full h-9 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] text-[var(--text-primary)] focus:outline-none focus:border-indigo-500"
-                        >
-                          <option value="">选择要并入的主任务…</option>
-                          {eligibleMergeTargets.map((o) => (
-                            <option key={o.id} value={o.id}>
-                              {taskCode(o.number)} {o.title}
-                            </option>
-                          ))}
-                        </select>
+                          onChange={setMergeTarget}
+                          options={
+                            eligibleMergeTargets.map((o) => ({
+                              value: o.id,
+                              label: o.title,
+                              triggerLabel: `${taskCode(o.number)} ${o.title}`,
+                              badge: taskCode(o.number),
+                              icon: "git-merge",
+                            })) satisfies SelectOption[]
+                          }
+                        />
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-[11.5px] text-[var(--text-muted)]">
                             本单将关闭，原文和讨论会保留在主任务的关联反馈中。

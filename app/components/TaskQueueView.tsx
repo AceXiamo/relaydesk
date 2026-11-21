@@ -9,8 +9,10 @@ import {
   OwnerChip,
   PriorityBadge,
   ResolutionBadge,
+  Select,
   SourceBadge,
   StatusBadge,
+  type SelectOption,
 } from "./ui.tsx";
 import {
   PRIORITY_WEIGHT,
@@ -615,48 +617,76 @@ export function TaskQueueView({
           )}
 
           {view === "queue" && (
-            <select
-              aria-label="按状态筛选"
+            <Select<TaskStatus | "">
+              ariaLabel="按状态筛选"
+              size="sm"
+              minMenuWidth={152}
               value={statusFilter}
-              onChange={(e) => {
+              onChange={(val) => {
                 onCockpitFilterChange?.("");
-                onStatusFilterChange(e.target.value as TaskStatus | "");
+                onStatusFilterChange(val);
               }}
-              className="h-8.5 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[12.5px] text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 cursor-pointer"
-            >
-              <option value="">全部状态</option>
-              {STATUS_ORDER.map((s) => (
-                <option key={s} value={s}>
-                  {STATUS_LABELS[s]}
-                </option>
-              ))}
-            </select>
+              options={
+                [
+                  {
+                    value: "",
+                    label: "全部状态",
+                    icon: "list-filter",
+                  },
+                  ...STATUS_ORDER.map((s) => ({
+                    value: s,
+                    label: STATUS_LABELS[s],
+                    dotClassName:
+                      s === "triage"
+                        ? "bg-zinc-400"
+                        : s === "ready"
+                          ? "bg-indigo-500 dark:bg-indigo-400"
+                          : s === "working"
+                            ? "bg-amber-500 dark:bg-amber-400"
+                            : s === "handoff"
+                              ? "bg-violet-500 dark:bg-violet-400"
+                              : s === "waiting"
+                                ? "bg-rose-500 dark:bg-rose-400"
+                                : s === "review"
+                                  ? "bg-emerald-500 dark:bg-emerald-400"
+                                  : "bg-zinc-400 dark:bg-zinc-500",
+                  })),
+                ] satisfies SelectOption<TaskStatus | "">[]
+              }
+            />
           )}
 
-          <select
-            aria-label="按来源筛选"
+          <Select<TaskSource | "">
+            ariaLabel="按来源筛选"
+            size="sm"
+            minMenuWidth={150}
             value={sourceFilter}
-            onChange={(e) =>
-              onSourceFilterChange(e.target.value as TaskSource | "")
+            onChange={(val) => onSourceFilterChange(val)}
+            options={
+              [
+                { value: "", label: "全部来源", icon: "layers" },
+                { value: "widget", label: "应用组件", icon: "message-square" },
+                { value: "bot", label: "群聊 Bot", icon: "bot" },
+                { value: "console", label: "手动录入", icon: "pen-line" },
+              ] satisfies SelectOption<TaskSource | "">[]
             }
-            className="h-8.5 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[12.5px] text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 cursor-pointer"
-          >
-            <option value="">全部来源</option>
-            <option value="widget">应用组件</option>
-            <option value="bot">群聊 Bot</option>
-            <option value="console">手动录入</option>
-          </select>
+          />
 
-          <select
-            aria-label="排序方式"
+          <Select<SortMode>
+            ariaLabel="排序方式"
+            size="sm"
+            minMenuWidth={144}
+            leadingIcon="arrow-up-down"
             value={sortMode}
-            onChange={(e) => onSortModeChange(e.target.value as SortMode)}
-            className="h-8.5 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[12.5px] text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 cursor-pointer"
-          >
-            <option value="updated">最近更新</option>
-            <option value="priority">按优先级</option>
-            <option value="number">按编号</option>
-          </select>
+            onChange={(val) => onSortModeChange(val)}
+            options={
+              [
+                { value: "updated", label: "最近更新" },
+                { value: "priority", label: "按优先级" },
+                { value: "number", label: "按编号" },
+              ] satisfies SelectOption<SortMode>[]
+            }
+          />
 
           {hasFilters && (
             <Button variant="ghost" size="xs" icon="x" onClick={onClearFilters}>

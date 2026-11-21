@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Icon } from "./Icon.tsx";
-import { Button, Switch, useToast } from "./ui.tsx";
+import { Button, Select, Switch, useToast, type SelectOption } from "./ui.tsx";
 import { api } from "~/lib/api.ts";
 import type {
   AiConfigStatus,
@@ -873,31 +873,51 @@ export function AiSettingsCard({ aiConfig, onAiConfigUpdated }: AiSettingsCardPr
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <label className="block space-y-1">
-                      <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                    <div className="space-y-1">
+                      <span
+                        id={`node-provider-label-${nodeMeta.id}`}
+                        className="block text-[11.5px] font-medium text-[var(--text-secondary)]"
+                      >
                         模型配置 (Provider)
                       </span>
-                      <select
+                      <Select
+                        id={`node-provider-${nodeMeta.id}`}
+                        ariaLabelledBy={`node-provider-label-${nodeMeta.id}`}
                         disabled={!isWorkspace}
+                        fullWidth
+                        size="md"
+                        variant="default"
+                        minMenuWidth={280}
                         value={route.profile_id}
-                        onChange={(e) =>
-                          updateRouteField(nodeMeta.id, "profile_id", e.target.value)
+                        onChange={(val) =>
+                          updateRouteField(nodeMeta.id, "profile_id", val)
                         }
-                        className="w-full h-9 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[12.5px] text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 disabled:opacity-60"
-                      >
-                        <option value="">
-                          跟随默认模型
-                          {activeProfile
-                            ? `（${activeProfile.name} · ${activeProfile.model}）`
-                            : ""}
-                        </option>
-                        {workspaceProfiles.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name}（默认 {p.model}）
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                        options={
+                          [
+                            {
+                              value: "",
+                              label: "跟随默认模型",
+                              triggerLabel: activeProfile
+                                ? `跟随默认（${activeProfile.name}）`
+                                : "跟随默认模型",
+                              description: activeProfile
+                                ? `${activeProfile.name} · ${activeProfile.model}`
+                                : "跟随当前默认配置",
+                              icon: "sparkles",
+                            },
+                            ...workspaceProfiles.map((p) => ({
+                              value: p.id,
+                              label: p.name,
+                              triggerLabel: `${p.name}（${p.model}）`,
+                              description: p.model,
+                              badge: p.id === activeProfile?.id ? "默认" : undefined,
+                              icon: "cpu",
+                              group: "已配置模型",
+                            })),
+                          ] satisfies SelectOption[]
+                        }
+                      />
+                    </div>
 
                     <label className="block space-y-1">
                       <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
