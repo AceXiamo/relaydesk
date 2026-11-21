@@ -205,7 +205,15 @@ function SetupInstructions({ receipt, dismiss }: { receipt: SetupReceipt; dismis
   );
 }
 
-function AgentDetails({ agent }: { agent: BridgeAgentSummary }) {
+function AgentDetails({
+  agent,
+  onOpenProjectRouting,
+  currentProjectName,
+}: {
+  agent: BridgeAgentSummary;
+  onOpenProjectRouting?: () => void;
+  currentProjectName?: string;
+}) {
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-muted)]">
@@ -275,13 +283,28 @@ function AgentDetails({ agent }: { agent: BridgeAgentSummary }) {
           ))}
         </ul>
       ) : (
-        <p className="text-xs text-[var(--text-muted)]">尚未绑定项目目录（可在项目设置的「执行优先级与节点绑定」卡片中配置）。</p>
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--text-muted)]">
+          <span>
+            尚未绑定项目目录（在「项目设置 → 项目执行优先级与节点绑定」中按项目单独配置工作目录）。
+          </span>
+          {onOpenProjectRouting && (
+            <Button size="xs" variant="ghost" icon="arrow-right" onClick={onOpenProjectRouting}>
+              {currentProjectName ? `去为「${currentProjectName}」绑定目录` : "前往项目设置绑定目录"}
+            </Button>
+          )}
+        </div>
       )}
     </>
   );
 }
 
-export function LocalAgentsSettingsCard() {
+export function LocalAgentsSettingsCard({
+  onOpenProjectRouting,
+  currentProjectName,
+}: {
+  onOpenProjectRouting?: () => void;
+  currentProjectName?: string;
+} = {}) {
   const toast = useToast();
   const [agents, setAgents] = useState<BridgeAgentSummary[] | null>(null);
   const [error, setError] = useState("");
@@ -421,7 +444,11 @@ export function LocalAgentsSettingsCard() {
               .join(" · ") || "等待设备上报主机信息"}
           </p>
 
-          <AgentDetails agent={agent} />
+          <AgentDetails
+            agent={agent}
+            onOpenProjectRouting={onOpenProjectRouting}
+            currentProjectName={currentProjectName}
+          />
 
           <div className="flex flex-wrap gap-2">
             <Button

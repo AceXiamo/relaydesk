@@ -8,7 +8,7 @@ import {
   CreateProjectModal,
 } from "~/components/ProjectModals.tsx";
 import { ProjectWorkspaceView } from "~/components/ProjectWorkspaceView.tsx";
-import { SettingsView } from "~/components/SettingsView.tsx";
+import { SettingsView, type SettingsTab } from "~/components/SettingsView.tsx";
 import { Sidebar } from "~/components/Sidebar.tsx";
 import { TaskDetailDrawer } from "~/components/TaskDetailDrawer.tsx";
 import {
@@ -64,6 +64,7 @@ function ConsoleWorkspace() {
   const [currentProject, setCurrentProject] = useState<ProjectDetail | null>(null);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [view, setView] = useState<WorkspaceView>("queue");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("project");
   const [githubConnections, setGithubConnections] = useState<GithubConnectionSummary[]>([]);
   const githubConfigured = githubConnections.length > 0;
   const [authStatus, setAuthStatus] = useState<AuthStatusPayload | null>(null);
@@ -141,6 +142,7 @@ function ConsoleWorkspace() {
   }, []);
 
   const openSkillSetup = useCallback(() => {
+    setSettingsTab("project");
     changeView("settings");
     if (typeof window !== "undefined") {
       window.setTimeout(() => {
@@ -149,6 +151,23 @@ function ConsoleWorkspace() {
           ?.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 60);
     }
+  }, [changeView]);
+
+  const openCliSettings = useCallback(() => {
+    setSettingsTab("project");
+    changeView("settings");
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => {
+        document
+          .getElementById("relaydesk-project-cli")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 60);
+    }
+  }, [changeView]);
+
+  const openGlobalSettings = useCallback(() => {
+    setSettingsTab("global");
+    changeView("settings");
   }, [changeView]);
 
   const toggleTheme = useCallback(() => {
@@ -640,7 +659,7 @@ function ConsoleWorkspace() {
             onConsumePendingContext={() => setPendingChatContext(null)}
             onNewProject={() => setProjectModalOpen(true)}
             onOpenWorkspace={() => changeView("workspace")}
-            onOpenCliSettings={() => changeView("settings")}
+            onOpenCliSettings={openCliSettings}
             mainSidebarCollapsed={sidebarCollapsed}
             onExpandMainSidebar={toggleSidebarCollapsed}
             onTaskCreated={(task) => {
@@ -654,6 +673,8 @@ function ConsoleWorkspace() {
             project={currentProject}
             githubConnections={githubConnections}
             onGithubConnectionsUpdated={setGithubConnections}
+            activeTab={settingsTab}
+            onTabChange={setSettingsTab}
             onProjectUpdated={(updated) => {
               setCurrentProject((current) => current?.id === updated.id ? updated : current);
               setProjects((prev) =>
@@ -735,7 +756,7 @@ function ConsoleWorkspace() {
         onOpenCliSettings={() => {
           setDetail(null);
           setDetailStack([]);
-          changeView("settings");
+          openCliSettings();
         }}
       />
 
@@ -745,7 +766,7 @@ function ConsoleWorkspace() {
         githubConfigured={githubConfigured}
         githubConnections={githubConnections}
         onClose={() => setProjectModalOpen(false)}
-        onOpenGithubSettings={() => changeView("settings")}
+        onOpenGithubSettings={openGlobalSettings}
         onCreated={(proj) => {
           setProjects((prev) => [
             ...prev,

@@ -11,6 +11,7 @@ import { Button, LivePulseDot, useToast } from "./ui.tsx";
 interface ProjectRoutingCardProps {
   projectId: string;
   projectName: string;
+  onOpenGlobalAgents?: () => void;
 }
 
 function ToggleSwitch({
@@ -47,7 +48,11 @@ function ToggleSwitch({
   );
 }
 
-export function ProjectRoutingCard({ projectId, projectName }: ProjectRoutingCardProps) {
+export function ProjectRoutingCard({
+  projectId,
+  projectName,
+  onOpenGlobalAgents,
+}: ProjectRoutingCardProps) {
   const toast = useToast();
   const [routing, setRouting] = useState<ProjectRoutingConfig | null>(null);
   const [effectivePriority, setEffectivePriority] = useState<string[]>([]);
@@ -160,9 +165,16 @@ export function ProjectRoutingCard({ projectId, projectName }: ProjectRoutingCar
             </p>
           </div>
         </div>
-        <Button size="xs" variant="ghost" icon="refresh-cw" disabled={loading || savingRouting} onClick={() => void load()}>
-          刷新状态
-        </Button>
+        <div className="flex items-center gap-1.5">
+          {onOpenGlobalAgents && (
+            <Button size="xs" variant="secondary" icon="monitor" onClick={onOpenGlobalAgents}>
+              管理本机节点
+            </Button>
+          )}
+          <Button size="xs" variant="ghost" icon="refresh-cw" disabled={loading || savingRouting} onClick={() => void load()}>
+            刷新状态
+          </Button>
+        </div>
       </header>
 
       {error && (
@@ -326,9 +338,16 @@ export function ProjectRoutingCard({ projectId, projectName }: ProjectRoutingCar
             </div>
 
             {agents.length === 0 ? (
-              <p className="rounded-xl border border-dashed border-[var(--border-subtle)] px-4 py-4 text-xs text-[var(--text-muted)]">
-                暂无已注册的本机执行节点。请先在下方「本机执行节点 · Local Agents」卡片中添加设备并完成连线。
-              </p>
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-dashed border-[var(--border-subtle)] px-4 py-4 text-xs text-[var(--text-muted)]">
+                <span>
+                  暂无已注册的本机执行节点。请先在「全局设置 → 本机执行节点」中添加设备并完成连线，再回到此处为当前项目绑定本机目录。
+                </span>
+                {onOpenGlobalAgents && (
+                  <Button size="xs" variant="secondary" icon="arrow-right" onClick={onOpenGlobalAgents}>
+                    前往全局设置添加节点
+                  </Button>
+                )}
+              </div>
             ) : (
               <div className="space-y-3">
                 {agents.map((agent) => {

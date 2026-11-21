@@ -76,6 +76,7 @@ const LUCIDE_ICONS = [
   "menu",
   "message-square",
   "message-square-plus",
+  "monitor",
   "moon",
   "more-horizontal",
   "panel-left-close",

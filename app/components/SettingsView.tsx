@@ -34,6 +34,8 @@ import type {
   R2TestResult,
 } from "~/lib/types.ts";
 
+export type SettingsTab = "project" | "global";
+
 interface SettingsViewProps {
   mode: "settings" | "sources";
   project: ProjectDetail | null;
@@ -41,6 +43,8 @@ interface SettingsViewProps {
   onGithubConnectionsUpdated: (connections: GithubConnectionSummary[]) => void;
   onProjectUpdated: (project: ProjectDetail) => void;
   onNewProject: () => void;
+  activeTab?: SettingsTab;
+  onTabChange?: (tab: SettingsTab) => void;
 }
 
 const VALID_OWNER_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -138,9 +142,23 @@ export function SettingsView({
   onGithubConnectionsUpdated,
   onProjectUpdated,
   onNewProject,
+  activeTab,
+  onTabChange,
 }: SettingsViewProps) {
   const toast = useToast();
   const githubConfigured = githubConnections.length > 0;
+  const [internalTab, setInternalTab] = useState<SettingsTab>("project");
+  const currentTab: SettingsTab = activeTab ?? internalTab;
+  const setTab = useCallback(
+    (next: SettingsTab) => {
+      if (onTabChange) {
+        onTabChange(next);
+      } else {
+        setInternalTab(next);
+      }
+    },
+    [onTabChange],
+  );
 
   // GitHub multi-PAT state
   const [ghToken, setGhToken] = useState("");
@@ -717,23 +735,114 @@ export function SettingsView({
     <div className="flex-1 overflow-y-auto">
       <div className="max-w-3xl mx-auto px-5 lg:px-8 py-6 space-y-6">
         {/* Header */}
-        <header className="pb-4 border-b border-[var(--border-subtle)]">
-          <h1 className="text-[19px] font-semibold tracking-tight text-[var(--text-primary)]">
-            {mode === "settings" ? "设置" : "收集入口"}
-          </h1>
-          <p className="text-[13px] text-[var(--text-muted)] mt-1">
-            {mode === "settings"
-              ? "管理项目 CLI、GitHub 连接、截图存储和 Local Agent 接入。"
-              : "将嵌入式反馈组件与 Telegram 群聊机器人接入当前项目的反馈队列。"}
-          </p>
+        <header className="pb-4 border-b border-[var(--border-subtle)] space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h1 className="text-[19px] font-semibold tracking-tight text-[var(--text-primary)]">
+                {mode === "settings" ? "设置" : "收集入口"}
+              </h1>
+              <p className="text-[13px] text-[var(--text-muted)] mt-1">
+                {mode === "sources"
+                  ? "将嵌入式反馈组件与 Telegram 群聊机器人接入当前项目的反馈队列。"
+                  : currentTab === "project"
+                    ? project
+                      ? `仅作用于当前项目「${project.name}」，切换左上角项目时自动切换。`
+                      : "选择一个项目以管理项目配置、本机工作目录绑定与 CLI 凭据。"
+                    : "所有项目共享的基础设施与全局连接配置（本机执行节点、杂项模型、R2 图床与 GitHub 连接）。"}
+              </p>
+            </div>
+          </div>
+
+          {mode === "settings" && (
+            <div
+              role="tablist"
+              aria-label="设置作用域"
+              className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-1"
+            >
+              <button
+                type="button"
+                role="tab"
+                id="settings-tab-project"
+                aria-selected={currentTab === "project"}
+                aria-controls="settings-panel-project"
+                onClick={() => setTab("project")}
+                className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-[12.5px] font-medium transition cursor-pointer ${
+                  currentTab === "project"
+                    ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-2xs ring-1 ring-[var(--border-subtle)]"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                }`}
+              >
+                <Icon
+                  name="folder-git-2"
+                  size={14}
+                  className={
+                    currentTab === "project"
+                      ? "text-indigo-600 dark:text-indigo-400"
+                      : "text-[var(--text-muted)]"
+                  }
+                />
+                <span>项目设置</span>
+                {project && (
+                  <span
+                    className={`max-w-[160px] truncate rounded-md px-1.5 py-0.5 text-[11px] font-normal ${
+                      currentTab === "project"
+                        ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300"
+                        : "bg-[var(--surface-card)]/70 text-[var(--text-muted)]"
+                    }`}
+                  >
+                    {project.name}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                role="tab"
+                id="settings-tab-global"
+                aria-selected={currentTab === "global"}
+                aria-controls="settings-panel-global"
+                onClick={() => setTab("global")}
+                className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-[12.5px] font-medium transition cursor-pointer ${
+                  currentTab === "global"
+                    ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-2xs ring-1 ring-[var(--border-subtle)]"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                }`}
+              >
+                <Icon
+                  name="sliders-horizontal"
+                  size={14}
+                  className={
+                    currentTab === "global"
+                      ? "text-teal-600 dark:text-teal-400"
+                      : "text-[var(--text-muted)]"
+                  }
+                />
+                <span>全局设置</span>
+                <span
+                  className={`rounded-md px-1.5 py-0.5 text-[11px] font-normal ${
+                    currentTab === "global"
+                      ? "bg-teal-500/12 text-teal-700 dark:text-teal-300"
+                      : "bg-[var(--surface-card)]/70 text-[var(--text-muted)]"
+                  }`}
+                >
+                  跨项目共享
+                </span>
+              </button>
+            </div>
+          )}
         </header>
 
-        {mode === "settings" && (
-          <>
-            {project && <ProjectCliSettingsCard key={project.id} projectId={project.id} projectName={project.name} />}
-            {project && <ProjectRoutingCard key={`routing-${project.id}`} projectId={project.id} projectName={project.name} />}
-
-            <LocalAgentsSettingsCard />
+        {mode === "settings" && currentTab === "global" && (
+          <div
+            role="tabpanel"
+            id="settings-panel-global"
+            aria-labelledby="settings-tab-global"
+            className="space-y-6"
+          >
+            <LocalAgentsSettingsCard
+              onOpenProjectRouting={project ? () => setTab("project") : undefined}
+              currentProjectName={project?.name}
+            />
             <UtilityAiSettingsCard />
 
             {/* 1.5 Cloudflare R2 Screenshot Storage */}
@@ -1418,27 +1527,45 @@ export function SettingsView({
                 </div>
               )}
             </section>
-          </>
+          </div>
         )}
 
-        {/* Project-specific cards */}
-        {!project ? (
-          <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-8">
-            <EmptyState
-              compact
-              icon="folder-git-2"
-              title="先创建一个项目"
-              description="每个项目拥有独立的 GitHub 仓库绑定、嵌入组件密钥和 Local Agent 派单队列。"
-              action={
-                <Button variant="primary" size="sm" icon="plus" onClick={onNewProject}>
-                  创建项目
-                </Button>
-              }
-            />
-          </div>
-        ) : mode === "settings" ? (
-          <>
-            {/* 3. Project Configuration */}
+        {/* Project-specific cards (Settings -> Project tab, or Sources mode) */}
+        {(mode === "sources" || currentTab === "project") && (
+          !project ? (
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-8">
+              <EmptyState
+                compact
+                icon="folder-git-2"
+                title="先创建一个项目"
+                description="每个项目拥有独立的 GitHub 仓库绑定、本机工作目录绑定、CLI 凭据与嵌入组件密钥。"
+                action={
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Button variant="primary" size="sm" icon="plus" onClick={onNewProject}>
+                      创建项目
+                    </Button>
+                    {mode === "settings" && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        icon="sliders-horizontal"
+                        onClick={() => setTab("global")}
+                      >
+                        前往全局设置
+                      </Button>
+                    )}
+                  </div>
+                }
+              />
+            </div>
+          ) : mode === "settings" ? (
+            <div
+              role="tabpanel"
+              id="settings-panel-project"
+              aria-labelledby="settings-tab-project"
+              className="space-y-6"
+            >
+              {/* 1. Project Configuration */}
             <form
               onSubmit={handleSaveProject}
               className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs"
@@ -1503,6 +1630,7 @@ export function SettingsView({
                   githubConfigured={githubConfigured}
                   githubConnections={githubConnections}
                   defaultExpanded={false}
+                  onOpenGithubSettings={() => setTab("global")}
                 />
 
                 {/* Automation Switch */}
@@ -1603,6 +1731,23 @@ export function SettingsView({
                 </Button>
               </div>
             </form>
+
+            {/* 2. Project Execution Priority & Per-Agent Workdir Binding */}
+            <ProjectRoutingCard
+              key={`routing-${project.id}`}
+              projectId={project.id}
+              projectName={project.name}
+              onOpenGlobalAgents={() => setTab("global")}
+            />
+
+            {/* 3. Project CLI (Codex / Claude Code) */}
+            <div id="relaydesk-project-cli" className="scroll-mt-6">
+              <ProjectCliSettingsCard
+                key={project.id}
+                projectId={project.id}
+                projectName={project.name}
+              />
+            </div>
 
             {/* 4. Local Agent Skill · 1:1 Scheduled Task Onboarding */}
             {snippets && (
@@ -1826,7 +1971,7 @@ export function SettingsView({
                 </div>
               </section>
             )}
-          </>
+          </div>
         ) : (
           /* Sources Mode */
           snippets && (
@@ -2043,7 +2188,7 @@ export function SettingsView({
               </section>
             </>
           )
-        )}
+        ))}
       </div>
     </div>
   );
