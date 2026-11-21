@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { readProjectCliSettings } from "./project-cli-config.ts";
 import {
   getWorkspaceDatasourceRuntimeEnv,
@@ -361,7 +361,39 @@ function buildResumePrompt(userPrompt: string, attachmentContext: string): strin
   return `${attachmentContext}\n\n## User Message\n${userPrompt}`;
 }
 
+function ensureWritableCliHome(dbPath: string, currentHome?: string): string | null {
+  const trimmed = currentHome?.trim() ?? "";
+  if (trimmed && trimmed !== "/") {
+    if (!existsSync(trimmed)) {
+      try {
+        mkdirSync(trimmed, { recursive: true, mode: 0o700 });
+      } catch {
+        // Fall through to persistent data dir fallback below.
+      }
+    }
+    if (existsSync(trimmed)) return trimmed;
+  }
+  if (dbPath && dbPath !== ":memory:") {
+    const fallback = join(dirname(resolve(dbPath)), ".cli-home");
+    try {
+      mkdirSync(fallback, { recursive: true, mode: 0o700 });
+      return fallback;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function shouldUseLegacyCodexLandlock(): boolean {
+  const raw = process.env.RELAYDESK_CODEX_LEGACY_LANDLOCK?.trim().toLowerCase();
+  if (raw === "1" || raw === "true") return true;
+  if (raw === "0" || raw === "false") return false;
+  return process.platform === "linux" && existsSync("/.dockerenv");
+}
+
 function buildCliInvocation(params: {
+  dbPath: string;
   runtime: ChatRuntime;
   bin: string;
   model: string;
@@ -376,6 +408,7 @@ function buildCliInvocation(params: {
   pgReadOnlyEnforced?: boolean;
 }): { args: string[]; env: NodeJS.ProcessEnv; secrets: string[] } {
   const {
+    dbPath,
     runtime,
     model,
     sandboxMode,
@@ -391,6 +424,11 @@ function buildCliInvocation(params: {
 
   const env: NodeJS.ProcessEnv = { ...process.env };
   const secrets: string[] = [...(datasourceSecrets ?? [])];
+
+  const cliHome = ensureWritableCliHome(dbPath, env.HOME);
+  if (cliHome) {
+    env.HOME = cliHome;
+  }
 
   if (datasourceEnv) {
     for (const [key, value] of Object.entries(datasourceEnv)) {
@@ -411,7 +449,20 @@ function buildCliInvocation(params: {
   const effectiveModel = model.trim() || (projectSettings?.runtime === runtime ? projectSettings.model.trim() : "");
 
   if (runtime === "codex") {
+    if (cliHome && !env.CODEX_HOME) {
+      const codexHome = join(cliHome, ".codex");
+      try {
+        mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+        env.CODEX_HOME = codexHome;
+      } catch {
+        // Ignore if codex home cannot be pre-created; CLI will handle it.
+      }
+    }
+
     const overrides: string[] = [];
+    if (shouldUseLegacyCodexLandlock()) {
+      overrides.push("-c", "features.use_legacy_landlock=true");
+    }
     if (useProjectKey && projectSettings) {
       secrets.push(projectSettings.api_key);
       if (projectSettings.github_token) secrets.push(projectSettings.github_token);
@@ -442,12 +493,17 @@ function buildCliInvocation(params: {
       overrides.push("-m", effectiveModel);
     }
 
+    // Codex only honors sandbox_workspace_write.network_access under workspace-write sandbox.
+    const effectiveCodexSandbox: ChatSandboxMode = networkAccess ? "workspace-write" : sandboxMode;
+
     if (resumeSessionId) {
       const args = [
         "exec",
         "resume",
         "--json",
         "--skip-git-repo-check",
+        "-c",
+        `sandbox_mode=${JSON.stringify(effectiveCodexSandbox)}`,
         ...(useProjectKey ? ["--ignore-user-config"] : []),
         ...overrides,
         resumeSessionId,
@@ -456,8 +512,6 @@ function buildCliInvocation(params: {
       return { args, env, secrets };
     }
 
-    // Codex only honors sandbox_workspace_write.network_access under workspace-write sandbox.
-    const effectiveCodexSandbox: ChatSandboxMode = networkAccess ? "workspace-write" : sandboxMode;
     const args = [
       "-a",
       "never",
@@ -477,6 +531,8 @@ function buildCliInvocation(params: {
   }
 
   // Claude Code runtime
+  if (!env.DISABLE_AUTOUPDATER) env.DISABLE_AUTOUPDATER = "1";
+  if (!env.DISABLE_NONESSENTIAL_TRAFFIC) env.DISABLE_NONESSENTIAL_TRAFFIC = "1";
   if (useProjectKey && projectSettings) {
     secrets.push(projectSettings.api_key);
     env.ANTHROPIC_API_KEY = projectSettings.api_key;
@@ -1063,6 +1119,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
           priorMessages,
         });
     const invocation = buildCliInvocation({
+      dbPath,
       runtime: session.runtime,
       bin,
       model: session.model,

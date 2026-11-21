@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -24,11 +24,12 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const prompt = Buffer.concat(chunks).toString("utf8");
 const isResume = args.includes("resume");
-const threadId = isResume ? args[args.indexOf("resume") + 3] || "thread-resumed" : "thread-abc-123";
+const threadId = isResume ? args[args.length - 2] || "thread-resumed" : "thread-abc-123";
 const hasHandbook = existsSync("HANDBOOK.md");
 const hasSpec = existsSync("files/docs/spec.md");
 const dbEnvKeys = Object.keys(process.env).filter((k) => k.startsWith("RELAYDESK_DB_")).sort();
 const pgOptions = process.env.PGOPTIONS || "";
+const codexHome = process.env.CODEX_HOME || "";
 const leakedUrl = dbEnvKeys.length > 0 ? process.env[dbEnvKeys[0]] : "";
 
 const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");
@@ -62,6 +63,8 @@ emit({
         dbEnvKeys.join(",") +
         ", pgOptions=" +
         pgOptions +
+        ", codexHome=" +
+        codexHome +
         ", args=" +
         args.join(" ") +
         (leakedUrl ? ", raw=" + leakedUrl : ""),
@@ -390,5 +393,45 @@ emit({
     };
     expect(toggled.session.network_access).toBe(false);
     expect(toggled.session.external_session_id).toBe("");
+  });
+
+  it("bootstraps writable CLI HOME/CODEX_HOME and enables legacy Landlock when configured", async () => {
+    const prevHome = process.env.HOME;
+    const prevCodexHome = process.env.CODEX_HOME;
+    const prevLegacy = process.env.RELAYDESK_CODEX_LEGACY_LANDLOCK;
+    const customHome = join(tmpDir, "container-cli-home");
+
+    process.env.HOME = customHome;
+    delete process.env.CODEX_HOME;
+    process.env.RELAYDESK_CODEX_LEGACY_LANDLOCK = "1";
+
+    try {
+      const created = await fetch(`${srv.url}/api/projects/${projectId}/codex-chat/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runtime: "codex", sandbox_mode: "read-only" }),
+      }).then((r) => r.json() as Promise<{ session: { id: string } }>);
+
+      const turnRes = await fetch(
+        `${srv.url}/api/projects/${projectId}/codex-chat/sessions/${created.session.id}/messages`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: "Check container sandbox flags" }),
+        },
+      );
+      expect(turnRes.status).toBe(200);
+      const sseText = await turnRes.text();
+      expect(sseText).toContain("features.use_legacy_landlock=true");
+      expect(sseText).toContain("/container-cli-home/.codex");
+      expect(existsSync(join(customHome, ".codex"))).toBe(true);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prevCodexHome;
+      if (prevLegacy === undefined) delete process.env.RELAYDESK_CODEX_LEGACY_LANDLOCK;
+      else process.env.RELAYDESK_CODEX_LEGACY_LANDLOCK = prevLegacy;
+    }
   });
 });
