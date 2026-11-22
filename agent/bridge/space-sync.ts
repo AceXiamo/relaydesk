@@ -35,6 +35,7 @@ export type WorkspaceRpc = (
 interface SyncOptions {
   cacheDir: string;
   workdir?: string;
+  onFileSynced?(): void;
   projectId: string;
   runId: string;
   serverUrl: string;
@@ -229,6 +230,7 @@ async function pull(o: SyncOptions, root: string, path: string, hash: string, si
       throw new Error("Temporary workspace file changed");
     renameSync(tmp, target);
     renamed = true;
+    o.onFileSynced?.();
   } finally {
     closeSync(fd);
     if (!renamed && realpathSync(dirname(target)) === dirname(target) && stat(tmp)) unlinkSync(tmp);
@@ -309,6 +311,7 @@ export async function pushChangedShadowFiles(o: SyncOptions, mirror: Awaited<Ret
       if (!response.ok) throw new Error(`Workspace upload failed (${response.status})`);
     }
     count++;
+    o.onFileSynced?.();
   }
   return count;
 }

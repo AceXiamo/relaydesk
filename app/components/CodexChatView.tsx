@@ -107,6 +107,14 @@ function buildContextualFollowUps(msg: ChatMessageRecord): QuickPromptItem[] {
   return list.slice(0, 2);
 }
 
+const STOP_LABELS: Record<NonNullable<ChatMessageRecord["stop_reason"]>, string> = {
+  user_stop: "已手动停止",
+  follow_up: "已停止，继续追问",
+  queue_timeout: "排队超时",
+  idle_timeout: "长时间无响应，已停止",
+  total_timeout: "回复超时，已停止",
+};
+
 type TimeGroupKey = "今天" | "昨天" | "最近 7 天" | "更早";
 
 function getTimeGroup(iso: string): TimeGroupKey {
@@ -205,7 +213,12 @@ export function CodexChatView({
 
   // Streaming & trace state
   const streaming = turn ? turn.running : activeSession?.status === "running";
-  const statusLine = turn?.statusLine ?? (streaming ? "正在等待回复完成" : "");
+  const runId = streaming ? turn?.runId ?? activeSession?.active_run_id : undefined;
+  const sendBlocked = Boolean(turn?.stopping || turn?.pending || (streaming && !runId));
+  const statusLine = turn?.stopping
+    ? turn.stopFailed ? "未能停止，等待当前回复结束" : "正在停止当前回复"
+    : turn?.statusLine ?? (streaming ? "正在等待回复完成" : "");
+  const creatingForSend = useRef(false);
   const [turnTraces, setTurnTraces] = useState<Record<string, TurnTrace>>({});
   const [convertingMsgId, setConvertingMsgId] = useState<string | null>(null);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
@@ -356,8 +369,8 @@ export function CodexChatView({
         setActiveSession(res.session);
         setMessages(res.messages);
         setSessions(prev => prev.map(s => s.id === res.session.id ? { ...s, ...res.session } : s));
-        if (requestedTurn && !requestedTurn.running && res.session.status !== "running") {
-          setTurnTraces(prev => ({ ...prev, [requestedTurn.assistant.id]: requestedTurn.trace }));
+        if (requestedTurn && !requestedTurn.running && !requestedTurn.pending && streams.snapshot().get(activeSessionId) === requestedTurn) {
+          setTurnTraces(prev => ({ ...prev, ...Object.fromEntries([...requestedTurn.previous, requestedTurn].map(t => [t.assistant.id, t.trace])) }));
           streams.retire(activeSessionId, requestedTurn);
         }
         // Another tab owns the SSE connection. Only the terminal result is persisted.
@@ -384,11 +397,11 @@ export function CodexChatView({
   }, [projectId, activeSessionId, streams, setActiveSessionId, toast, scrollToBottom]);
 
   useEffect(() => {
-    if (!turn || turn.running || messagesLoading || loadedSession?.id !== turn.session.id) return;
+    if (!turn || turn.running || turn.pending || messagesLoading || loadedSession?.id !== turn.session.id) return;
     setActiveSession(turn.session);
     setSessions(prev => prev.map(s => s.id === turn.session.id ? { ...s, ...turn.session } : s));
     setMessages(prev => messagesWithTurn(prev, turn));
-    setTurnTraces(prev => ({ ...prev, [turn.assistant.id]: turn.trace }));
+    setTurnTraces(prev => ({ ...prev, ...Object.fromEntries([...turn.previous, turn].map(t => [t.assistant.id, t.trace])) }));
     streams.retire(turn.session.id, turn);
   }, [turn, loadedSession, messagesLoading, streams]);
 
@@ -542,7 +555,7 @@ export function CodexChatView({
   };
 
   const handleUploadImages = async (files: File[]) => {
-    if (!projectId || streaming || uploadingImages || files.length === 0) return;
+    if (!projectId || uploadingImages || files.length === 0) return;
     const MIME_EXT: Record<string, string> = {
       "image/png": "png",
       "image/jpeg": "jpg",
@@ -592,7 +605,7 @@ export function CodexChatView({
   };
 
   const handleSend = async (promptOverride?: string, attachmentsOverride?: ChatContextRef[]) => {
-    if (!projectId || streaming || settingsBusy || uploadingImages) return;
+    if (!projectId || sendBlocked || settingsBusy || uploadingImages || creatingForSend.current || currentAuthMode === "unavailable") return;
     const rawText = (promptOverride ?? input).trim();
     const currentAttachments = attachmentsOverride ?? [...attachments];
     if (!rawText && !currentAttachments.some((att) => att.kind === "image")) return;
@@ -600,34 +613,50 @@ export function CodexChatView({
 
     let session = activeSession;
     if (!session) {
-      session = await createDraftSession();
+      creatingForSend.current = true;
+      try { session = await createDraftSession(); }
+      finally { creatingForSend.current = false; }
       if (!session) return;
     }
 
+    if (streaming && !turn) streams.observe(session, history);
+    const completion = streams.send(session, text, currentAttachments, runId);
+    if (!completion) return;
     if (!promptOverride) {
       setInput("");
       setAttachments([]);
+      requestAnimationFrame(() => composerRef.current?.focus());
     }
     isNearBottomRef.current = true;
-    if (turn) setTurnTraces(prev => ({ ...prev, [turn.assistant.id]: turn.trace }));
-    setMessages(messages);
     try {
-      await streams.send(session, text, currentAttachments);
+      await completion;
       if (session.sandbox_mode === "workspace-write") void loadContextCatalog();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "发送失败");
     }
   };
 
+  const restoreUnsent = () => {
+    if (!turn?.pending || turn.running) return;
+    const queued = turn.pending;
+    const merged = [...queued.attachments, ...attachments.filter(a => !queued.attachments.some(b => b.kind === a.kind && b.ref === a.ref))];
+    if (merged.length > 8) {
+      toast.error("合并后超过 8 个附件，请先移除部分草稿附件");
+      return;
+    }
+    if (!streams.takeUnsent(turn.session.id)) return;
+    setInput(prev => [queued.content, prev].filter(Boolean).join("\n\n"));
+    setAttachments(merged);
+    composerRef.current?.focus();
+  };
+
   const handleAbort = async () => {
-    if (!projectId || !activeSessionId) return;
-    if (turn?.running) streams.abort(activeSessionId);
-    else {
-      try {
-        await api.abortCodexChatSession(projectId, activeSessionId);
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : "停止回复失败");
-      }
+    if (!activeSession || !runId) return;
+    if (!turn) streams.observe(activeSession, history);
+    try {
+      await streams.abort(activeSession.id, runId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "停止回复失败");
     }
   };
 
@@ -1243,7 +1272,7 @@ export function CodexChatView({
                   const isUser = msg.role === "user";
                   const isLastMessage = idx === messages.length - 1;
                   const isStreamingMsg = msg.status === "streaming";
-                  const trace = turn?.assistant.id === msg.id ? turn.trace : turnTraces[msg.id];
+                  const trace = turn?.assistant.id === msg.id ? turn.trace : turnTraces[msg.id] ?? turn?.previous.find(t => t.assistant.id === msg.id)?.trace;
                   const prevUserMsg =
                     !isUser && idx > 0 && messages[idx - 1]?.role === "user"
                       ? messages[idx - 1]
@@ -1324,6 +1353,14 @@ export function CodexChatView({
                               className="text-[13.5px]"
                             />
                           </div>
+                          {turn?.pending?.id === msg.id && (
+                            <div role="status" className="flex items-center gap-2 text-[11.5px] text-[var(--text-muted)]">
+                              {turn.running ? "待发送 · 上一轮保存后自动发送" : "未发送 · 未能确认上一轮已保存"}
+                              {!turn.running && (
+                                <button type="button" className="underline" onClick={restoreUnsent}>放回输入框</button>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                     );
@@ -1368,7 +1405,7 @@ export function CodexChatView({
                         )}
                         {!isStreamingMsg && (
                           <span className="text-[11px] text-[var(--text-muted)] ml-auto">
-                            {msg.status === "aborted"
+                            {msg.stop_reason ? STOP_LABELS[msg.stop_reason] : msg.status === "aborted"
                               ? "已中止"
                               : msg.status === "error"
                                 ? "执行异常"
@@ -1551,6 +1588,8 @@ export function CodexChatView({
               sandboxMode={currentSandboxMode}
               networkAccess={currentNetworkAccess}
               streaming={streaming}
+              sendBlocked={sendBlocked}
+              stopBlocked={!runId || Boolean(turn?.stopping)}
               statusLine={statusLine}
               authUnavailable={currentAuthMode === "unavailable"}
               composerRef={composerRef}

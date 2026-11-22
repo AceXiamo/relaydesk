@@ -1,9 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { BridgeHub } from "./bridge-hub.ts";
+import { formatChatHistory } from "./chat-history.ts";
+
 import {
   canResumeExternalSession,
   normalizeExecutionPriority,
@@ -170,6 +172,8 @@ function chatModelSelection(data: Record<string, unknown>) {
   return fields;
 }
 
+type ActiveChatRun = { id: string; controller: AbortController; reason?: "user_stop" | "follow_up" };
+
 const MAX_BRIDGE_FILE_BYTES = 20 * 1024 * 1024;
 
 export interface ApiContextOptions {
@@ -186,6 +190,9 @@ export class ApiRouter {
   readonly adminToken: string;
   readonly wallet: WalletAuth | null;
   readonly bindHost: string;
+  // Own the run from message creation through the terminal database transaction,
+  // not just while its CLI process is alive.
+  private readonly chatRuns = new Map<string, ActiveChatRun>();
   private traffic = new Map<string, number[]>();
   private cliPresence = new Map<string, { seen: number; runtime: string; ready: boolean; managed: boolean; runId?: string }>();
   private assistantInFlight = 0;
@@ -1855,7 +1862,8 @@ export class ApiRouter {
         return this.store.transaction(false, () => {
           const session = this.store.getChatSession(projectInfo.id, sessionId);
           const messages = this.store.listChatMessages(projectInfo.id, sessionId);
-          return { session, messages };
+          const run = this.chatRuns.get(sessionId);
+          return { session: run ? { ...session, active_run_id: run.id } : session, messages };
         });
       }
       if (method === "PATCH") {
@@ -1880,6 +1888,7 @@ export class ApiRouter {
       }
       if (method === "DELETE") {
         const removed = this.store.transaction(true, () => this.store.deleteChatSession(projectInfo.id, sessionId));
+        this.chatRuns.get(sessionId)?.controller.abort();
         abortChatSessionRun(sessionId);
         this.bridgeHub?.abortChatSessionRun(sessionId);
         return removed;
@@ -1896,10 +1905,16 @@ export class ApiRouter {
     ) {
       const sessionId = subparts[1];
       this.store.transaction(false, () => this.store.getChatSession(projectInfo.id, sessionId));
-      const aborted =
-        abortChatSessionRun(sessionId) ||
-        Boolean(this.bridgeHub?.abortChatSessionRun(sessionId));
-      return { aborted };
+      const data = await this.readJson(req, 1024);
+      if (!data.run_id || typeof data.run_id !== "string") throw new ApiError(400, "停止操作需要指定运行 ID");
+      if (data.reason !== undefined && data.reason !== "follow_up" && data.reason !== "user_stop") {
+        throw new ApiError(400, "无效的停止原因");
+      }
+      const run = this.chatRuns.get(sessionId);
+      if (!run || run.id !== data.run_id) return { aborted: false };
+      run.reason ??= data.reason === "follow_up" ? "follow_up" : "user_stop";
+      run.controller.abort();
+      return { aborted: true };
     }
 
     // POST /api/projects/:id/codex-chat/sessions/:sessionId/title
@@ -1977,7 +1992,9 @@ export class ApiRouter {
       }
       const content = rawContent || "请查看附带的图片";
 
-      if (isChatSessionRunning(sessionId) || this.bridgeHub?.isChatSessionRunning(sessionId)) {
+      const runId = data.run_id === undefined ? randomUUID() : data.run_id;
+      if (typeof runId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(runId)) throw new ApiError(400, "无效的运行 ID");
+      if (this.chatRuns.has(sessionId) || isChatSessionRunning(sessionId) || this.bridgeHub?.isChatSessionRunning(sessionId)) {
         throw new ApiError(409, "当前会话正在生成回复，请等待完成或先点击停止。");
       }
 
@@ -2016,6 +2033,7 @@ export class ApiRouter {
           status: "done",
         });
         const assistantMsg = this.store.addChatMessage(sessionId, {
+          id: createHash("sha256").update(`${sessionId}:${runId}`).digest("hex").slice(0, 32),
           role: "assistant",
           content: "",
           events: [],
@@ -2033,6 +2051,10 @@ export class ApiRouter {
       const { targetKey, localAgentId, localBinding } = resolvedTarget;
 
       const abortController = new AbortController();
+      const run: ActiveChatRun = {
+        id: runId, controller: abortController,
+      };
+      this.chatRuns.set(sessionId, run);
       res.on("close", () => {
         if (!res.writableEnded) {
           abortController.abort();
@@ -2055,7 +2077,7 @@ export class ApiRouter {
 
       writeEvent({
         type: "session",
-        session,
+        session: { ...session, active_run_id: runId },
         user_message: userMessage,
         assistant_message_id: assistantMessage.id,
       });
@@ -2089,6 +2111,12 @@ export class ApiRouter {
         : Promise.resolve();
 
       const canResumePrior = canResumeExternalSession(session, targetKey);
+      // A thread ID can be issued before the CLI checkpoints its first turn.
+      // Carry the interrupted turn on resume as well as on a fresh invocation.
+      const last = priorMessages.at(-1);
+      const prompt = canResumePrior && last?.role === "assistant" && (last.status === "aborted" || last.status === "error")
+        ? `## Interrupted turn\n${formatChatHistory(priorMessages.slice(-2))}\n\n## User Message\n${content}`
+        : content;
       if (resolvedTarget.fallbackFrom) {
         const destLabel = localAgentId
           ? `本机「${resolvedTarget.agentName || localAgentId}」`
@@ -2137,38 +2165,27 @@ export class ApiRouter {
             resolveTask,
             { spaceDirVar: "$RELAYDESK_SPACE_DIR" },
           );
-          const contextBlocks: string[] = [];
-          if (!canResumePrior) {
-            contextBlocks.push(RELAYDESK_MCP_INSTRUCTIONS);
-            if (projectInfo.agent_instructions.trim()) {
-              contextBlocks.push(`## Project Instructions\n${projectInfo.agent_instructions.trim().slice(0, 4000)}`);
-            }
-            if (workspaceManifest.databases.length > 0) {
-              const dbLines = workspaceManifest.databases.map((db) => {
-                if (db.source === "workspace_file") {
-                  return `- [SQLite] ${db.name}: path=$RELAYDESK_SPACE_DIR/files/${db.file_path} (${db.table_count ?? 0} tables; queryable via relaydesk MCP tools)`;
-                }
-                const envPart =
-                  localBinding?.allow_datasource_secrets && db.has_connection_url && db.env_var
-                    ? `env=$${db.env_var} (queryable via relaydesk MCP tools)`
-                    : "credentials not exported to this device";
-                const accessPart = db.read_only ? "STRICT READ-ONLY" : "read-write";
-                const notePart = db.notes ? `\n  Notes: ${db.notes.slice(0, 1000)}` : "";
-                return `- [${db.kind.toUpperCase()}] ${db.name}: ${envPart}, endpoint=${db.host_preview || "external"}, access=${accessPart}${notePart}`;
-              });
-              contextBlocks.push(`## Project Databases\n${dbLines.join("\n")}`);
-            }
-            if (priorMessages.length > 0) {
-              const historyLines = priorMessages.slice(-8).map((msg) => {
-                const label = msg.role === "user" ? "User" : "Assistant";
-                return `[${label}]: ${msg.content.slice(0, 1500)}`;
-              });
-              contextBlocks.push(`## Previous Conversation Summary\n${historyLines.join("\n")}`);
-            }
-            if (attachmentContext) {
-              contextBlocks.push(`## Explicitly Attached Context\n${attachmentContext}`);
-            }
+          const contextBlocks = [RELAYDESK_MCP_INSTRUCTIONS];
+          if (projectInfo.agent_instructions.trim()) {
+            contextBlocks.push(`## Project Instructions\n${projectInfo.agent_instructions.trim().slice(0, 4000)}`);
           }
+          if (workspaceManifest.databases.length > 0) {
+            const dbLines = workspaceManifest.databases.map((db) => {
+              if (db.source === "workspace_file") {
+                return `- [SQLite] ${db.name}: path=$RELAYDESK_SPACE_DIR/files/${db.file_path} (${db.table_count ?? 0} tables; queryable via relaydesk MCP tools)`;
+              }
+              const envPart =
+                localBinding?.allow_datasource_secrets && db.has_connection_url && db.env_var
+                  ? `env=$${db.env_var} (queryable via relaydesk MCP tools)`
+                  : "credentials not exported to this device";
+              const accessPart = db.read_only ? "STRICT READ-ONLY" : "read-write";
+              const notePart = db.notes ? `\n  Notes: ${db.notes.slice(0, 1000)}` : "";
+              return `- [${db.kind.toUpperCase()}] ${db.name}: ${envPart}, endpoint=${db.host_preview || "external"}, access=${accessPart}${notePart}`;
+            });
+            contextBlocks.push(`## Project Databases\n${dbLines.join("\n")}`);
+          }
+          if (priorMessages.length) contextBlocks.push(`## Previous Conversation Summary\n${formatChatHistory(priorMessages)}`);
+          if (!canResumePrior && attachmentContext) contextBlocks.push(`## Explicitly Attached Context\n${attachmentContext}`);
           result = await this.bridgeHub!.runChatTurn(
             localAgentId,
             {
@@ -2180,8 +2197,8 @@ export class ApiRouter {
               sandbox_mode: session.sandbox_mode,
               network_access: session.network_access,
               resume_session_id: canResumePrior ? session.external_session_id : "",
-              prompt: canResumePrior ? buildResumePrompt(content, attachmentContext) : content,
-              system_context: canResumePrior ? "" : contextBlocks.join("\n\n"),
+              prompt: canResumePrior ? buildResumePrompt(prompt, attachmentContext) : prompt,
+              system_context: contextBlocks.join("\n\n"),
               workspace_manifest: workspaceManifest,
               ...(bridgeImagePaths.length ? { image_paths: bridgeImagePaths } : {}),
               ...(localBinding?.allow_datasource_secrets
@@ -2201,7 +2218,7 @@ export class ApiRouter {
             dbPath: this.store.dbPath,
             project: projectInfo,
             session: canResumePrior ? session : { ...session, external_session_id: "" },
-            prompt: content,
+            prompt,
             attachments,
             priorMessages,
             signal: abortController.signal,
@@ -2238,20 +2255,18 @@ export class ApiRouter {
                 : result.content,
             events: result.events,
             status: result.status,
+            stop_reason: result.stopReason ?? (result.status === "aborted" ? run.reason : undefined),
           });
           const current = this.store.getChatSession(projectInfo.id, sessionId);
           const canResume =
             current.runtime === session.runtime &&
             current.sandbox_mode === session.sandbox_mode &&
-            current.network_access === session.network_access;
-          const nextExternalId = !canResume
-            ? ""
-            : result.status === "done"
-              ? result.externalSessionId
-              : canResumePrior ? result.externalSessionId || current.external_session_id : current.external_session_id;
+            current.network_access === session.network_access &&
+            current.execution_target === session.execution_target;
+          const nextExternalId = canResume ? result.externalSessionId : "";
           const updatedSession = this.store.updateChatSession(projectInfo.id, sessionId, {
             external_session_id: nextExternalId,
-            ...(result.status === "done" && { resolved_target: targetKey }),
+            resolved_target: targetKey,
             status: result.status === "error" ? "error" : "idle",
           });
           return { updatedMsg, updatedSession };
@@ -2283,6 +2298,7 @@ export class ApiRouter {
         });
         writeEvent({ type: "error", error: errMsg, message: savedMsg });
       } finally {
+        this.chatRuns.delete(sessionId);
         if (!res.writableEnded) {
           res.end();
         }

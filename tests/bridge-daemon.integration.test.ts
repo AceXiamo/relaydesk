@@ -4,14 +4,14 @@ import { DatabaseSync } from "node:sqlite";
 import type { Duplex } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startBridgeDaemon } from "../agent/bridge/index.ts";
-import { getProjectFilesDir } from "../server/workspace.ts";
+import { buildWorkspaceManifest, getProjectFilesDir } from "../server/workspace.ts";
 import { bearer, fixture, operator, sha256, type Fixture } from "./bridge-fixture.ts";
 
 // Use real OS processes rather than mocking spawn: cancellation must also reap grandchildren.
 const fakeCli = `#!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 const args = process.argv.slice(2);
@@ -23,12 +23,26 @@ const prompt = Buffer.concat(chunks).toString();
 const space = process.env.RELAYDESK_SPACE_DIR;
 const emit = obj => console.log(JSON.stringify(obj));
 const claude = args.includes('stream-json');
+if (prompt.includes('RETRY_FIXTURE')) {
+  const resumed = args.includes('resume') || args.includes('--resume');
+  appendFileSync('attempts.jsonl', JSON.stringify({ resumed, history: prompt.includes('HISTORY_MARKER') }) + '\\n');
+  if (resumed) {
+    if (prompt.includes('PARTIAL_TOOL')) emit({ type: 'item.started', item: { id: 't', type: 'command_execution', command: 'pwd' } });
+    console.error(prompt.includes('OTHER_ERROR') ? 'permission denied' : 'No conversation found with session ID: stale');
+    process.exit(1);
+  }
+  if (prompt.includes('FRESH_FAIL')) { console.error('startup failed'); process.exit(1); }
+}
 if (claude) emit({ type: 'system', session_id: 'local-claude-thread' });
 else emit({ type: 'thread.started', thread_id: 'local-fixture-thread' });
 const dbUrl = process.env.RELAYDESK_DB_FIXTURE ?? '';
 const facts = { cwd: process.cwd(), space, args, hasHistory: prompt.includes('historical-fixture'),
   hasRef: prompt.includes('workspace reference marker'), hasDbEnv: Boolean(dbUrl), pg: process.env.PGOPTIONS,
   handbook: existsSync(join(space,'HANDBOOK.md')) ? readFileSync(join(space,'HANDBOOK.md'),'utf8') : null };
+if (existsSync('pids.json')) {
+  const [previousPid] = JSON.parse(readFileSync('pids.json','utf8'));
+  try { process.kill(previousPid, 0); facts.previousCliAlive = true; } catch { facts.previousCliAlive = false; }
+}
 if (existsSync(join(space,'files','large.bin'))) facts.digest = createHash('sha256').update(readFileSync(join(space,'files','large.bin'))).digest('hex');
 if (existsSync(join(space,'files','sample.sqlite'))) {
   const db = new DatabaseSync(join(space,'files','sample.sqlite'), { readOnly: true });
@@ -42,7 +56,10 @@ if (prompt.includes('MAKE_CHANGES')) {
   writeFileSync(join(space, 'files', 'large.bin'), Buffer.alloc(2 * 1024 * 1024 + 1, 0xa5));
   writeFileSync(join(space, 'files', '.env'), 'do not publish');
 }
-if (prompt.includes('BLOCK_UNTIL_CANCELLED')) {
+if (prompt.includes('BLOCK_UNTIL_CANCELLED') && !args.includes('resume')) {
+  emit({ type: 'agent_message.delta', delta: 'before interruption' });
+  emit({ type: 'item.completed', item: { id: 'partial-tool', type: 'command_execution', command: 'pwd', aggregated_output: 'partial output', exit_code: 0 } });
+  if (prompt.includes('SHOW_PROGRESS')) setInterval(() => emit({ type: 'agent_message.delta', delta: '.' }), 80);
   const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); console.log("ready"); setInterval(() => {}, 30000)'], { stdio: ['ignore', 'pipe', 'ignore'] });
   await new Promise(resolve => child.stdout.once('data', resolve));
   writeFileSync('pids.json', JSON.stringify([process.pid, child.pid]));
@@ -69,7 +86,7 @@ afterEach(async () => {
   try { await daemon?.close(); } finally { daemon = undefined; vi.unstubAllEnvs(); await f.close(); }
 });
 
-async function start(roots = true) {
+async function start(roots = true, concurrency = 1) {
   const p = await f.project();
   const { id, token } = await f.register();
   const homeDir = join(f.root, "home");
@@ -85,7 +102,7 @@ async function start(roots = true) {
   writeFileSync(bin, fakeCli, { mode: 0o755 });
   const configPath = join(f.root, "config.json");
   const config = { server_url: f.wsUrl, agent_token: token, agent_name: "Fixture", auto_detect_cli_configs: true,
-    allowed_roots: roots ? [allowed] : [], max_concurrency: 1,
+    allowed_roots: roots ? [allowed] : [], max_concurrency: concurrency,
     projects: { [p]: { workdir: repo } }, runtimes: { codex: { bin }, claude: { bin } },
     models: [{ id: "detected-codex", runtime: "codex", context_window: 543210, effort_levels: ["low", "high"] }] };
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
@@ -300,6 +317,57 @@ describe("real bridge daemon + HTTP chat", () => {
     }
   });
 
+  it.each([
+    { prompt: "RETRY_FIXTURE", fresh: true, externalSessionId: "local-fixture-thread", status: "done" },
+    { prompt: "RETRY_FIXTURE FRESH_FAIL", fresh: true, externalSessionId: "", status: "error" },
+    { prompt: "RETRY_FIXTURE OTHER_ERROR", fresh: false, externalSessionId: "stale", status: "error" },
+    { prompt: "RETRY_FIXTURE PARTIAL_TOOL", fresh: false, externalSessionId: "stale", status: "error" },
+  ])("recovers a missing local thread only before side effects ($prompt)", async ({ prompt, fresh, externalSessionId, status }) => {
+    const { id, p, repo } = await start();
+    const result = await f.srv.bridgeHub.runChatTurn(id, {
+      project_id: p, session_id: "retry-session", runtime: "codex", sandbox_mode: "read-only", network_access: false,
+      model: "", reasoning_effort: "default", resume_session_id: "stale", system_context: "HISTORY_MARKER",
+      workspace_manifest: buildWorkspaceManifest(f.dbPath, p), prompt,
+    }, () => {}, new AbortController().signal);
+    expect(result).toMatchObject({ status, externalSessionId });
+    const attempts = readFileSync(join(repo, "attempts.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    expect(attempts).toEqual([{ resumed: true, history: false }, ...(fresh ? [{ resumed: false, history: true }] : [])]);
+    if (prompt.includes("PARTIAL_TOOL")) expect(result.events).toMatchObject([{ id: "t" }]);
+  });
+
+  it.each(["idle_timeout", "total_timeout"] as const)("forwards the daemon's own %s and partial result", async reason => {
+    const { id, p } = await start();
+    // The server samples its budget during dispatch. The daemon samples its own on receipt.
+    vi.stubEnv("RELAYDESK_CHAT_IDLE_TIMEOUT_MS", "10000");
+    vi.stubEnv("RELAYDESK_CHAT_TOTAL_TIMEOUT_MS", "0");
+    const turn = f.srv.bridgeHub.runChatTurn(id, {
+      project_id: p, session_id: "timeout-session", runtime: "codex", sandbox_mode: "read-only", network_access: false,
+      model: "", reasoning_effort: "default", resume_session_id: "", system_context: "",
+      workspace_manifest: buildWorkspaceManifest(f.dbPath, p),
+      prompt: reason === "idle_timeout" ? "BLOCK_UNTIL_CANCELLED" : "BLOCK_UNTIL_CANCELLED SHOW_PROGRESS",
+    }, () => {}, new AbortController().signal);
+    vi.stubEnv(reason === "idle_timeout" ? "RELAYDESK_CHAT_IDLE_TIMEOUT_MS" : "RELAYDESK_CHAT_TOTAL_TIMEOUT_MS", "850");
+    expect(await turn).toMatchObject({ status: "error", stopReason: reason, content: expect.stringContaining("before interruption"),
+      events: [{ id: "partial-tool", output: "partial output" }], externalSessionId: "local-fixture-thread" });
+  });
+
+  it("times out a lock waiter separately while another chat keeps making progress", async () => {
+    vi.stubEnv("RELAYDESK_CHAT_QUEUE_TIMEOUT_MS", "1250");
+    vi.stubEnv("RELAYDESK_CHAT_IDLE_TIMEOUT_MS", "800");
+    const { id, p, repo } = await start(true, 2);
+    const first = await f.session(p, id);
+    const waiting = await f.session(p, id);
+    const stream = (await first.turn("BLOCK_UNTIL_CANCELLED SHOW_PROGRESS")).text();
+    await expect.poll(() => existsSync(join(repo, "pids.json"))).toBe(true);
+    const queued = await (await waiting.turn("must wait for the lock")).text();
+    expect(queued).toContain("等待项目执行锁超时");
+    expect(f.srv.bridgeHub.isChatSessionRunning(first.id)).toBe(true);
+    f.srv.bridgeHub.abortChatSessionRun(first.id);
+    expect(await stream).toContain("before interruption");
+    const next = await f.session(p, id);
+    expect(await (await next.turn("acquire after cancellation")).text()).toContain("fixture-reply");
+  });
+
   it.each(["abort", "disconnect"] as const)("%s closes the running SSE response and kills the entire child process group", async (action) => {
     const connections: Duplex[] = [];
     f.srv.server.on("upgrade", (_req, socket) => connections.push(socket));
@@ -311,12 +379,21 @@ describe("real bridge daemon + HTTP chat", () => {
     const pids: number[] = JSON.parse(readFileSync(join(repo, "pids.json"), "utf8"));
     try {
       expect(pids.map(alive)).toEqual([true, true]);
-      if (action === "abort") expect((await f.ok(`${s.path}/abort`, "POST", {})).aborted).toBe(true);
+      if (action === "abort") {
+        const { active_run_id } = (await s.detail()).session;
+        expect((await f.ok(`${s.path}/abort`, "POST", { run_id: active_run_id, reason: "follow_up" })).aborted).toBe(true);
+      }
       else connections[0].destroy();
       const text = await finished;
       const detail = await s.detail();
+      expect(detail.messages.at(-1)).toMatchObject({ content: "before interruption", events: [{ id: "partial-tool", output: "partial output" }] });
       expect(detail.messages.at(-1).status).toBe(action === "abort" ? "aborted" : "error");
       expect(text).toContain(action === "abort" ? "event: done" : "event: error");
+      if (action === "abort") {
+        expect(detail.messages.at(-1).stop_reason).toBe("follow_up");
+        expect(await (await s.turn("continue immediately")).text()).toContain("fixture-reply");
+        expect(facts(repo)).toMatchObject({ previousCliAlive: false, args: expect.arrayContaining(["resume", "local-fixture-thread"]) });
+      }
       await expect.poll(() => pids.map(alive), { timeout: 6000 }).toEqual([false, false]);
       const put = await fetch(`${f.srv.url}/api/bridge/projects/${p}/workspace/file?path=files/cancel.txt`, { method: "PUT", headers: bearer(token), body: "late" });
       expect(put.status).toBe(403);

@@ -22,6 +22,7 @@ import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:p
 import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 import { bridgeCatalogPaths, detectBridgeCatalog, type BridgeCatalog, type BridgeCatalogConfig } from "./catalog.ts";
+import { chatWatchdog, chatTimeoutMessage, type ChatTimeoutReason } from "./chat-timeouts.ts";
 import { checkChat, datasourceValues, runLocalChat, type ChatStart } from "./runner.ts";
 import { pushChangedShadowFiles, snapshotShadowFiles, syncSpace, validProjectId, type WorkspaceRpc } from "./space-sync.ts";
 import type { RunChatTurnResult } from "../../server/codex-chat.ts";
@@ -232,6 +233,14 @@ function databaseContext(rows: unknown) {
       .join("\n")
   );
 }
+function missingResumeSession(detail: string) {
+  return [
+    /\bno (?:matching )?(?:conversation|session|thread|rollout) found/i,
+    /\b(?:could not|cannot|unable to) find (?:a |the )?(?:conversation|session|thread|rollout)\b/i,
+    /\b(?:session|thread|conversation)(?: id)?(?: ['"\w.:-]+)? (?:was not found|not found|does not exist)\b/i,
+    /(?:线程|会话)(?:不存在|未找到)|未找到(?:对应的)?(?:线程|会话)/,
+  ].some(pattern => pattern.test(detail));
+}
 const message = (error: unknown) => (error instanceof Error ? error.message : "Bridge operation failed");
 type Frame = { type: string; id?: string; payload: Record<string, unknown> };
 function send(ws: WebSocket, type: string, payload: unknown, id?: string) {
@@ -434,40 +443,47 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       const ids = { run_id: p.run_id, session_id: p.session_id };
       const terminal = (result: RunChatTurnResult) =>
         send(socket, "chat.event", { ...ids, event: { type: result.status === "error" ? "error" : "done" }, result });
-      const fail = (error: string): RunChatTurnResult => ({
-        status: "error",
-        error,
-        content: "",
-        events: [],
-        externalSessionId: "",
-      });
       if (active.has(p.run_id)) return;
-      if (
-        active.size >= (config.max_concurrency ?? 2) ||
-        [...active.values()].some((a) => a.session === p.session_id)
-      ) {
-        terminal(fail("Bridge or project workspace is busy"));
+      // A follow-up may arrive while its cancelled predecessor is reaping children.
+      // The predecessor still owns the project lock until cleanup is complete.
+      const admitted = [...active.values()].filter(run =>
+        !(run.abort.signal.aborted && run.session === p.session_id && run.project === p.project_id));
+      if (admitted.length >= (config.max_concurrency ?? 2) || admitted.some(run => run.session === p.session_id)) {
+        terminal({ status: "error", error: "Bridge or project workspace is busy", content: "", events: [], externalSessionId: p.resume_session_id || "" });
         return;
       }
       const abort = new AbortController();
-      const timeout = setTimeout(() => abort.abort(new Error("Local chat timed out")), 8 * 60_000);
+      let stopReason: ChatTimeoutReason | undefined;
+      const clock = chatWatchdog(reason => {
+        if (abort.signal.aborted) return;
+        stopReason = reason;
+        abort.abort();
+      });
       const c = config,
         cat = catalog;
       const job = (async () => {
-        let result: RunChatTurnResult;
+        let result: RunChatTurnResult = { status: "aborted", content: "", events: [], externalSessionId: "" };
         let release: (() => void) | undefined;
         try {
           checkChat(p);
           if (!validProjectId(p.project_id) || !Object.hasOwn(c.projects ?? {}, p.project_id))
             throw new Error("Project is not locally bound");
+          result.externalSessionId = p.resume_session_id || "";
+          const boundDir = p.expected_workdir ?? projectWorkdir(c.projects![p.project_id], c, home);
           release = await lock(p.project_id, abort.signal);
           abort.signal.throwIfAborted();
           const project = config.projects?.[p.project_id];
           if (!project) throw new Error("Project binding was removed");
           const cwd = projectWorkdir(project, config, home);
+          if (cwd !== boundDir) throw new Error("Project binding changed while waiting");
           if (!cat.runtimes[p.runtime].available) throw new Error("Requested CLI is not available");
+          const onEvent = (event: unknown) => {
+            clock.progress();
+            send(socket, "chat.event", { ...ids, event });
+          };
           const opts = {
             workdir: cwd,
+            onFileSynced: () => onEvent({ type: "status", message: "已同步项目空间文件" }),
             cacheDir:
               o.cacheDir ?? (c.cache_dir ? expand(c.cache_dir, home) : join(home, ".cache/relaydesk-bridge/spaces")),
             projectId: p.project_id,
@@ -477,13 +493,10 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
             rpc,
             signal: abort.signal,
           };
-          const onEvent = (event: unknown) => send(socket, "chat.event", { ...ids, event });
           onEvent({ type: "status", message: "正在同步本机项目空间…" });
           const mirror = await syncSpace(opts, p.workspace_manifest);
           const before = p.sandbox_mode === "workspace-write" ? snapshotShadowFiles(mirror) : null;
-          if (!config.projects?.[p.project_id] || projectWorkdir(config.projects[p.project_id], config, home) !== cwd)
-            throw new Error("Project binding changed during sync");
-          const prompt = [
+          const promptFor = (resumeId: string) => [
             "./ is the bound local project workdir. $RELAYDESK_SPACE_DIR/HANDBOOK.md is the project handbook; $RELAYDESK_SPACE_DIR/files/ contains cloud workspace files and SQLite databases. Never disclose credentials or database connection strings.",
             p.sandbox_mode === "read-only"
               ? "This is a read-only turn for local code and workspace files. Do not modify either workspace. You still have access to the `relaydesk` MCP server for project tasks (list_tasks, get_task, comment_task, update_task, transition_task, create_task) and strictly read-only database inspection/queries (list_datasources, describe_datasource, query_datasource)."
@@ -491,7 +504,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
             mirror.handbook,
             databaseContext(p.workspace_manifest.databases),
             mirror.skipped.length ? `Large files not mirrored: ${mirror.skipped.join(", ")}` : "",
-            p.system_context,
+            resumeId ? "" : p.system_context,
             p.prompt,
           ]
             .filter(Boolean)
@@ -509,20 +522,32 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
               return res.data;
             },
           };
-          result = await runLocalChat({
-            config: c,
-            catalog: cat,
-            p,
-            cwd,
-            homeDir: home,
-            spaceDir: mirror.root,
-            allowSecrets: project.allow_datasource_secrets !== false,
-            enableMcp: true,
-            taskClient,
-            signal: abort.signal,
-            prompt,
-            onEvent,
-          });
+          const execute = (resumeId: string) => {
+            const current = config.projects?.[p.project_id];
+            if (!current || projectWorkdir(current, config, home) !== cwd) throw new Error("Project binding changed");
+            return runLocalChat({
+              config: c,
+              catalog: cat,
+              p: { ...p, resume_session_id: resumeId },
+              cwd,
+              homeDir: home,
+              spaceDir: mirror.root,
+              allowSecrets: current.allow_datasource_secrets !== false,
+              enableMcp: true,
+              taskClient,
+              signal: abort.signal,
+              prompt: promptFor(resumeId),
+              onEvent,
+            });
+          };
+          const resumeId = p.resume_session_id || "";
+          result = await execute(resumeId);
+          if (resumeId && result.status === "error" && !abort.signal.aborted && !result.content && !result.events.length &&
+              missingResumeSession(result.error ?? "")) {
+            result.externalSessionId = "";
+            onEvent({ type: "status", message: "原 CLI 线程不存在，正在携带上下文开启新线程…", external_session_id: "" });
+            result = await execute("");
+          }
           if (!abort.signal.aborted && result.status === "done" && before) {
             const n = await pushChangedShadowFiles(opts, mirror, before, [c.agent_token, ...datasourceValues(p.datasource_env).secrets]);
             if (n) {
@@ -537,18 +562,18 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
             }
           }
         } catch (e) {
-          result = fail(message(e));
+          result = { ...result, status: "error", error: message(e) };
         } finally {
           release?.();
         }
-        if (abort.signal.aborted)
-          result =
-            abort.signal.reason?.message === "Local chat timed out"
-              ? { ...result, status: "error", error: "Local chat timed out" }
-              : { ...result, status: "aborted", error: undefined };
+        if (abort.signal.aborted) {
+          result = stopReason
+            ? { ...result, status: "error", stopReason, error: chatTimeoutMessage[stopReason] }
+            : { ...result, status: "aborted", error: undefined };
+        }
         terminal(result);
       })().finally(() => {
-        clearTimeout(timeout);
+        clock.close();
         active.delete(p.run_id);
       });
       active.set(p.run_id, { abort, socket, project: p.project_id, session: p.session_id, job });

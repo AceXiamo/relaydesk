@@ -55,6 +55,18 @@
 
 ## 2. 执行优先级排序、项目空间访问与工作目录（重点复盘）
 
+### Chat interruption and timeouts
+
+Sending a follow-up interrupts only the active run. The next turn starts after the previous reply and tool events have been saved. Stopping without a follow-up does not start another turn. A CLI thread is reused only on a compatible runtime, execution target and permission configuration; otherwise the next prompt uses saved conversation history.
+
+The web server and local bridge each enforce the following chat timeouts. Set these environment variables on **both** services if overriding defaults; updating just the web server does not change an already installed bridge. Update the bridge client along with the server to remove the old fixed eight-minute deadline.
+
+| Environment variable | Default | What it limits |
+| --- | --- | --- |
+| `RELAYDESK_CHAT_QUEUE_TIMEOUT_MS` | 480000 (8 min) | Waiting to start; time spent here does not consume the execution budget. |
+| `RELAYDESK_CHAT_IDLE_TIMEOUT_MS` | 480000 (8 min) | Execution without reported progress. Output and tool events renew it; transport heartbeats do not. |
+| `RELAYDESK_CHAT_TOTAL_TIMEOUT_MS` | 0 (unlimited) | Optional hard execution limit, starting after the queue phase. |
+
 ### 2.1 工作目录绑定机制
 添加/接入本地 Agent 时，每个需要由该机器承接的项目都必须指定本地工作目录（用户预先准备好的代码库与环境依赖）：
 

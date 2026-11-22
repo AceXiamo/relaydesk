@@ -1187,6 +1187,8 @@ export interface PromptBarProps extends ModelControlsProps {
   sandboxMode: ChatSandboxMode;
   networkAccess: boolean;
   streaming: boolean;
+  sendBlocked: boolean;
+  stopBlocked: boolean;
   statusLine: string;
   authUnavailable: boolean;
   composerRef: React.RefObject<RichPromptEditorHandle | null>;
@@ -1215,6 +1217,8 @@ export function PromptBar({
   sandboxMode,
   networkAccess,
   streaming,
+  sendBlocked,
+  stopBlocked,
   statusLine,
   authUnavailable,
   composerRef,
@@ -1369,7 +1373,7 @@ export function PromptBar({
       onOpenWorkspace();
       return;
     }
-    if (cmd.prompt) {
+    if (cmd.prompt && !sendBlocked && !settingsBusy && !uploadingImages && !authUnavailable) {
       onInputChange("");
       onSend(cmd.prompt);
     }
@@ -1429,7 +1433,7 @@ export function PromptBar({
 
   const hasImageAttachment = attachments.some((a) => a.kind === "image");
   const canSend =
-    !streaming &&
+    !sendBlocked &&
     !settingsBusy &&
     !uploadingImages &&
     (Boolean(input.trim()) || hasImageAttachment) &&
@@ -1661,7 +1665,7 @@ export function PromptBar({
       {/* Main Composer Card */}
       <div
         onDragOver={(e) => {
-          if (!onUploadImages || streaming) return;
+          if (!onUploadImages) return;
           if (Array.from(e.dataTransfer.types ?? []).includes("Files")) {
             e.preventDefault();
             if (!dragOverImage) setDragOverImage(true);
@@ -1674,7 +1678,7 @@ export function PromptBar({
         }}
         onDrop={(e) => {
           setDragOverImage(false);
-          if (!onUploadImages || streaming) return;
+          if (!onUploadImages) return;
           const files = Array.from(e.dataTransfer.files ?? []).filter((f) => f.type.startsWith("image/"));
           if (files.length > 0) {
             e.preventDefault();
@@ -1753,7 +1757,6 @@ export function PromptBar({
         <RichPromptEditor
           ref={composerRef}
           value={input}
-          disabled={streaming}
           onChange={handleChange}
           onSubmit={handleSubmitFromEditor}
           onInterceptKeyDown={handleInterceptKeyDown}
@@ -1780,7 +1783,7 @@ export function PromptBar({
                 />
                 <button
                   type="button"
-                  disabled={streaming || uploadingImages}
+                  disabled={uploadingImages}
                   onClick={() => imageInputRef.current?.click()}
                   title="上传图片（也支持粘贴或拖入）"
                   aria-label="上传图片"
@@ -1803,7 +1806,6 @@ export function PromptBar({
             {/* @ Mention Button */}
             <button
               type="button"
-              disabled={streaming}
               onClick={() => {
                 setPopover((p) => (p === "mention" ? "none" : "mention"));
                 setActiveIndex(0);
@@ -1828,7 +1830,6 @@ export function PromptBar({
             {/* / Slash Command Button */}
             <button
               type="button"
-              disabled={streaming}
               onClick={() => {
                 setPopover((p) => (p === "slash" ? "none" : "slash"));
                 setSlashQuery("");
@@ -1876,34 +1877,34 @@ export function PromptBar({
               </span>
             )}
 
-            {streaming ? (
+            {streaming && (
               <button
                 type="button"
+                disabled={stopBlocked}
                 onClick={onAbort}
                 title="停止生成"
                 aria-label="停止生成"
-                className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full bg-rose-500/12 text-rose-600 dark:text-rose-400 border border-rose-500/25 hover:bg-rose-600 hover:text-white hover:border-rose-600 text-[12px] font-medium transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full bg-rose-500/12 text-rose-600 dark:text-rose-400 border border-rose-500/25 enabled:hover:bg-rose-600 enabled:hover:text-white text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Icon name="square" size={10} />
                 <span>停止</span>
               </button>
-            ) : (
-              <button
-                type="button"
-                disabled={!canSend}
-                onClick={() => onSend()}
-                title="发送消息"
-                aria-label="发送消息"
-                className={cn(
-                  "inline-flex items-center justify-center h-7 w-7 rounded-full transition-all",
-                  canSend
-                    ? "bg-[var(--rd-ink)] text-[var(--rd-surface)] hover:opacity-90 shadow-xs cursor-pointer"
-                    : "bg-[var(--surface-subtle)] text-[var(--text-muted)] opacity-60 cursor-not-allowed",
-                )}
-              >
-                <Icon name="arrow-up" size={14} />
-              </button>
             )}
+            <button
+              type="button"
+              disabled={!canSend}
+              onClick={() => onSend()}
+              title={streaming ? "停止当前回复并发送追问" : "发送消息"}
+              aria-label={streaming ? "停止当前回复并发送追问" : "发送消息"}
+              className={cn(
+                "inline-flex items-center justify-center h-7 w-7 rounded-full transition-all",
+                canSend
+                  ? "bg-[var(--rd-ink)] text-[var(--rd-surface)] hover:opacity-90 shadow-xs cursor-pointer"
+                  : "bg-[var(--surface-subtle)] text-[var(--text-muted)] opacity-60 cursor-not-allowed",
+              )}
+            >
+              <Icon name="arrow-up" size={14} />
+            </button>
           </div>
         </div>
       </div>

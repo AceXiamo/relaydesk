@@ -10,6 +10,7 @@ import {
   type CliStreamImageHandler,
   type StreamParseState,
 } from "./cli-stream-parser.ts";
+import { canResumeExternalSession } from "./execution-router.ts";
 import { readProjectCliSettings } from "./project-cli-config.ts";
 import {
   startRelaydeskMcpServer,
@@ -37,7 +38,9 @@ import type {
   TaskRecord,
 } from "../app/lib/types.ts";
 
-const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
+import { chatTimeoutMessage, chatWatchdog, type ChatTimeoutReason } from "../agent/bridge/chat-timeouts.ts";
+import { formatChatHistory } from "./chat-history.ts";
+
 const CLI_DETECT_TTL_MS = 30_000;
 
 interface CliDetectionCache {
@@ -377,13 +380,8 @@ function buildInitialPrompt(params: {
 
   lines.push("", RELAYDESK_MCP_INSTRUCTIONS);
 
-  if (priorMessages && priorMessages.length > 0) {
-    lines.push("", "## Previous Conversation Summary");
-    for (const msg of priorMessages.slice(-8)) {
-      const label = msg.role === "user" ? "User" : "Assistant";
-      lines.push(`[${label}]: ${msg.content.slice(0, 1500)}`);
-    }
-  }
+  const history = formatChatHistory(priorMessages ?? []);
+  if (history) lines.push("", "## Previous Conversation Summary", history);
 
   if (attachmentContext) {
     lines.push("", "## Explicitly Attached Context", attachmentContext);
@@ -417,6 +415,7 @@ export interface RunChatTurnResult {
   externalSessionId: string;
   status: "done" | "error" | "aborted";
   error?: string;
+  stopReason?: ChatTimeoutReason;
 }
 
 function runSingleCliAttempt(params: {
@@ -434,7 +433,6 @@ function runSingleCliAttempt(params: {
 }): Promise<{
   exitCode: number | null;
   aborted: boolean;
-  timedOut: boolean;
   stderr: string;
   state: StreamParseState;
 }> {
@@ -442,8 +440,12 @@ function runSingleCliAttempt(params: {
   return new Promise((resolve) => {
     const parser = createCliStreamParser(runtime, secrets, onEvent, onImage);
     const { state } = parser;
+    if (signal.aborted) {
+      resolve({ exitCode: null, aborted: true, stderr: "", state });
+      return;
+    }
     let aborted = false;
-    let timedOut = false;
+    let forceTimer: NodeJS.Timeout | undefined;
     let stderrBuf = "";
     let settled = false;
     let proc: ChildProcess;
@@ -453,30 +455,29 @@ function runSingleCliAttempt(params: {
         cwd,
         env,
         stdio: ["pipe", "pipe", "pipe"],
+        detached: process.platform !== "win32",
       });
     } catch (err) {
       state.errorMessage = `无法启动 ${runtime} CLI：${err instanceof Error ? err.message : String(err)}`;
-      resolve({ exitCode: -1, aborted: false, timedOut: false, stderr: state.errorMessage, state });
+      resolve({ exitCode: -1, aborted: false, stderr: state.errorMessage, state });
       return;
     }
 
-    const killProc = () => {
-      if (proc.killed) return;
+    const killGroup = (sig: NodeJS.Signals) => {
+      if (!proc.pid) return false;
       try {
-        proc.kill("SIGTERM");
+        process.kill(process.platform === "win32" ? proc.pid : -proc.pid, sig);
+        return true;
       } catch {
-        // ignore
+        return false;
       }
-      const forceTimer = setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {
-          // ignore
-        }
-      }, 2000);
-      forceTimer.unref();
     };
-
+    const killProc = () => {
+      if (!forceTimer && killGroup("SIGTERM")) {
+        forceTimer = setTimeout(() => killGroup("SIGKILL"), 400).unref();
+      }
+    };
+    proc.once("exit", killProc);
     const doAbort = () => {
       aborted = true;
       killProc();
@@ -490,12 +491,6 @@ function runSingleCliAttempt(params: {
       signal.addEventListener("abort", onSignalAbort, { once: true });
     }
 
-    const timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      killProc();
-    }, DEFAULT_TIMEOUT_MS);
-    timeoutTimer.unref();
-
     proc.stdout?.setEncoding("utf8").on("data", (chunk: string) => parser.write(chunk));
 
     proc.stderr?.on("data", (chunk: Buffer) => {
@@ -507,16 +502,17 @@ function runSingleCliAttempt(params: {
     const finish = (exitCode: number | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeoutTimer);
+      clearTimeout(forceTimer);
+      if (forceTimer) killGroup("SIGKILL");
       signal.removeEventListener("abort", onSignalAbort);
       if (activeSessionProcesses.get(sessionId)?.abort === doAbort) {
         activeSessionProcesses.delete(sessionId);
       }
-      parser.finish(exitCode === 0 && !aborted && !timedOut);
+      parser.finish(exitCode === 0 && !aborted);
+      state.text = redactSecrets(state.text, secrets);
       resolve({
         exitCode,
         aborted,
-        timedOut,
         stderr: redactSecrets(stderrBuf.trim(), secrets),
         state,
       });
@@ -531,6 +527,7 @@ function runSingleCliAttempt(params: {
       finish(code);
     });
 
+    proc.stdin?.on("error", () => { /* The CLI may exit before reading stdin. */ });
     try {
       proc.stdin?.end(stdinPrompt, "utf8");
     } catch {
@@ -540,8 +537,11 @@ function runSingleCliAttempt(params: {
 }
 
 export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<RunChatTurnResult> {
-  const { dbPath, project, session, prompt, attachments, priorMessages, signal, resolveTask, taskClient, onEvent } =
+  const { dbPath, project, session, prompt, attachments, priorMessages, resolveTask, taskClient, onEvent } =
     options;
+  const priorId = canResumeExternalSession(session, "cloud") ? session.external_session_id : "";
+  const interrupted: RunChatTurnResult = { status: "aborted", content: "", events: [], externalSessionId: priorId };
+  if (options.signal.aborted) return interrupted;
   const clis = detectLocalClis();
   const bin = session.runtime === "codex" ? clis.codexBin : clis.claudeBin;
   if (!bin) {
@@ -549,7 +549,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
     return {
       content: "",
       events: [],
-      externalSessionId: session.external_session_id,
+      externalSessionId: priorId,
       status: "error",
       error: `当前服务器未检测到本机 ${label}，请先安装或切换到已安装的 CLI 运行工具。`,
     };
@@ -585,6 +585,9 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
   }
   let mcpHandle: RelaydeskMcpHandle | null = null;
   let claudeMcpConfigPath: string | null = null;
+  let stopReason: ChatTimeoutReason | undefined;
+  const timeout = new AbortController();
+  const signal = AbortSignal.any([options.signal, timeout.signal]);
   try {
     mcpHandle = await startRelaydeskMcpServer({
       projectId: project.id,
@@ -654,7 +657,12 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
     };
   };
 
-  const runWithResume = Boolean(session.external_session_id);
+  const clock = chatWatchdog(reason => {
+    if (signal.aborted) return;
+    stopReason = reason;
+    timeout.abort();
+  });
+  const runWithResume = Boolean(priorId);
   const execute = async (resumeId: string) => {
     const stdinPrompt = resumeId
       ? buildResumePrompt(prompt, attachmentContext)
@@ -708,12 +716,14 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       stdinPrompt,
       secrets: invocation.secrets,
       signal,
-      onEvent,
+      onEvent: event => { clock.progress(); onEvent(event); },
       onImage: saveToolImage,
     });
   };
 
   try {
+    if (signal.aborted) return interrupted;
+    clock.progress();
     onEvent({
       type: "status",
       message: runWithResume
@@ -721,43 +731,38 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
         : `正在启动 ${session.runtime === "codex" ? "Codex" : "Claude"}（工作区已挂载项目文件与手册）…`,
     });
 
-    let attempt = await execute(session.external_session_id);
+    let resumeId = priorId;
+    let attempt = await execute(resumeId);
 
     // If resuming a prior CLI thread failed before producing any output, transparently retry with a fresh thread seeded with conversation history.
     if (
       runWithResume &&
       !attempt.aborted &&
-      !attempt.timedOut &&
+      !signal.aborted &&
+      !attempt.state.toolEvents.size &&
+      !attempt.state.externalSessionId &&
       attempt.exitCode !== 0 &&
       !attempt.state.text
     ) {
-      onEvent({ type: "status", message: "原 CLI 线程不可复用，正在携带上下文开启新线程…" });
-      attempt = await execute("");
+      onEvent({ type: "status", message: "原 CLI 线程不可复用，正在携带上下文开启新线程…", external_session_id: "" });
+      resumeId = "";
+      attempt = await execute(resumeId);
     }
 
-    const finalSessionId = attempt.state.externalSessionId || session.external_session_id;
+    const finalSessionId = attempt.state.externalSessionId || resumeId;
     const events = Array.from(attempt.state.toolEvents.values());
 
-    if (attempt.aborted) {
-      return {
-        content: attempt.state.text || "（已中止生成）",
-        events,
-        externalSessionId: finalSessionId,
-        status: "aborted",
-      };
-    }
-
-    if (attempt.timedOut) {
+    if (attempt.aborted || signal.aborted) {
       return {
         content: attempt.state.text,
         events,
         externalSessionId: finalSessionId,
-        status: "error",
-        error: "本轮执行超时（超过 8 分钟）已自动停止。",
+        status: stopReason ? "error" : "aborted",
+        ...(stopReason && { stopReason, error: chatTimeoutMessage[stopReason] }),
       };
     }
 
-    if (attempt.exitCode !== 0 || (attempt.state.errorMessage && !attempt.state.text)) {
+    if (attempt.exitCode !== 0 || attempt.state.errorMessage) {
       const detail =
         attempt.state.errorMessage ||
         attempt.stderr.split(/\r?\n/).filter(Boolean).slice(-3).join(" / ") ||
@@ -779,6 +784,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       status: "done",
     };
   } finally {
+    clock.close();
     if (claudeMcpConfigPath && existsSync(claudeMcpConfigPath)) {
       try {
         unlinkSync(claudeMcpConfigPath);

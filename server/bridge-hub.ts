@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
+import { chatWatchdog, chatTimeoutMessage, type ChatTimeoutReason } from "../agent/bridge/chat-timeouts.ts";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { sanitizeBridgeModels } from "../app/lib/model-catalog.ts";
@@ -79,7 +80,8 @@ const intermediate = z.discriminatedUnion("type", [
   z.object({ type: z.literal("reasoning"), text: text(120_000) }),
 ]);
 const terminal = z.object({ content: text(120_000), events: z.array(tool).max(1000), externalSessionId: text(512),
-  status: z.enum(["done", "error", "aborted"]), error: text(32_768).optional() });
+  status: z.enum(["done", "error", "aborted"]), error: text(32_768).optional(),
+  stopReason: z.enum(["queue_timeout", "idle_timeout", "total_timeout"]).optional() });
 const cliRunEventSchema = z.object({
   run_id: text(160).min(1),
   event: z.enum(["heartbeat", "progress", "finish", "fail"]),
@@ -444,6 +446,7 @@ export class BridgeHub {
     run.stop("对话已中止", true); return true;
   }
   async runChatTurn(agentId: string, payload: BridgeChatStart, onEvent: (event: ChatStreamEvent) => void, signal: AbortSignal, secrets: string[] = []): Promise<RunChatTurnResult> {
+    if (signal.aborted) return { status: "aborted", content: "", events: [], externalSessionId: payload.resume_session_id };
     const binding = this.assertCanRun(agentId, payload.project_id, payload.runtime);
     if (this.isChatSessionRunning(payload.session_id)) throw new ApiError(409, "会话正在运行");
     const conn = this.live(agentId)!;
@@ -451,25 +454,42 @@ export class BridgeHub {
     const { datasource_env, pg_read_only_enforced, ...start } = payload;
     const grant = binding.allow_datasource_secrets ? { datasource_env, pg_read_only_enforced } : {};
     return new Promise(resolve => {
+      let content = "";
+      let externalSessionId = payload.resume_session_id;
+      const tools = new Map<string, RunChatTurnResult["events"][number]>();
       const finish = (result: RunChatTurnResult) => {
         if (!this.runs.delete(id)) return;
-        clearTimeout(timer); signal.removeEventListener("abort", abort); resolve(result);
+        clock.close();
+        signal.removeEventListener("abort", abort);
+        if (result.status !== "done") {
+          for (const tool of result.events) tools.set(tool.id, tool);
+          result = { ...result, content: result.content || redact(content, secrets), events: [...tools.values()] };
+        }
+        resolve(result);
       };
-      const stop = (reason: string, aborted = false) => {
+      const stop = (reason: string, aborted = false, stopReason?: ChatTimeoutReason) => {
+        finish({ status: aborted ? "aborted" : "error", content: "", error: reason, events: [], externalSessionId,
+          ...(stopReason && { stopReason }) });
         if (this.connections.get(agentId) === conn && conn.ws.readyState === WebSocket.OPEN) {
           this.send(conn, "chat.abort", { run_id: id, session_id: payload.session_id });
         }
-        finish({ status: aborted ? "aborted" : "error", content: "", error: reason, events: [], externalSessionId: "" });
       };
       const abort = () => stop("对话已中止", true);
-      const timer = setTimeout(() => stop("本机节点执行超时"), RUN_TIMEOUT_MS).unref();
+      const clock = chatWatchdog(reason => stop(chatTimeoutMessage[reason], false, reason));
+      const publish = streamOutput(event => {
+        if (event.type === "text_delta") content = (content + event.delta).slice(0, 120_000);
+        else if (event.type === "text_replace") content = event.text;
+        else if (event.type === "status" && event.external_session_id !== undefined) externalSessionId = event.external_session_id;
+        else if (event.type === "tool" && (tools.has(event.event.id) || tools.size < 1000)) tools.set(event.event.id, event.event);
+        onEvent(event);
+      }, secrets);
       this.runs.set(id, { id, session: payload.session_id, project: payload.project_id, workdir: binding.workdir,
-        owner: conn, write: payload.sandbox_mode === "workspace-write", onEvent: streamOutput(onEvent, secrets),
+        owner: conn, write: payload.sandbox_mode === "workspace-write", onEvent: event => { clock.progress(); publish(event); },
         emitTaskUpdated: (mutated) => onEvent({ type: "task_updated", task_id: mutated.task_id, action: mutated.action }),
         secrets, finish, stop });
       if (signal.aborted) { abort(); return; }
       signal.addEventListener("abort", abort, { once: true });
-      try { this.send(conn, "chat.start", { ...start, prompt: redactSecrets(start.prompt, secrets),
+      try { this.send(conn, "chat.start", { ...start, expected_workdir: binding.workdir, prompt: redactSecrets(start.prompt, secrets),
         system_context: redactSecrets(start.system_context ?? "", secrets), ...grant, run_id: id }); }
       catch { stop("本机节点连接中断"); }
     });

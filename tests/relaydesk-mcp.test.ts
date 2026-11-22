@@ -414,6 +414,7 @@ describe("ProjectChatStreams task_updated callback", () => {
     };
     const mutated: Array<{ task_id?: string; action: string }> = [];
     const streams = new ProjectChatStreams({
+      async getCodexChatSession() { return { session, messages: [] }; },
       async streamCodexChatMessage(_pid, _sid, _payload, onEvent) {
         const events: ChatStreamEvent[] = [
           { type: "task_updated", task_id: "t-123", action: "comment_task" },

@@ -529,11 +529,11 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}`,
       "DELETE",
     ),
-  abortCodexChatSession: (projectId: string, sessionId: string) =>
+  abortCodexChatSession: (projectId: string, sessionId: string, run_id: string, reason: "user_stop" | "follow_up") =>
     request<{ aborted: boolean }>(
       `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}/abort`,
       "POST",
-      {},
+      { run_id, reason },
     ),
   regenerateCodexChatSessionTitle: (projectId: string, sessionId: string) =>
     request<{ session: ChatSessionRecord; generated: boolean }>(
@@ -544,7 +544,7 @@ export const api = {
   streamCodexChatMessage: async (
     projectId: string,
     sessionId: string,
-    payload: { content: string; attachments?: ChatContextRef[] },
+    payload: { run_id: string; content: string; attachments?: ChatContextRef[] },
     onEvent: (event: ChatStreamEvent) => void,
     signal?: AbortSignal,
   ): Promise<void> => {

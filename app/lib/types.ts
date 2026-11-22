@@ -530,6 +530,7 @@ export interface ChatSessionRecord {
   resolved_target: string;
   reasoning_effort: ChatReasoningEffort;
   external_session_id: string;
+  active_run_id?: string;
   status: "idle" | "running" | "error";
   created_at: string;
   updated_at: string;
@@ -545,6 +546,7 @@ export interface ChatMessageRecord {
   events: ChatToolEvent[];
   attachments: ChatContextRef[];
   status: "streaming" | "done" | "error" | "aborted";
+  stop_reason?: "user_stop" | "follow_up" | "queue_timeout" | "idle_timeout" | "total_timeout";
   created_at: string;
 }
 

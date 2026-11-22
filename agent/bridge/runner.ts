@@ -25,6 +25,7 @@ export interface ChatStart {
   sandbox_mode: ChatSandboxMode;
   network_access?: boolean;
   resume_session_id?: string;
+  expected_workdir?: string;
   prompt: string;
   system_context?: string;
   workspace_manifest: SpaceManifest;
@@ -131,7 +132,7 @@ interface RunnerOptions {
   onEvent(event: ChatStreamEvent): void;
 }
 export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult> {
-  o.signal.throwIfAborted();
+  if (o.signal.aborted) return { status: "aborted", content: "", events: [], externalSessionId: o.p.resume_session_id || "" };
   const p = o.p,
     runtime = p.runtime,
     cfg = o.config.runtimes?.[runtime];
@@ -328,6 +329,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     },
     saveToolImage,
   );
+  if (o.signal.aborted) return { status: "aborted", content: "", events: [], externalSessionId: p.resume_session_id || "" };
   const child = spawn(bin, args, { cwd: o.cwd, env, detached: true, stdio: "pipe" });
   const pid = child.pid;
   function signalGroup(sig: NodeJS.Signals | 0) {

@@ -559,6 +559,10 @@ export class Store {
         "ALTER TABLE tasks ADD COLUMN triaged_by TEXT NOT NULL DEFAULT ''",
       );
     }
+    const messageCols = this.db.prepare("PRAGMA table_info(chat_messages)").all();
+    if (!messageCols.some((c) => c.name === "stop_reason")) {
+      this.db.exec("ALTER TABLE chat_messages ADD COLUMN stop_reason TEXT");
+    }
     const chatSessionCols = this.db
       .prepare("PRAGMA table_info(chat_sessions)")
       .all() as Array<{ name: string }>;
@@ -2116,6 +2120,7 @@ export class Store {
     attachments_json: string;
     status: "streaming" | "done" | "error" | "aborted";
     created_at: string;
+    stop_reason?: ChatMessageRecord["stop_reason"] | null;
   }): ChatMessageRecord {
     let events: ChatToolEvent[] = [];
     let attachments: ChatContextRef[] = [];
@@ -2139,6 +2144,7 @@ export class Store {
       events,
       attachments,
       status: row.status,
+      ...(row.stop_reason && { stop_reason: row.stop_reason }),
       created_at: row.created_at,
     };
   }
@@ -2291,7 +2297,8 @@ export class Store {
     this.getChatSession(projectId, sessionId);
     const rows = this.db
       .prepare(
-        "SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 200",
+        `SELECT * FROM (SELECT rowid AS seq, * FROM chat_messages WHERE session_id = ?
+         ORDER BY created_at DESC, rowid DESC LIMIT 200) ORDER BY created_at ASC, seq ASC`,
       )
       .all(sessionId) as unknown as Array<{
       id: string;
@@ -2314,9 +2321,13 @@ export class Store {
       events?: ChatToolEvent[];
       attachments?: ChatContextRef[];
       status?: "streaming" | "done" | "error" | "aborted";
+      id?: string;
     },
   ): ChatMessageRecord {
-    const id = uuidHex();
+    const id = payload.id ?? uuidHex();
+    if (payload.id && this.db.prepare("SELECT 1 FROM chat_messages WHERE id = ?").get(id)) {
+      throw new ApiError(409, "此轮消息已提交");
+    }
     const now = nowIso();
     const eventsJson = JSON.stringify(payload.events ?? []);
     const attachmentsJson = JSON.stringify(payload.attachments ?? []);
@@ -2351,6 +2362,7 @@ export class Store {
       content?: string;
       events?: ChatToolEvent[];
       status?: "streaming" | "done" | "error" | "aborted";
+      stop_reason?: ChatMessageRecord["stop_reason"];
     },
   ): ChatMessageRecord {
     const row = this.db
@@ -2373,8 +2385,8 @@ export class Store {
       patch.events !== undefined ? JSON.stringify(patch.events) : row.events_json;
     const status = patch.status ?? row.status;
     this.db
-      .prepare("UPDATE chat_messages SET content = ?, events_json = ?, status = ? WHERE id = ?")
-      .run(content, eventsJson, status, messageId);
+      .prepare("UPDATE chat_messages SET content = ?, events_json = ?, status = ?, stop_reason = COALESCE(?, stop_reason) WHERE id = ?")
+      .run(content, eventsJson, status, patch.stop_reason ?? null, messageId);
     this.db
       .prepare("UPDATE chat_sessions SET updated_at = ? WHERE id = ?")
       .run(nowIso(), row.session_id);
@@ -2383,6 +2395,7 @@ export class Store {
       content,
       events_json: eventsJson,
       status,
+      ...(patch.stop_reason && { stop_reason: patch.stop_reason }),
     });
   }
 }
