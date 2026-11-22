@@ -1,5 +1,6 @@
 import type {
   AuthStatusPayload,
+  SidebarAccount,
   BridgeAgentBindingSummary,
   BridgeAgentPatch,
   BridgeAgentSummary,
@@ -143,6 +144,8 @@ async function readChatStream(response: Response, onEvent: (event: ChatStreamEve
 }
 
 export const api = {
+  getSidebarAccounts: () =>
+    request<{ accounts: SidebarAccount[] }>("/api/sidebar-accounts"),
   getAuthStatus: () => request<AuthStatusPayload>("/api/auth/status"),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", "POST", {}),
 

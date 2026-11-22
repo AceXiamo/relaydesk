@@ -98,6 +98,18 @@ export type WorkspaceView =
   | "sources"
   | "settings";
 
+export interface SidebarAccount {
+  nodeName?: string;
+  identity?: string;
+  id: string;
+  name: string | null;
+  avatarUrl: string | null;
+  service: string;
+  plan: string | null;
+  status: "ready" | "unverified" | "unavailable";
+  windows: { label: string; remainingPercent: number | null; resetsAt: string | null }[];
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;

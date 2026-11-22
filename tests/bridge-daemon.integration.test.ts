@@ -3,9 +3,13 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Duplex } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { startBridgeDaemon } from "../agent/bridge/index.ts";
+import { startBridgeDaemon, type BridgeDaemonOptions } from "../agent/bridge/index.ts";
 import { buildWorkspaceManifest, getProjectFilesDir } from "../server/workspace.ts";
 import { bearer, fixture, operator, sha256, type Fixture } from "./bridge-fixture.ts";
+
+const readers = vi.hoisted(() => ({ codex: vi.fn(), gemini: vi.fn() }));
+vi.mock("../agent/bridge/codex-account.ts", () => ({ readCodexAccount: readers.codex }));
+vi.mock("../agent/bridge/gemini-account.ts", () => ({ readGeminiAccount: readers.gemini }));
 
 // Use real OS processes rather than mocking spawn: cancellation must also reap grandchildren.
 const fakeCli = `#!/usr/bin/env node
@@ -78,6 +82,8 @@ const privateCatalogValue = ["private", "fixture", "config", "value"].join("-");
 let f: Fixture;
 let daemon: Awaited<ReturnType<typeof startBridgeDaemon>> | undefined;
 beforeEach(async () => {
+  readers.codex.mockReset().mockResolvedValue(null);
+  readers.gemini.mockReset().mockResolvedValue(null);
   f = await fixture();
   vi.stubEnv("HOME", join(f.root, "home"));
   vi.stubEnv("CODEX_HOME", undefined);
@@ -86,7 +92,7 @@ afterEach(async () => {
   try { await daemon?.close(); } finally { daemon = undefined; vi.unstubAllEnvs(); await f.close(); }
 });
 
-async function start(roots = true, concurrency = 1) {
+async function start(roots = true, concurrency = 1, timers: Pick<BridgeDaemonOptions, "accountRefreshMs" | "accountTimeoutMs"> = {}) {
   const p = await f.project();
   const { id, token } = await f.register();
   const homeDir = join(f.root, "home");
@@ -106,7 +112,7 @@ async function start(roots = true, concurrency = 1) {
     projects: { [p]: { workdir: repo } }, runtimes: { codex: { bin }, claude: { bin } },
     models: [{ id: "detected-codex", runtime: "codex", context_window: 543210, effort_levels: ["low", "high"] }] };
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
-  daemon = await startBridgeDaemon({ configPath, cacheDir, homeDir, reconnectMinMs: 30, reconnectMaxMs: 100 });
+  daemon = await startBridgeDaemon({ configPath, cacheDir, homeDir, ...timers, reconnectMinMs: 30, reconnectMaxMs: 100 });
   const agent = async () => (await f.ok("/bridge/agents")).agents.find((a: { id: string }) => a.id === id);
   await expect.poll(async () => (await agent())?.runtimes?.codex?.available, { timeout: 5000 }).toBe(true);
   return { id, p, token, configPath, cacheDir, repo, allowed, agent, bindPath: `/projects/${p}/agent-bindings/${id}` };
@@ -122,6 +128,22 @@ function alive(pid: number) {
 }
 
 describe("real bridge daemon + HTTP chat", () => {
+  it("publishes each provider independently and refreshes a failed snapshot", async () => {
+    const row = { id: "one", name: "User", avatarUrl: null, plan: "Pro", status: "ready", windows: [] };
+    let release!: () => void;
+    readers.codex.mockResolvedValueOnce(row).mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(row); }));
+    readers.gemini.mockResolvedValue(row);
+    await start(true, 1, { accountRefreshMs: 500, accountTimeoutMs: 100 });
+    const accounts = async () => (await f.ok("/sidebar-accounts")).accounts;
+    await expect.poll(accounts, { interval: 10 }).toHaveLength(2);
+    await expect.poll(accounts, { timeout: 2500 }).toEqual([expect.objectContaining({ service: "Gemini", nodeName: "Test bridge" })]);
+    await expect.poll(() => readers.gemini.mock.calls.length, { timeout: 2500 }).toBeGreaterThanOrEqual(3);
+    expect(readers.codex).toHaveBeenCalledTimes(2);
+    release();
+    readers.codex.mockRejectedValueOnce(new Error("private error")).mockResolvedValue(row);
+    await expect.poll(accounts, { timeout: 2500 }).toHaveLength(2);
+  });
+
   it("merges native catalogs, hot reloads config, and accepts only real directories inside allowed roots", async () => {
     const { p, token, configPath, allowed, agent, bindPath } = await start();
     const summary = await agent();

@@ -517,6 +517,12 @@ export class ApiRouter {
         this.checkOperator(req, meta);
       }
 
+      if (parts.length === 1 && parts[0] === "sidebar-accounts") {
+        if (method !== "GET") throw new ApiError(405, "Method not allowed");
+        this.sendJson(req, res, 200, { accounts: this.bridgeHub?.sidebarAccounts() ?? [] }, meta);
+        return;
+      }
+
       // Operator Local Bridge agent management endpoints
       if (parts.length >= 2 && parts[0] === "bridge" && parts[1] === "agents") {
         const result = await this.handleBridgeAgents(req, method, parts.slice(2));

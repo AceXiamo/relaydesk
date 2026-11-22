@@ -18,6 +18,37 @@ async function unauthorized(url: string, token?: string) {
 const bindings = (project_id: string) => [{ project_id, workdir: "/test/workdir", path_ok: true, path_error: "" }];
 
 describe("BridgeHub registration and connection lifecycle", () => {
+  it("exposes only live, sanitized node accounts to the operator without project bindings", async () => {
+    const first = await f.register("Office");
+    const second = await f.register("Laptop");
+    expect((await f.api("/sidebar-accounts", "GET", undefined, first.token)).status).toBe(401);
+    const a = await f.connect(first.token);
+    const b = await f.connect(second.token);
+    await Promise.all([a.hello(), b.hello()]);
+    const row = { id: "shared", name: "User", plan: "Pro", status: "ready", avatarUrl: "javascript:bad",
+      nodeName: "spoof", service: "spoof", accessToken: "secret", windows: [
+        { label: "5h", remainingPercent: 80, resetsAt: null, extra: "secret" },
+      ] };
+    for (const device of [a, b]) device.send("sidebar.account", { provider: "codex", account: row });
+    const accounts = async () => (await f.ok("/sidebar-accounts")).accounts;
+    const expected = { name: "User", service: "Codex", plan: "Pro", status: "ready", avatarUrl: null,
+      windows: [{ label: "5h", remainingPercent: 80, resetsAt: null }] };
+    await expect.poll(accounts).toEqual([
+      { ...expected, id: `${first.id}:codex:shared`, nodeName: "Office" },
+      { ...expected, id: `${second.id}:codex:shared`, nodeName: "Laptop" },
+    ]);
+    a.send("sidebar.account", { provider: "codex", account: { ...row, windows: Array(100).fill(row.windows[0]) } });
+    await expect.poll(accounts).toHaveLength(1);
+    const replacement = await f.connect(second.token);
+    await replacement.hello();
+    expect(await accounts()).toEqual([]);
+    const avatarUrl = "data:image/png;base64,iVBORw0KGgo=";
+    replacement.send("sidebar.account", { provider: "gemini", account: { ...row, avatarUrl, identity: "user@example.org" } });
+    await expect.poll(accounts).toEqual([expect.objectContaining({ avatarUrl, identity: "user@example.org", service: "Gemini" })]);
+    replacement.ws.terminate();
+    await expect.poll(accounts).toEqual([]);
+  });
+
   it("keeps operator and agent authentication separate and stores only the device token digest", async () => {
     const { id, token, quickstart_config } = await f.register();
     expect(quickstart_config).toMatchObject({ server_url: f.wsUrl, agent_token: token });

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { SidebarAccounts, useSidebarAccounts } from "./SidebarAccounts.tsx";
 import { Icon } from "./Icon.tsx";
 import { Kbd, LivePulseDot } from "./ui.tsx";
 import type {
@@ -48,6 +49,7 @@ export function Sidebar({
   onToggleTheme,
   onLogout,
 }: SidebarProps) {
+  const accounts = useSidebarAccounts();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement>(null);
 
@@ -527,6 +529,7 @@ export function Sidebar({
 
       {/* Footer */}
       <div className="p-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] border-t border-[var(--border-subtle)] space-y-2">
+        <SidebarAccounts accounts={accounts} />
         <button
           type="button"
           onClick={() => {

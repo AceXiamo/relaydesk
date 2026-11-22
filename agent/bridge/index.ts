@@ -23,6 +23,9 @@ import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 import { bridgeCatalogPaths, detectBridgeCatalog, type BridgeCatalog, type BridgeCatalogConfig } from "./catalog.ts";
 import { chatWatchdog, chatTimeoutMessage, type ChatTimeoutReason } from "./chat-timeouts.ts";
+import { readCodexAccount } from "./codex-account.ts";
+import { readGeminiAccount } from "./gemini-account.ts";
+import { sanitizeSidebarAccount, type AccountProvider } from "../../server/sidebar-accounts.ts";
 import { checkChat, datasourceValues, runLocalChat, type ChatStart } from "./runner.ts";
 import { pushChangedShadowFiles, snapshotShadowFiles, syncSpace, validProjectId, type WorkspaceRpc } from "./space-sync.ts";
 import type { RunChatTurnResult } from "../../server/codex-chat.ts";
@@ -50,6 +53,8 @@ export interface BridgeDaemonOptions {
   reconnectMinMs?: number;
   reconnectMaxMs?: number;
   disconnectGraceMs?: number;
+  accountRefreshMs?: number;
+  accountTimeoutMs?: number;
   verbose?: boolean;
 }
 function load(path: string): Config {
@@ -343,6 +348,24 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       /* Partial config saves must not publish secrets or crash the daemon. */
     }
   }
+  const accountReaders = { codex: readCodexAccount, gemini: readGeminiAccount };
+  const busyReaders = new Set<AccountProvider>();
+  async function publishAccount(socket: WebSocket, provider: AccountProvider) {
+    // Keep a stuck reader single-flight even across reconnects and after its deadline.
+    if (busyReaders.has(provider)) return;
+    busyReaders.add(provider);
+    const read = Promise.resolve().then(accountReaders[provider]).finally(() => busyReaders.delete(provider));
+    let deadline: NodeJS.Timeout | undefined;
+    try {
+      const value = await Promise.race([
+        read.catch(() => null),
+        new Promise<null>(resolve => { deadline = setTimeout(() => resolve(null), o.accountTimeoutMs ?? 20_000).unref(); }),
+      ]);
+      if (!closed && ws === socket) send(socket, "sidebar.account", { provider, account: sanitizeSidebarAccount(provider, value) });
+    } finally {
+      clearTimeout(deadline);
+    }
+  }
   function connect() {
     if (closed || superseded) return;
     const socket = new WebSocket(config.server_url, {
@@ -353,6 +376,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       perMessageDeflate: false,
     });
     ws = socket;
+    let accountRefresh: NodeJS.Timeout | undefined;
     let ready = false,
       lastPing = Date.now();
     const heartbeat = setInterval(() => {
@@ -739,7 +763,16 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         return;
       }
       if (f.type === "hello.ack") {
+        if (ready) return;
         ready = true;
+        if (f.payload.sidebar_accounts === true) {
+          const refresh = () => {
+            void publishAccount(socket, "codex");
+            void publishAccount(socket, "gemini");
+          };
+          refresh();
+          accountRefresh = setInterval(refresh, o.accountRefreshMs ?? 60_000).unref();
+        }
         backoff = min;
         log(`connected as "${String(f.payload.agent_name ?? "")}" (${String(f.payload.agent_id ?? "")}) · models=${catalog.models.length} · projects=${Object.keys(config.projects ?? {}).length}`);
         return;
@@ -765,6 +798,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
     });
     socket.once("close", (code) => {
       clearInterval(heartbeat);
+      clearInterval(accountRefresh);
       pending.forEach((entry) => entry.finish());
       for (const a of active.values())
         if (a.socket === socket) {

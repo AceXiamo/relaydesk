@@ -9,6 +9,7 @@ import type { BridgeAgentSummary, ChatReasoningEffort, ChatRuntime, ChatSandboxM
 import type { RunChatTurnResult } from "./codex-chat.ts";
 import { redactSecrets } from "./cli-stream-parser.ts";
 import { ApiError } from "./errors.ts";
+import { sanitizeSidebarAccount, type AccountProvider } from "./sidebar-accounts.ts";
 import type { Store } from "./store.ts";
 import { type buildWorkspaceManifest, readBridgeWorkspaceFile, writeBridgeWorkspaceFile } from "./workspace.ts";
 
@@ -155,6 +156,7 @@ interface CliRunHandle {
   stop: (reason: string) => void;
 }
 interface Connection {
+  accounts: Map<AccountProvider, NonNullable<ReturnType<typeof sanitizeSidebarAccount>>>;
   id: string; ws: WebSocket; ready: boolean; lastPong: number; projects: Map<string, Binding>;
   binds: Map<string, { project: string; workdir: string; settle: (value: Binding | Error) => void }>;
 }
@@ -193,7 +195,7 @@ export class BridgeHub {
     }
     this.wss.handleUpgrade(req, socket, head, ws => {
       this.disconnect(agent.id, 4001, "Replaced by newer connection");
-      const conn: Connection = { id: agent.id, ws, ready: false, lastPong: Date.now(), projects: new Map(), binds: new Map() };
+      const conn: Connection = { id: agent.id, ws, ready: false, accounts: new Map(), lastPong: Date.now(), projects: new Map(), binds: new Map() };
       this.connections.set(conn.id, conn);
       ws.on("pong", () => {
         if (this.connections.get(conn.id) !== conn || !conn.ready) return;
@@ -249,6 +251,16 @@ export class BridgeHub {
   private live(agentId: string) {
     const conn = this.connections.get(agentId);
     return conn?.ready && conn.ws.readyState === WebSocket.OPEN && Date.now() - conn.lastPong < this.timeout ? conn : undefined;
+  }
+  sidebarAccounts() {
+    return this.store.listBridgeAgents().flatMap(agent => {
+      const conn = this.live(agent.id);
+      if (!conn) return [];
+      return (["codex", "gemini"] as const).flatMap(provider => {
+        const row = conn.accounts.get(provider);
+        return row ? [{ ...row, id: `${agent.id}:${provider}:${row.id}`, nodeName: agent.name }] : [];
+      });
+    });
   }
   describe(agent: BridgeAgentSummary): BridgeAgentSummary {
     const chatCount = Array.from(this.runs.values()).filter(run => run.owner.id === agent.id).length;
@@ -335,7 +347,7 @@ export class BridgeHub {
       if (hello) {
         conn.ready = true;
         const agent = this.agent(conn.id);
-        this.send(conn, "hello.ack", { agent_id: conn.id, agent_name: agent.name, bindings: agent.bindings }, id);
+        this.send(conn, "hello.ack", { agent_id: conn.id, agent_name: agent.name, sidebar_accounts: true, bindings: agent.bindings }, id);
       }
       if (conn.ready) {
         const readyProjects = Array.from(conn.projects.entries())
@@ -343,6 +355,12 @@ export class BridgeHub {
           .map(([pid]) => pid);
         if (readyProjects.length > 0) this.notifyAvailability(readyProjects);
       }
+    } else if (type === "sidebar.account") {
+      const provider = p.provider;
+      if (provider !== "codex" && provider !== "gemini") return;
+      const row = sanitizeSidebarAccount(provider, p.account);
+      if (row) conn.accounts.set(provider, row);
+      else conn.accounts.delete(provider);
     } else if (type === "workspace.fetch" || type === "workspace.push") {
       if (!id) throw new Error();
       try {
