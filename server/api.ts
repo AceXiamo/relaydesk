@@ -1578,21 +1578,33 @@ export class ApiRouter {
     if (subparts.length === 1 && subparts[0] === "file") {
       if (method === "GET") {
         const relPath = query.get("path") ?? "";
-        if (query.get("download") === "1") {
+        if (query.get("download") === "1" || query.get("inline") === "1") {
           const { buffer, name } = readWorkspaceFileDownload(
             this.store.dbPath,
             projectInfo.id,
             relPath,
           );
           const safeFilename = name.replace(/["\\\r\n]/g, "_");
+          const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")).toLowerCase() : "";
+          const INLINE_IMAGE_MIMES: Record<string, string> = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+            ".avif": "image/avif",
+          };
+          const inlineMime = query.get("inline") === "1" ? INLINE_IMAGE_MIMES[ext] : undefined;
           res.statusCode = 200;
-          res.setHeader("Content-Type", "application/octet-stream");
+          res.setHeader("Content-Type", inlineMime ?? "application/octet-stream");
           res.setHeader(
             "Content-Disposition",
-            `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+            inlineMime
+              ? `inline; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(name)}`
+              : `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(name)}`,
           );
           res.setHeader("Content-Length", String(buffer.length));
-          res.setHeader("Cache-Control", "no-store");
+          res.setHeader("Cache-Control", inlineMime ? "private, max-age=3600" : "no-store");
           res.setHeader("X-Content-Type-Options", "nosniff");
           res.end(buffer);
           return undefined;
@@ -1928,22 +1940,42 @@ export class ApiRouter {
     ) {
       const sessionId = subparts[1];
       const data = await this.readJson(req, 64 * 1024);
-      const content = field(data, "content", 16_000);
+      const rawContent = field(data, "content", 16_000, false);
       const rawAttachments = Array.isArray(data.attachments) ? data.attachments : [];
       const attachments: ChatContextRef[] = [];
       for (const item of rawAttachments.slice(0, 8)) {
         if (!item || typeof item !== "object") continue;
         const obj = item as Record<string, unknown>;
         const kind = obj.kind;
-        if (kind !== "file" && kind !== "repo_file" && kind !== "database" && kind !== "task") {
+        if (
+          kind !== "file" &&
+          kind !== "repo_file" &&
+          kind !== "database" &&
+          kind !== "task" &&
+          kind !== "image"
+        ) {
           continue;
         }
         const label = typeof obj.label === "string" ? obj.label.trim().slice(0, 120) : "";
         const ref = typeof obj.ref === "string" ? obj.ref.trim().slice(0, 300) : "";
         const repo = typeof obj.repo === "string" ? obj.repo.trim().slice(0, 120) : undefined;
+        const mime =
+          kind === "image" && typeof obj.mime === "string" && /^image\/[a-z0-9.+-]+$/i.test(obj.mime.trim())
+            ? obj.mime.trim().slice(0, 64)
+            : undefined;
         if (!ref) continue;
-        attachments.push({ kind, label: label || ref, ref, ...(repo ? { repo } : {}) });
+        attachments.push({
+          kind,
+          label: label || ref,
+          ref,
+          ...(repo ? { repo } : {}),
+          ...(mime ? { mime } : {}),
+        });
       }
+      if (!rawContent && !attachments.some((att) => att.kind === "image")) {
+        throw new ApiError(400, "请输入消息内容或附带图片");
+      }
+      const content = rawContent || "请查看附带的图片";
 
       if (isChatSessionRunning(sessionId) || this.bridgeHub?.isChatSessionRunning(sessionId)) {
         throw new ApiError(409, "当前会话正在生成回复，请等待完成或先点击停止。");
@@ -2090,12 +2122,20 @@ export class ApiRouter {
         if (localAgentId) {
           const workspaceManifest = buildWorkspaceManifest(this.store.dbPath, projectInfo.id);
           const datasourceRuntime = getWorkspaceDatasourceRuntimeEnv(this.store.dbPath, projectInfo.id);
+          const workspaceFilePaths = new Set(workspaceManifest.files.map((file) => file.path));
+          const bridgeAttachments = attachments.filter(
+            (att) => (att.kind !== "file" && att.kind !== "image") || workspaceFilePaths.has(att.ref),
+          );
+          const bridgeImagePaths = bridgeAttachments
+            .filter((att) => att.kind === "image")
+            .map((att) => att.ref);
           const attachmentContext = buildAttachmentContext(
             this.store.dbPath,
             projectInfo,
-            attachments.filter(att => att.kind !== "file" || workspaceManifest.files.some(file => file.path === att.ref)),
+            bridgeAttachments,
             workspaceManifest.databases,
             resolveTask,
+            { spaceDirVar: "$RELAYDESK_SPACE_DIR" },
           );
           const contextBlocks: string[] = [];
           if (!canResumePrior) {
@@ -2143,6 +2183,7 @@ export class ApiRouter {
               prompt: canResumePrior ? buildResumePrompt(content, attachmentContext) : content,
               system_context: canResumePrior ? "" : contextBlocks.join("\n\n"),
               workspace_manifest: workspaceManifest,
+              ...(bridgeImagePaths.length ? { image_paths: bridgeImagePaths } : {}),
               ...(localBinding?.allow_datasource_secrets
                 ? {
                     datasource_env: datasourceRuntime.env,

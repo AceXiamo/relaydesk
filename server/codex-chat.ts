@@ -1,9 +1,15 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { buildCliInvocation, createCliStreamParser, redactSecrets, type StreamParseState } from "./cli-stream-parser.ts";
+import { join, resolve as resolvePath, sep } from "node:path";
+import {
+  buildCliInvocation,
+  createCliStreamParser,
+  redactSecrets,
+  type CliStreamImageHandler,
+  type StreamParseState,
+} from "./cli-stream-parser.ts";
 import { readProjectCliSettings } from "./project-cli-config.ts";
 import {
   startRelaydeskMcpServer,
@@ -153,11 +159,17 @@ export function buildAttachmentContext(
   attachments: ChatContextRef[],
   workspaceDatabases: ReturnType<typeof prepareProjectChatWorkspace>["databases"],
   resolveTask?: TaskAttachmentResolver,
+  options?: { spaceDirVar?: string },
 ): string {
   if (!attachments.length) return "";
+  const filePrefix = options?.spaceDirVar ? `${options.spaceDirVar}/files` : "./files";
   const blocks: string[] = [];
   for (const att of attachments.slice(0, 8)) {
-    if (att.kind === "file") {
+    if (att.kind === "image") {
+      blocks.push(
+        `### Attached Image: ${att.label}\n- Path: ${filePrefix}/${att.ref}\n- Inspect this image directly (for Claude Code, call the Read tool on this path).`,
+      );
+    } else if (att.kind === "file") {
       try {
         const detail = readWorkspaceFile(dbPath, project.id, att.ref);
         if (detail.is_text && detail.content) {
@@ -295,7 +307,7 @@ function buildInitialPrompt(params: {
       ? `- ./repos/ : Read-only synced git mirrors for bound repositories (${workspace.readyRepos.map((r) => `${r.repo} -> repos/${r.dirName} @ ${r.commit.slice(0, 8)}`).join(", ")}).`
       : `- Bound repositories: ${(project.repos.length ? project.repos : [project.repo]).filter(Boolean).join(", ") || "none synced locally yet"}.`,
     sandboxMode === "workspace-write"
-      ? `- Mode: workspace-write (you may create or edit files under ./files/ when asked; never modify ./repos/ or disclose secrets).`
+      ? `- Mode: workspace-write (you may create or edit files under ./files/ when asked; never modify ./repos/ or disclose secrets). To show generated images or screenshots in chat, save them under ./files/ and embed them in Markdown as ![description](files/...).`
       : `- Mode: read-only (inspect files, repositories, and databases without modifying any project files under ./files/ or ./repos/).`,
     runtime === "codex"
       ? networkAccess
@@ -418,6 +430,7 @@ function runSingleCliAttempt(params: {
   secrets: string[];
   signal: AbortSignal;
   onEvent: (event: ChatStreamEvent) => void;
+  onImage?: CliStreamImageHandler;
 }): Promise<{
   exitCode: number | null;
   aborted: boolean;
@@ -425,9 +438,9 @@ function runSingleCliAttempt(params: {
   stderr: string;
   state: StreamParseState;
 }> {
-  const { sessionId, runtime, bin, args, cwd, env, stdinPrompt, secrets, signal, onEvent } = params;
+  const { sessionId, runtime, bin, args, cwd, env, stdinPrompt, secrets, signal, onEvent, onImage } = params;
   return new Promise((resolve) => {
-    const parser = createCliStreamParser(runtime, secrets, onEvent);
+    const parser = createCliStreamParser(runtime, secrets, onEvent, onImage);
     const { state } = parser;
     let aborted = false;
     let timedOut = false;
@@ -605,6 +618,42 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
     mcpHandle = null;
   }
 
+  const spaceFilesRoot = resolvePath(join(workspace.workspaceDir, "files"));
+  const resolvedImagePaths: string[] = [];
+  for (const att of attachments) {
+    if (att.kind !== "image") continue;
+    const abs = resolvePath(spaceFilesRoot, att.ref);
+    if ((abs === spaceFilesRoot || abs.startsWith(spaceFilesRoot + sep)) && existsSync(abs)) {
+      resolvedImagePaths.push(abs);
+    }
+  }
+  const CLOUD_IMAGE_MIME_EXT: Record<string, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "image/avif": "avif",
+  };
+  let savedToolImages = 0;
+  const saveToolImage: CliStreamImageHandler = (img) => {
+    if (savedToolImages >= 12) return null;
+    const ext = CLOUD_IMAGE_MIME_EXT[img.mime.toLowerCase()];
+    if (!ext) return null;
+    const buf = Buffer.from(img.data, "base64");
+    if (!buf.length || buf.length > 10 * 1024 * 1024) return null;
+    const imgDir = join(spaceFilesRoot, "_chat_images");
+    mkdirSync(imgDir, { recursive: true, mode: 0o700 });
+    const filename = `tool-${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`;
+    const relPath = `_chat_images/${filename}`;
+    writeFileSync(join(imgDir, filename), buf, { mode: 0o600, flag: "wx" });
+    savedToolImages += 1;
+    return {
+      url: `/api/projects/${encodeURIComponent(project.id)}/workspace/file?path=${encodeURIComponent(relPath)}&inline=1`,
+      alt: img.toolName ? `${img.toolName} image` : filename,
+    };
+  };
+
   const runWithResume = Boolean(session.external_session_id);
   const execute = async (resumeId: string) => {
     const stdinPrompt = resumeId
@@ -630,6 +679,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       networkAccess: session.network_access,
       workspaceDir: workspace.workspaceDir,
       reposDir: workspace.reposDir,
+      imagePaths: resolvedImagePaths,
       resumeSessionId: resumeId,
       projectSettings,
       datasourceEnv: datasourceRuntime.env,
@@ -659,6 +709,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       secrets: invocation.secrets,
       signal,
       onEvent,
+      onImage: saveToolImage,
     });
   };
 

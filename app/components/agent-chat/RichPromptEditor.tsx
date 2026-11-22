@@ -174,6 +174,7 @@ interface TextSegmentProps {
   onTextChange: (id: string, nextText: string) => void;
   onConvertToCodeBlock: (id: string, beforeText: string, lang: string, afterText: string) => void;
   onPasteMarkdown: (id: string, beforeText: string, pasted: string, afterText: string) => void;
+  onPasteImages?: (files: File[]) => void;
   onInterceptKeyDown?: (e: React.KeyboardEvent<HTMLElement>) => boolean;
   onSubmit: () => void;
   onFocusPrevCode: (id: string) => void;
@@ -193,6 +194,7 @@ function TextSegment({
   onTextChange,
   onConvertToCodeBlock,
   onPasteMarkdown,
+  onPasteImages,
   onInterceptKeyDown,
   onSubmit,
   onFocusPrevCode,
@@ -408,6 +410,25 @@ function TextSegment({
 
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
     if (disabled) return;
+    if (onPasteImages) {
+      const imageFiles: File[] = [];
+      for (const item of Array.from(e.clipboardData.items ?? [])) {
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const f = item.getAsFile();
+          if (f) imageFiles.push(f);
+        }
+      }
+      if (imageFiles.length === 0) {
+        for (const f of Array.from(e.clipboardData.files ?? [])) {
+          if (f.type.startsWith("image/")) imageFiles.push(f);
+        }
+      }
+      if (imageFiles.length > 0) {
+        e.preventDefault();
+        onPasteImages(imageFiles);
+        return;
+      }
+    }
     const plain = e.clipboardData.getData("text/plain");
     if (!plain) return;
     e.preventDefault();
@@ -688,11 +709,12 @@ interface RichPromptEditorProps {
   onChange: (nextMarkdown: string) => void;
   onSubmit: () => void;
   onInterceptKeyDown?: (e: React.KeyboardEvent<HTMLElement>) => boolean;
+  onPasteImages?: (files: File[]) => void;
 }
 
 export const RichPromptEditor = forwardRef<RichPromptEditorHandle, RichPromptEditorProps>(
   function RichPromptEditor(
-    { value, disabled = false, placeholder, onChange, onSubmit, onInterceptKeyDown },
+    { value, disabled = false, placeholder, onChange, onSubmit, onInterceptKeyDown, onPasteImages },
     ref,
   ) {
     const [blocks, setBlocks] = useState<EditorBlock[]>(() => parseMarkdownToBlocks(value));
@@ -898,6 +920,7 @@ export const RichPromptEditor = forwardRef<RichPromptEditorHandle, RichPromptEdi
               onTextChange={handleTextChange}
               onConvertToCodeBlock={handleConvertToCodeBlock}
               onPasteMarkdown={handlePasteMarkdown}
+              onPasteImages={onPasteImages}
               onInterceptKeyDown={onInterceptKeyDown}
               onSubmit={onSubmit}
               onFocusPrevCode={handleFocusPrevCode}

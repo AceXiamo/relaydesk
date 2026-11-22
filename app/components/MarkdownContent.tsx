@@ -18,11 +18,32 @@ function cn(...parts: Array<string | false | null | undefined>): string {
 }
 
 const SAFE_URL_RE = /^(https?:|mailto:)/i;
+const SAFE_WORKSPACE_FILE_URL_RE = /^\/api\/projects\/[^/?#\s]+\/workspace\/file\?[^\s#]+$/i;
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|avif)$/i;
 
-function safeUrlTransform(url: string): string {
+function resolveWorkspaceImagePath(raw: string, projectId?: string): string {
+  if (!projectId) return "";
+  let cleaned = raw.trim();
+  if (!cleaned || cleaned.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(cleaned)) return "";
+  // Strip optional query/hash before validating path
+  const qIdx = cleaned.search(/[?#]/);
+  if (qIdx >= 0) cleaned = cleaned.slice(0, qIdx);
+  cleaned = cleaned.replace(/^\.?\//, "");
+  if (cleaned.startsWith("files/")) cleaned = cleaned.slice("files/".length);
+  if (!cleaned || cleaned.includes("..") || /[\\\x00-\x1f\x7f]/.test(cleaned)) return "";
+  if (!IMAGE_EXT_RE.test(cleaned)) return "";
+  return `/api/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(cleaned)}&inline=1`;
+}
+
+function safeUrlTransform(url: string, key?: string, projectId?: string): string {
   const trimmed = url.trim();
   if (!trimmed) return "";
-  return SAFE_URL_RE.test(trimmed) ? trimmed : "";
+  if (SAFE_URL_RE.test(trimmed)) return trimmed;
+  if (SAFE_WORKSPACE_FILE_URL_RE.test(trimmed)) return trimmed;
+  if (key === "src" && projectId) {
+    return resolveWorkspaceImagePath(trimmed, projectId);
+  }
+  return "";
 }
 
 /**
@@ -207,6 +228,7 @@ export interface MarkdownContentProps {
   compact?: boolean;
   preserveLineBreaks?: boolean;
   className?: string;
+  projectId?: string;
 }
 
 export function MarkdownContent({
@@ -214,7 +236,12 @@ export function MarkdownContent({
   compact = false,
   preserveLineBreaks = false,
   className,
+  projectId,
 }: MarkdownContentProps) {
+  const urlTransform = useCallback(
+    (url: string, key?: string) => safeUrlTransform(url, key, projectId),
+    [projectId],
+  );
   const components = useMemo<Components>(
     () => ({
       h1: ({ children }) => (
@@ -457,7 +484,7 @@ export function MarkdownContent({
         <del className="line-through text-[var(--text-muted)]">{children}</del>
       ),
       img: ({ src, alt }) => {
-        const safeSrc = src ? safeUrlTransform(src) : "";
+        const safeSrc = src ? safeUrlTransform(src, "src", projectId) : "";
         if (!safeSrc) return null;
         return (
           <a
@@ -476,7 +503,7 @@ export function MarkdownContent({
         );
       },
     }),
-    [compact],
+    [compact, projectId],
   );
 
   if (!content.trim()) return null;
@@ -493,7 +520,7 @@ export function MarkdownContent({
     >
       <Markdown
         remarkPlugins={[remarkGfm]}
-        urlTransform={safeUrlTransform}
+        urlTransform={urlTransform}
         components={components}
       >
         {renderedContent}

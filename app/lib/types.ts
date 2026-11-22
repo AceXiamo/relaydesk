@@ -496,10 +496,16 @@ export interface ProjectExecutionRoutingResponse {
 }
 
 export interface ChatContextRef {
-  kind: "file" | "repo_file" | "database" | "task";
+  kind: "file" | "repo_file" | "database" | "task" | "image";
   label: string;
   ref: string;
   repo?: string;
+  mime?: string;
+}
+
+export interface ChatToolImage {
+  url: string;
+  alt?: string;
 }
 
 export interface ChatToolEvent {
@@ -509,6 +515,7 @@ export interface ChatToolEvent {
   status: "running" | "done" | "error";
   output?: string;
   exit_code?: number | null;
+  images?: ChatToolImage[];
 }
 
 export interface ChatSessionRecord {

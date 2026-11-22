@@ -464,6 +464,27 @@ export function ToolChipsGroup({
                     )}
                   </div>
                 )}
+
+                {ev.images && ev.images.length > 0 && (
+                  <div className="px-3 pb-2.5 pt-1 flex flex-wrap gap-2">
+                    {ev.images.map((img, idx) => (
+                      <a
+                        key={`${ev.id}-img-${idx}`}
+                        href={img.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block group"
+                      >
+                        <img
+                          src={img.url}
+                          alt={img.alt || `${ev.tool} 图片`}
+                          loading="lazy"
+                          className="max-h-64 w-auto max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] object-contain shadow-2xs group-hover:border-indigo-500/50 transition-colors"
+                        />
+                      </a>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -1157,6 +1178,8 @@ export interface PromptBarProps extends ModelControlsProps {
   onInputChange: (value: string) => void;
   attachments: ChatContextRef[];
   onToggleAttachment: (ref: ChatContextRef) => void;
+  onUploadImages?: (files: File[]) => void;
+  uploadingImages?: boolean;
   workspaceFiles: WorkspaceFileEntry[];
   workspaceDatabases: WorkspaceDatabaseEntry[];
   openTasks: TaskRecord[];
@@ -1182,6 +1205,8 @@ export function PromptBar({
   onInputChange,
   attachments,
   onToggleAttachment,
+  onUploadImages,
+  uploadingImages = false,
   workspaceFiles,
   workspaceDatabases,
   openTasks,
@@ -1213,7 +1238,9 @@ export function PromptBar({
   const [mentionQuery, setMentionQuery] = useState("");
   const [slashQuery, setSlashQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const [dragOverImage, setDragOverImage] = useState(false);
   const barRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   // Close popovers on outside click
   useEffect(() => {
@@ -1400,13 +1427,19 @@ export function PromptBar({
     return false;
   };
 
+  const hasImageAttachment = attachments.some((a) => a.kind === "image");
+  const canSend =
+    !streaming &&
+    !settingsBusy &&
+    !uploadingImages &&
+    (Boolean(input.trim()) || hasImageAttachment) &&
+    !authUnavailable;
+
   const handleSubmitFromEditor = () => {
-    if (!streaming && !settingsBusy && input.trim() && !authUnavailable) {
+    if (canSend) {
       onSend();
     }
   };
-
-  const canSend = !streaming && !settingsBusy && Boolean(input.trim()) && !authUnavailable;
 
   return (
     <div ref={barRef} className="relative">
@@ -1626,37 +1659,93 @@ export function PromptBar({
       </div>
 
       {/* Main Composer Card */}
-      <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] shadow-[var(--rd-shadow-md)] focus-within:border-[var(--border-strong)] focus-within:ring-2 focus-within:ring-[var(--rd-ring)]/40 transition-all">
+      <div
+        onDragOver={(e) => {
+          if (!onUploadImages || streaming) return;
+          if (Array.from(e.dataTransfer.types ?? []).includes("Files")) {
+            e.preventDefault();
+            if (!dragOverImage) setDragOverImage(true);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node | null)) {
+            setDragOverImage(false);
+          }
+        }}
+        onDrop={(e) => {
+          setDragOverImage(false);
+          if (!onUploadImages || streaming) return;
+          const files = Array.from(e.dataTransfer.files ?? []).filter((f) => f.type.startsWith("image/"));
+          if (files.length > 0) {
+            e.preventDefault();
+            onUploadImages(files);
+          }
+        }}
+        className={cn(
+          "rounded-2xl border bg-[var(--surface-elevated)] shadow-[var(--rd-shadow-md)] focus-within:border-[var(--border-strong)] focus-within:ring-2 focus-within:ring-[var(--rd-ring)]/40 transition-all",
+          dragOverImage
+            ? "border-indigo-500 ring-2 ring-indigo-500/30"
+            : "border-[var(--border-subtle)]",
+        )}
+      >
         {/* Attached Context Chips inside Composer */}
         {attachments.length > 0 && (
           <div className="px-3 pt-2.5 pb-0.5 flex flex-wrap items-center gap-1.5">
-            {attachments.map((att) => (
-              <span
-                key={`${att.kind}:${att.ref}`}
-                className="inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-[7px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[11.5px] font-mono text-[var(--text-secondary)] animate-fade-in"
-              >
-                <Icon
-                  name={
-                    att.kind === "database"
-                      ? "database"
-                      : att.kind === "task"
-                        ? "inbox"
-                        : "file-text"
-                  }
-                  size={11}
-                  className="text-indigo-500 shrink-0"
-                />
-                <span className="max-w-[200px] truncate">{att.label}</span>
-                <button
-                  type="button"
-                  aria-label={`移除 ${att.label}`}
-                  onClick={() => onToggleAttachment(att)}
-                  className="p-0.5 rounded hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition cursor-pointer"
+            {attachments.map((att) =>
+              att.kind === "image" && projectId ? (
+                <div
+                  key={`${att.kind}:${att.ref}`}
+                  className="relative group inline-flex items-center rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-1 animate-fade-in"
                 >
-                  <Icon name="x" size={11} />
-                </button>
-              </span>
-            ))}
+                  <a
+                    href={`/api/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(att.ref)}&inline=1`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block"
+                  >
+                    <img
+                      src={`/api/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(att.ref)}&inline=1`}
+                      alt={att.label}
+                      className="h-12 w-12 rounded-lg object-cover bg-[var(--surface-card)]"
+                    />
+                  </a>
+                  <button
+                    type="button"
+                    aria-label={`移除 ${att.label}`}
+                    onClick={() => onToggleAttachment(att)}
+                    className="absolute -top-1.5 -right-1.5 h-4 w-4 rounded-full bg-[var(--surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] flex items-center justify-center shadow-xs transition cursor-pointer"
+                  >
+                    <Icon name="x" size={10} />
+                  </button>
+                </div>
+              ) : (
+                <span
+                  key={`${att.kind}:${att.ref}`}
+                  className="inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-[7px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[11.5px] font-mono text-[var(--text-secondary)] animate-fade-in"
+                >
+                  <Icon
+                    name={
+                      att.kind === "database"
+                        ? "database"
+                        : att.kind === "task"
+                          ? "inbox"
+                          : "file-text"
+                    }
+                    size={11}
+                    className="text-indigo-500 shrink-0"
+                  />
+                  <span className="max-w-[200px] truncate">{att.label}</span>
+                  <button
+                    type="button"
+                    aria-label={`移除 ${att.label}`}
+                    onClick={() => onToggleAttachment(att)}
+                    className="p-0.5 rounded hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition cursor-pointer"
+                  >
+                    <Icon name="x" size={11} />
+                  </button>
+                </span>
+              ),
+            )}
           </div>
         )}
 
@@ -1668,12 +1757,49 @@ export function PromptBar({
           onChange={handleChange}
           onSubmit={handleSubmitFromEditor}
           onInterceptKeyDown={handleInterceptKeyDown}
-          placeholder={`向 ${runtime === "codex" ? "Codex" : "Claude"} 提问，支持 \`代码\` / \`\`\` 代码块、@ 引用、/ 快捷指令…`}
+          onPasteImages={onUploadImages}
+          placeholder={`向 ${runtime === "codex" ? "Codex" : "Claude"} 提问，支持粘贴/拖入图片、\`代码\`、@ 引用、/ 快捷指令…`}
         />
 
         {/* Inner Bottom Action Pill Bar */}
         <div className="px-2.5 pb-2 pt-0.5 flex items-center justify-between gap-2">
           <div className="flex items-center gap-1 min-w-0 flex-1">
+            {onUploadImages && (
+              <>
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files ?? []);
+                    e.target.value = "";
+                    if (files.length > 0) onUploadImages(files);
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={streaming || uploadingImages}
+                  onClick={() => imageInputRef.current?.click()}
+                  title="上传图片（也支持粘贴或拖入）"
+                  aria-label="上传图片"
+                  className={cn(
+                    "inline-flex items-center gap-1 h-7 px-2 rounded-lg text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
+                    hasImageAttachment
+                      ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
+                      : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
+                  )}
+                >
+                  <Icon
+                    name={uploadingImages ? "loader-2" : "image"}
+                    size={13}
+                    className={uploadingImages ? "animate-spin" : ""}
+                  />
+                  <span className="hidden sm:inline">{uploadingImages ? "上传中" : "图片"}</span>
+                </button>
+              </>
+            )}
             {/* @ Mention Button */}
             <button
               type="button"

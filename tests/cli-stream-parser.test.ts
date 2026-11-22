@@ -175,4 +175,118 @@ describe("shared CLI stream parser", () => {
     const url = `postgres://reader:${password}@db.example/project`;
     expect(redactSecrets(`${url} ${password}`, [password, url])).toBe("[redacted] [redacted]");
   });
+
+  it("extracts base64 images from Claude tool_result and Codex mcp_tool_call via onImage", () => {
+    const claudeEvents: ChatStreamEvent[] = [];
+    const claudeParser = createCliStreamParser(
+      "claude",
+      [],
+      (ev) => claudeEvents.push(ev),
+      (img) => ({ url: `/api/projects/p1/workspace/file?path=_chat_images/${img.toolName}.png&inline=1`, alt: img.mime }),
+    );
+    claudeParser.write(
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "t1", name: "mcp__browser__screenshot", input: {} }] },
+      }) + "\n",
+    );
+    claudeParser.write(
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: [
+                { type: "text", text: "Captured" },
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+              ],
+            },
+          ],
+        },
+      }) + "\n",
+    );
+    expect(claudeParser.state.toolEvents.get("t1")).toMatchObject({
+      status: "done",
+      output: "Captured",
+      images: [{ url: "/api/projects/p1/workspace/file?path=_chat_images/mcp__browser__screenshot.png&inline=1", alt: "image/png" }],
+    });
+
+    const codexParser = createCliStreamParser(
+      "codex",
+      [],
+      () => undefined,
+      (img) => ({ url: `/api/projects/p1/workspace/file?path=_chat_images/${img.toolName}.jpg&inline=1`, alt: img.mime }),
+    );
+    codexParser.write(
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "m1",
+          type: "mcp_tool_call",
+          server: "browser",
+          tool: "shot",
+          result: {
+            content: [{ type: "image", mimeType: "image/jpeg", data: "/9j/4AAQ" }],
+          },
+        },
+      }) + "\n",
+    );
+    expect(codexParser.state.toolEvents.get("m1")).toMatchObject({
+      status: "done",
+      images: [{ url: "/api/projects/p1/workspace/file?path=_chat_images/browser.shot.jpg&inline=1", alt: "image/jpeg" }],
+    });
+  });
+
+  it("passes --image flags to Codex and enables Agent tool for Claude workspace-write", () => {
+    const codexFresh = buildCliInvocation({
+      dbPath: ":memory:",
+      runtime: "codex",
+      bin: "codex",
+      model: "gpt-5.4",
+      sandboxMode: "read-only",
+      networkAccess: false,
+      workspaceDir: "/tmp/ws",
+      reposDir: null,
+      imagePaths: ["/tmp/ws/files/_chat_images/a.png"],
+      resumeSessionId: "",
+      projectSettings: null,
+    });
+    expect(codexFresh.args).toContain("--image");
+    expect(codexFresh.args).toContain("/tmp/ws/files/_chat_images/a.png");
+
+    const codexResume = buildCliInvocation({
+      dbPath: ":memory:",
+      runtime: "codex",
+      bin: "codex",
+      model: "gpt-5.4",
+      sandboxMode: "read-only",
+      networkAccess: false,
+      workspaceDir: "/tmp/ws",
+      reposDir: null,
+      imagePaths: ["/tmp/ws/files/_chat_images/b.png"],
+      resumeSessionId: "thread-9",
+      projectSettings: null,
+    });
+    expect(codexResume.args).toContain("--image");
+    expect(codexResume.args).toContain("/tmp/ws/files/_chat_images/b.png");
+
+    const claudeWrite = buildCliInvocation({
+      dbPath: ":memory:",
+      runtime: "claude",
+      bin: "claude",
+      model: "",
+      sandboxMode: "workspace-write",
+      networkAccess: false,
+      workspaceDir: "/tmp/ws",
+      reposDir: null,
+      resumeSessionId: "",
+      projectSettings: null,
+      claudeSupportsEffort: false,
+    });
+    const toolsIdx = claudeWrite.args.indexOf("--tools");
+    expect(toolsIdx).toBeGreaterThan(-1);
+    expect(claudeWrite.args[toolsIdx + 1]).toContain("Agent");
+  });
 });

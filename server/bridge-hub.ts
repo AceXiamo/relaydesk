@@ -23,6 +23,7 @@ export interface BridgeChatStart {
   prompt: string;
   system_context: string;
   workspace_manifest: ReturnType<typeof buildWorkspaceManifest>;
+  image_paths?: string[];
   datasource_env?: Record<string, string>;
   pg_read_only_enforced?: boolean;
 }
@@ -66,8 +67,10 @@ const catalog = z.object({
 });
 const frame = z.object({ type: text(64), id: text(128).min(1).optional(), payload: z.record(z.string(), z.unknown()) });
 type Payload = z.infer<typeof frame>["payload"];
+const toolImage = z.object({ url: text(2048), alt: text(256).optional() });
 const tool = z.object({ id: text(256), tool: text(128), summary: text(4096), status: z.enum(["running", "done", "error"]),
-  output: text(32_768).optional(), exit_code: z.number().int().nullable().optional() });
+  output: text(32_768).optional(), exit_code: z.number().int().nullable().optional(),
+  images: z.array(toolImage).max(4).optional() });
 const intermediate = z.discriminatedUnion("type", [
   z.object({ type: z.literal("tool"), event: tool }),
   z.object({ type: z.literal("status"), message: text(4096), external_session_id: text(512).optional() }),

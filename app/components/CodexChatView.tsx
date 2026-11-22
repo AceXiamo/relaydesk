@@ -194,6 +194,7 @@ export function CodexChatView({
   // Composer state
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ChatContextRef[]>([]);
+  const [uploadingImages, setUploadingImages] = useState(false);
   const [draftRuntime, setDraftRuntime] = useState<ChatRuntime | null>(null);
   const [draftModel, setDraftModel] = useState("");
   const [draftEffort, setDraftEffort] = useState<ChatReasoningEffort>("default");
@@ -540,10 +541,62 @@ export function CodexChatView({
     }
   };
 
+  const handleUploadImages = async (files: File[]) => {
+    if (!projectId || streaming || uploadingImages || files.length === 0) return;
+    const MIME_EXT: Record<string, string> = {
+      "image/png": "png",
+      "image/jpeg": "jpg",
+      "image/jpg": "jpg",
+      "image/webp": "webp",
+      "image/gif": "gif",
+      "image/avif": "avif",
+    };
+    const remainingSlots = Math.max(0, 8 - attachments.length);
+    if (remainingSlots === 0) {
+      toast.error("单条消息最多附带 8 个引用/图片");
+      return;
+    }
+    const candidates = files.slice(0, remainingSlots);
+    setUploadingImages(true);
+    try {
+      const uploaded: ChatContextRef[] = [];
+      for (const file of candidates) {
+        const mime = file.type.toLowerCase();
+        const ext = MIME_EXT[mime];
+        if (!ext) {
+          toast.error(`不支持的图片格式：${file.name || mime || "未知"}`);
+          continue;
+        }
+        if (file.size > 10 * 1024 * 1024) {
+          toast.error(`图片过大（上限 10MB）：${file.name}`);
+          continue;
+        }
+        const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const relPath = `_chat_images/${unique}.${ext}`;
+        await api.uploadWorkspaceFile(projectId, relPath, file);
+        uploaded.push({
+          kind: "image",
+          label: file.name || `image.${ext}`,
+          ref: relPath,
+          mime,
+        });
+      }
+      if (uploaded.length > 0) {
+        setAttachments((prev) => [...prev, ...uploaded].slice(0, 8));
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "上传图片失败");
+    } finally {
+      setUploadingImages(false);
+    }
+  };
+
   const handleSend = async (promptOverride?: string, attachmentsOverride?: ChatContextRef[]) => {
-    if (!projectId || streaming || settingsBusy) return;
-    const text = (promptOverride ?? input).trim();
-    if (!text) return;
+    if (!projectId || streaming || settingsBusy || uploadingImages) return;
+    const rawText = (promptOverride ?? input).trim();
+    const currentAttachments = attachmentsOverride ?? [...attachments];
+    if (!rawText && !currentAttachments.some((att) => att.kind === "image")) return;
+    const text = rawText || "请查看附带的图片";
 
     let session = activeSession;
     if (!session) {
@@ -551,7 +604,6 @@ export function CodexChatView({
       if (!session) return;
     }
 
-    const currentAttachments = attachmentsOverride ?? [...attachments];
     if (!promptOverride) {
       setInput("");
       setAttachments([]);
@@ -1209,32 +1261,64 @@ export function CodexChatView({
                             hasBlockMarkdown ? "max-w-[88%] min-w-0" : "max-w-[82%] min-w-0"
                           }`}
                         >
-                          {msg.attachments.length > 0 && (
-                            <div className="flex flex-wrap justify-end gap-1.5">
-                              {msg.attachments.map((att) => (
-                                <span
-                                  key={`${att.kind}:${att.ref}`}
-                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[6px] border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[11px] font-mono text-[var(--text-secondary)]"
-                                >
-                                  <Icon
-                                    name={
-                                      att.kind === "database"
-                                        ? "database"
-                                        : att.kind === "task"
-                                          ? "inbox"
-                                          : "file-text"
-                                    }
-                                    size={11}
-                                    className="text-indigo-500"
-                                  />
-                                  <span className="max-w-[220px] truncate">{att.label}</span>
-                                </span>
-                              ))}
-                            </div>
-                          )}
+                          {msg.attachments.length > 0 && (() => {
+                            const imageAtts = msg.attachments.filter((att) => att.kind === "image");
+                            const refAtts = msg.attachments.filter((att) => att.kind !== "image");
+                            return (
+                              <div className="flex flex-col items-end gap-1.5">
+                                {imageAtts.length > 0 && (
+                                  <div className="flex flex-wrap justify-end gap-1.5">
+                                    {imageAtts.map((att) => {
+                                      const imgUrl = `/api/projects/${encodeURIComponent(project.id)}/workspace/file?path=${encodeURIComponent(att.ref)}&inline=1`;
+                                      return (
+                                        <a
+                                          key={`${att.kind}:${att.ref}`}
+                                          href={imgUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="block group"
+                                        >
+                                          <img
+                                            src={imgUrl}
+                                            alt={att.label}
+                                            loading="lazy"
+                                            className="max-h-52 w-auto max-w-[260px] rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] object-contain shadow-2xs group-hover:border-indigo-500/50 transition-colors"
+                                          />
+                                        </a>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                                {refAtts.length > 0 && (
+                                  <div className="flex flex-wrap justify-end gap-1.5">
+                                    {refAtts.map((att) => (
+                                      <span
+                                        key={`${att.kind}:${att.ref}`}
+                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[6px] border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[11px] font-mono text-[var(--text-secondary)]"
+                                      >
+                                        <Icon
+                                          name={
+                                            att.kind === "database"
+                                              ? "database"
+                                              : att.kind === "task"
+                                                ? "inbox"
+                                                : "file-text"
+                                          }
+                                          size={11}
+                                          className="text-indigo-500"
+                                        />
+                                        <span className="max-w-[220px] truncate">{att.label}</span>
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
                           <div className="w-full rounded-2xl rounded-br-md border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-4 py-2.5 text-[13.5px] leading-[1.6] text-[var(--text-primary)] shadow-[var(--rd-shadow-sm)] overflow-hidden">
                             <MarkdownContent
                               content={msg.content}
+                              projectId={project.id}
                               compact
                               preserveLineBreaks
                               className="text-[13.5px]"
@@ -1319,7 +1403,7 @@ export function CodexChatView({
                               : "text-[14px] leading-[1.7] text-[var(--text-primary)]"
                           }
                         >
-                          <MarkdownContent content={visibleContent} />
+                          <MarkdownContent content={visibleContent} projectId={project.id} />
                           {isStreamingMsg && (
                             <span
                               aria-hidden="true"
@@ -1457,6 +1541,8 @@ export function CodexChatView({
               onInputChange={setInput}
               attachments={attachments}
               onToggleAttachment={toggleAttachment}
+              onUploadImages={(files) => void handleUploadImages(files)}
+              uploadingImages={uploadingImages}
               workspaceFiles={workspaceFiles}
               workspaceDatabases={workspaceDatabases}
               openTasks={openTasks}

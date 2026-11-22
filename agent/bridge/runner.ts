@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, constants, existsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, resolve, sep } from "node:path";
 import { buildCliInvocation, createCliStreamParser, redactSecrets } from "../../server/cli-stream-parser.ts";
 import type { RunChatTurnResult } from "../../server/codex-chat.ts";
 import {
@@ -28,6 +28,7 @@ export interface ChatStart {
   prompt: string;
   system_context?: string;
   workspace_manifest: SpaceManifest;
+  image_paths?: string[];
   datasource_env?: Record<string, unknown>;
   pg_read_only_enforced?: boolean;
 }
@@ -69,6 +70,21 @@ export function checkChat(p: ChatStart) {
     throw new Error("Invalid model ID");
   if (p.reasoning_effort && !["default", "off", "low", "medium", "high", "max"].includes(p.reasoning_effort))
     throw new Error("Invalid reasoning effort");
+  if (p.image_paths !== undefined) {
+    if (!Array.isArray(p.image_paths) || p.image_paths.length > 8) throw new Error("Invalid image paths");
+    for (const rel of p.image_paths) {
+      if (
+        typeof rel !== "string" ||
+        !rel ||
+        rel.length > 240 ||
+        rel.startsWith("/") ||
+        rel.includes("..") ||
+        /[\\:\x00-\x1f\x7f]/.test(rel)
+      ) {
+        throw new Error("Invalid image path");
+      }
+    }
+  }
 }
 const VALID_DB_KINDS = new Set<WorkspaceDatabaseKind>(["sqlite", "postgres", "mysql", "redis", "mongodb", "other"]);
 
@@ -174,6 +190,14 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     }
   }
   try {
+  const spaceFilesRoot = resolve(join(o.spaceDir, "files"));
+  const resolvedImagePaths: string[] = [];
+  for (const rel of p.image_paths ?? []) {
+    const abs = resolve(spaceFilesRoot, rel);
+    if ((abs === spaceFilesRoot || abs.startsWith(spaceFilesRoot + sep)) && existsSync(abs)) {
+      resolvedImagePaths.push(abs);
+    }
+  }
   const { args, env } = buildCliInvocation({
     dbPath: ":memory:",
     runtime,
@@ -186,6 +210,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     // Fresh turns mount the shadow dir; Claude also accepts --add-dir on resume.
     reposDir: runtime === "claude" && p.resume_session_id ? o.spaceDir : null,
     extraAddDirs: [o.spaceDir],
+    imagePaths: resolvedImagePaths,
     resumeSessionId: p.resume_session_id || "",
     projectSettings: null,
     ...(mcpHandle
@@ -263,13 +288,46 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     );
     sentText = next;
   }
-  const parser = createCliStreamParser(runtime, [], (ev) => {
-    if (ev.type === "text_delta" || ev.type === "text_replace") {
-      rawText = (ev.type === "text_delta" ? rawText + ev.delta : ev.text).slice(0, 120_000);
-      emitText();
-    } else if (ev.type === "reasoning") o.onEvent({ type: "reasoning", text: safeText(ev.text) });
-    else o.onEvent(redactObject(ev));
-  });
+  const IMAGE_MIME_EXT: Record<string, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "image/avif": "avif",
+  };
+  let savedToolImages = 0;
+  const saveToolImage = write
+    ? (img: { mime: string; data: string; toolName?: string }) => {
+        if (savedToolImages >= 12) return null;
+        const ext = IMAGE_MIME_EXT[img.mime.toLowerCase()];
+        if (!ext) return null;
+        const buf = Buffer.from(img.data, "base64");
+        if (!buf.length || buf.length > 10 * 1024 * 1024) return null;
+        const imgDir = join(spaceFilesRoot, "_chat_images");
+        mkdirSync(imgDir, { recursive: true, mode: 0o700 });
+        const filename = `tool-${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`;
+        const relPath = `_chat_images/${filename}`;
+        writeFileSync(join(imgDir, filename), buf, { mode: 0o600, flag: "wx" });
+        savedToolImages += 1;
+        return {
+          url: `/api/projects/${encodeURIComponent(p.project_id)}/workspace/file?path=${encodeURIComponent(relPath)}&inline=1`,
+          alt: img.toolName ? `${img.toolName} image` : filename,
+        };
+      }
+    : undefined;
+  const parser = createCliStreamParser(
+    runtime,
+    [],
+    (ev) => {
+      if (ev.type === "text_delta" || ev.type === "text_replace") {
+        rawText = (ev.type === "text_delta" ? rawText + ev.delta : ev.text).slice(0, 120_000);
+        emitText();
+      } else if (ev.type === "reasoning") o.onEvent({ type: "reasoning", text: safeText(ev.text) });
+      else o.onEvent(redactObject(ev));
+    },
+    saveToolImage,
+  );
   const child = spawn(bin, args, { cwd: o.cwd, env, detached: true, stdio: "pipe" });
   const pid = child.pid;
   function signalGroup(sig: NodeJS.Signals | 0) {
@@ -307,7 +365,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     bytes = 0,
     overflow = false;
   child.stdout.setEncoding("utf8").on("data", (s: string) => {
-    if ((bytes += Buffer.byteLength(s)) <= 8 * 1024 * 1024) parser.write(s);
+    if ((bytes += Buffer.byteLength(s)) <= 32 * 1024 * 1024) parser.write(s);
     else {
       overflow = true;
       abort();

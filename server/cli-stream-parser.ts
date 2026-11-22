@@ -1,7 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import type { ChatReasoningEffort, ChatRuntime, ChatSandboxMode, ChatStreamEvent, ChatToolEvent } from "../app/lib/types.ts";
+import type {
+  ChatReasoningEffort,
+  ChatRuntime,
+  ChatSandboxMode,
+  ChatStreamEvent,
+  ChatToolEvent,
+  ChatToolImage,
+} from "../app/lib/types.ts";
 import type { readProjectCliSettings } from "./project-cli-config.ts";
 
 const MAX_OUTPUT_CHARS = 120_000;
@@ -78,6 +85,7 @@ export function buildCliInvocation(params: {
   model: string;
   reasoningEffort?: ChatReasoningEffort;
   extraAddDirs?: string[];
+  imagePaths?: string[];
   claudeSupportsEffort?: boolean;
   sandboxMode: ChatSandboxMode;
   networkAccess: boolean;
@@ -195,6 +203,12 @@ export function buildCliInvocation(params: {
 
     // Codex only honors sandbox_workspace_write.network_access under workspace-write sandbox.
     const effectiveCodexSandbox: ChatSandboxMode = networkAccess ? "workspace-write" : sandboxMode;
+    const imageArgs: string[] = [];
+    for (const imgPath of params.imagePaths ?? []) {
+      if (typeof imgPath === "string" && imgPath && !imgPath.startsWith("-")) {
+        imageArgs.push("--image", imgPath);
+      }
+    }
 
     if (resumeSessionId) {
       const args = [
@@ -206,6 +220,7 @@ export function buildCliInvocation(params: {
         `sandbox_mode=${JSON.stringify(effectiveCodexSandbox)}`,
         ...(useProjectKey ? ["--ignore-user-config"] : []),
         ...overrides,
+        ...imageArgs,
         resumeSessionId,
         "-",
       ];
@@ -225,6 +240,7 @@ export function buildCliInvocation(params: {
       ...addDirArgs,
       ...(useProjectKey ? ["--ignore-user-config"] : []),
       ...overrides,
+      ...imageArgs,
       "-",
     ];
     return { args, env, secrets };
@@ -252,7 +268,7 @@ export function buildCliInvocation(params: {
   }
   const tools =
     sandboxMode === "workspace-write"
-      ? "Read,Grep,Glob,Bash,Edit,Write"
+      ? "Read,Grep,Glob,Bash,Edit,Write,Agent"
       : "Read,Grep,Glob,Bash";
   const allowedTools = params.mcp?.claudeConfigPath ? `${tools},mcp__relaydesk__*` : tools;
   const args = [
@@ -284,6 +300,13 @@ export interface StreamParseState {
   errorMessage: string;
 }
 
+export type CliStreamImageHandler = (img: {
+  mime: string;
+  data: string;
+  toolUseId?: string;
+  toolName?: string;
+}) => ChatToolImage | null;
+
 function upsertToolEvent(
   state: StreamParseState,
   event: ChatToolEvent,
@@ -296,10 +319,63 @@ function upsertToolEvent(
         ...event,
         summary: event.summary || prev.summary,
         output: event.output ?? prev.output,
+        images: event.images?.length ? event.images : prev.images,
       }
     : event;
   state.toolEvents.set(merged.id, merged);
   emit({ type: "tool", event: merged });
+}
+
+function extractImagesFromContentArray(content: unknown): Array<{ mime: string; data: string }> {
+  if (!Array.isArray(content)) return [];
+  const out: Array<{ mime: string; data: string }> = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    const p = part as Record<string, unknown>;
+    if (p.type !== "image") continue;
+    // Anthropic tool_result image block: { type: "image", source: { type: "base64", media_type, data } }
+    if (p.source && typeof p.source === "object") {
+      const src = p.source as Record<string, unknown>;
+      if (src.type === "base64" && typeof src.data === "string" && src.data.length > 0) {
+        const mime = typeof src.media_type === "string" && src.media_type ? src.media_type : "image/png";
+        out.push({ mime, data: src.data });
+        if (out.length >= 4) break;
+        continue;
+      }
+    }
+    // MCP tool result image block: { type: "image", mimeType, data }
+    if (typeof p.data === "string" && p.data.length > 0) {
+      const mime =
+        typeof p.mimeType === "string" && p.mimeType
+          ? p.mimeType
+          : typeof p.mime_type === "string" && p.mime_type
+            ? p.mime_type
+            : "image/png";
+      out.push({ mime, data: p.data });
+      if (out.length >= 4) break;
+    }
+  }
+  return out;
+}
+
+function collectToolImages(
+  content: unknown,
+  onImage: CliStreamImageHandler | undefined,
+  meta: { toolUseId?: string; toolName?: string },
+): ChatToolImage[] | undefined {
+  if (!onImage) return undefined;
+  const raw = extractImagesFromContentArray(content);
+  if (!raw.length) return undefined;
+  const saved: ChatToolImage[] = [];
+  for (const item of raw) {
+    try {
+      const res = onImage({ ...item, ...meta });
+      if (res && res.url) saved.push(res);
+    } catch {
+      // Ignore malformed/oversized tool image blocks without failing the stream.
+    }
+  }
+  return saved.length ? saved : undefined;
 }
 
 function extractTextFromContentArray(content: unknown): string {
@@ -324,6 +400,7 @@ export function handleCodexJsonLine(
   state: StreamParseState,
   secrets: string[],
   emit: (ev: ChatStreamEvent) => void,
+  onImage?: CliStreamImageHandler,
 ) {
   const type = String(obj.type ?? "");
 
@@ -450,6 +527,10 @@ export function handleCodexJsonLine(
               : typeof item.output === "string"
                 ? item.output
                 : undefined;
+      const toolImages =
+        resultObj && Array.isArray(resultObj.content)
+          ? collectToolImages(resultObj.content, onImage, { toolUseId: itemId, toolName: `${serverName}${toolName}` })
+          : undefined;
       upsertToolEvent(
         state,
         {
@@ -458,6 +539,7 @@ export function handleCodexJsonLine(
           summary,
           status: type === "item.completed" ? (item.error ? "error" : "done") : "running",
           output: rawOut !== undefined ? redactSecrets(rawOut, secrets).slice(0, MAX_TOOL_OUTPUT_CHARS) : undefined,
+          ...(toolImages ? { images: toolImages } : {}),
         },
         emit,
       );
@@ -518,6 +600,7 @@ export function handleClaudeJsonLine(
   state: StreamParseState,
   secrets: string[],
   emit: (ev: ChatStreamEvent) => void,
+  onImage?: CliStreamImageHandler,
 ) {
   const type = String(obj.type ?? "");
   if (typeof obj.session_id === "string" && obj.session_id && !state.externalSessionId) {
@@ -563,8 +646,15 @@ export function handleClaudeJsonLine(
           const id = String(b.id ?? `tool-${state.toolEvents.size + 1}`);
           const name = String(b.name ?? "tool");
           const input = b.input && typeof b.input === "object" ? (b.input as Record<string, unknown>) : {};
+          const agentLabel =
+            name === "Agent" && typeof input.subagent_type === "string" && input.subagent_type.trim()
+              ? `[${input.subagent_type.trim()}]${typeof input.description === "string" && input.description.trim() ? ` ${input.description.trim()}` : ""}`
+              : typeof input.description === "string" && input.description.trim()
+                ? input.description.trim()
+                : "";
           const detail =
-            typeof input.command === "string"
+            agentLabel ||
+            (typeof input.command === "string"
               ? input.command
               : typeof input.query === "string"
                 ? input.query
@@ -580,7 +670,7 @@ export function handleClaudeJsonLine(
                           ? input.path
                           : typeof input.pattern === "string"
                             ? input.pattern
-                            : name;
+                            : name);
           upsertToolEvent(
             state,
             { id, tool: name, summary: `${name}: ${redactSecrets(detail, secrets).slice(0, 220)}`, status: "running" },
@@ -608,12 +698,17 @@ export function handleClaudeJsonLine(
           const existing = state.toolEvents.get(b.tool_use_id);
           if (existing) {
             const rawOut = extractTextFromContentArray(b.content);
+            const toolImages = collectToolImages(b.content, onImage, {
+              toolUseId: b.tool_use_id,
+              toolName: existing.tool,
+            });
             upsertToolEvent(
               state,
               {
                 ...existing,
                 status: b.is_error ? "error" : "done",
                 output: rawOut ? redactSecrets(rawOut, secrets).slice(0, MAX_TOOL_OUTPUT_CHARS) : existing.output,
+                ...(toolImages ? { images: toolImages } : {}),
               },
               emit,
             );
@@ -645,6 +740,7 @@ export function createCliStreamParser(
   runtime: ChatRuntime,
   secrets: string[],
   onEvent: (event: ChatStreamEvent) => void,
+  onImage?: CliStreamImageHandler,
 ) {
   const state: StreamParseState = {
     externalSessionId: "",
@@ -661,9 +757,9 @@ export function createCliStreamParser(
       const parsed = JSON.parse(line) as unknown;
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         if (runtime === "codex") {
-          handleCodexJsonLine(parsed as Record<string, unknown>, state, secrets, onEvent);
+          handleCodexJsonLine(parsed as Record<string, unknown>, state, secrets, onEvent, onImage);
         } else {
-          handleClaudeJsonLine(parsed as Record<string, unknown>, state, secrets, onEvent);
+          handleClaudeJsonLine(parsed as Record<string, unknown>, state, secrets, onEvent, onImage);
         }
         return;
       }
