@@ -6,7 +6,7 @@ import type {
   ProjectRoutingConfig,
 } from "~/lib/types.ts";
 import { Icon } from "./Icon.tsx";
-import { Button, LivePulseDot, useToast } from "./ui.tsx";
+import { Button, LivePulseDot, Select, useToast } from "./ui.tsx";
 
 interface ProjectRoutingCardProps {
   projectId: string;
@@ -54,6 +54,7 @@ export function ProjectRoutingCard({
   onOpenGlobalAgents,
 }: ProjectRoutingCardProps) {
   const toast = useToast();
+  const [modelDraft, setModelDraft] = useState<string | null>(null);
   const [routing, setRouting] = useState<ProjectRoutingConfig | null>(null);
   const [effectivePriority, setEffectivePriority] = useState<string[]>([]);
   const [agents, setAgents] = useState<BridgeAgentSummary[]>([]);
@@ -92,6 +93,7 @@ export function ProjectRoutingCard({
   useEffect(() => {
     setLoading(true);
     setWorkdirDrafts({});
+    setModelDraft(null);
     void load();
     const timer = window.setInterval(() => {
       if (!document.hidden) void load();
@@ -106,13 +108,14 @@ export function ProjectRoutingCard({
   const getBinding = (agent: BridgeAgentSummary): BridgeAgentBindingSummary | undefined =>
     agent.bindings.find((b) => b.project_id === projectId);
 
-  const saveRouting = async (patch: Partial<ProjectRoutingConfig>, successMessage?: string) => {
+  const saveRouting = async (patch: Parameters<typeof api.updateProjectExecutionRouting>[1], successMessage?: string) => {
     setSavingRouting(true);
     try {
       const res = await api.updateProjectExecutionRouting(projectId, patch);
       setRouting(res.routing);
       setEffectivePriority(res.effective_priority);
       setAgents(res.agents);
+      if (patch.task_model !== undefined) setModelDraft(null);
       if (successMessage) toast.success(successMessage);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "更新执行路由失败");
@@ -327,6 +330,39 @@ export function ProjectRoutingCard({
               </div>
             </div>
           )}
+
+          {routing && <section className="space-y-3 p-5">
+            <h3 className="text-[13px] font-semibold">任务自动直派（事件驱动）</h3>
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <p className="text-[12.5px] font-medium">新任务创建即自动分配 Local Agent</p>
+                <p className="max-w-3xl text-xs leading-relaxed text-[var(--text-muted)]">开启后，来自控制台、Widget 和 Bot 的新任务会立即交给优先级最高的在线本机节点，在共享目录中处理，跳过定时 Loop。本机离线或忙碌时自动排队，执行失败或中断时转为待人工，可在任务会话中插话继续。</p>
+              </div>
+              <ToggleSwitch checked={Boolean(routing.auto_dispatch_tasks)} disabled={savingRouting} ariaLabel="新任务创建即自动分配 Local Agent" onChange={next => void saveRouting({ auto_dispatch_tasks: next })} />
+            </div>
+            <div className="grid items-start gap-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40 p-3.5 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="space-y-1.5"><p className="text-xs text-[var(--text-secondary)]">运行时</p>
+                <Select<"default" | "codex" | "claude"> ariaLabel="任务运行时" fullWidth size="sm" value={routing.task_runtime ?? "default"} disabled={savingRouting}
+                  options={[{ value: "default", label: "跟随项目默认" }, { value: "codex", label: "Codex" }, { value: "claude", label: "Claude" }]}
+                  onChange={value => void saveRouting({ task_runtime: value === "default" ? null : value })} />
+              </div>
+              <form onSubmit={e => { e.preventDefault(); if (modelDraft !== null) void saveRouting({ task_model: modelDraft.trim() }, "已保存任务模型"); }}>
+                <label className="block space-y-1.5 text-xs text-[var(--text-secondary)]"><span>模型</span>
+                  <input value={modelDraft ?? routing.task_model ?? ""} onChange={e => setModelDraft(e.target.value)} disabled={savingRouting} placeholder="留空使用节点默认模型" className="h-8 w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] px-2.5 rd-focus-ring" />
+                </label>
+                {modelDraft !== null && modelDraft !== (routing.task_model ?? "") && <Button type="submit" size="xs" variant="secondary" className="mt-1.5" disabled={savingRouting}>保存模型</Button>}
+              </form>
+              <div className="space-y-1.5"><p className="text-xs text-[var(--text-secondary)]">推理强度</p>
+                <Select ariaLabel="任务推理强度" fullWidth size="sm" disabled={savingRouting} value={routing.task_reasoning_effort ?? "default"}
+                  options={([ ["default", "默认"], ["off", "关闭"], ["low", "低"], ["medium", "中"], ["high", "高"], ["max", "最高"] ] as const).map(([value, label]) => ({ value, label }))}
+                  onChange={value => void saveRouting({ task_reasoning_effort: value })} />
+              </div>
+              <div className="flex items-center justify-between gap-3 border-t border-[var(--border-subtle)] pt-3 text-xs sm:col-span-2 lg:col-span-3">
+                <span>允许联网（git push / 装包 / gh pr）</span>
+                <ToggleSwitch checked={routing.task_network_access ?? true} disabled={savingRouting} ariaLabel="允许任务联网" onChange={next => void saveRouting({ task_network_access: next })} />
+              </div>
+            </div>
+          </section>}
 
           {/* 3. Per-Agent Workdir Binding & Permissions */}
           <div className="p-5 space-y-3">

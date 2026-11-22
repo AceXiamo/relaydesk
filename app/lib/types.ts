@@ -100,6 +100,9 @@ export interface TaskRecord {
   message_count?: number;
   merged_count?: number;
   linked_feedback?: TaskRecord[];
+  agent_session_id?: string | null;
+  agent_session_status?: "idle" | "running" | "error" | null;
+  agent_session_target?: string | null;
 }
 
 export interface TaskMessage {
@@ -487,6 +490,11 @@ export interface ProjectRoutingConfig {
   priority: string[];
   auto_fallback: boolean;
   route_cli_runs: boolean;
+  auto_dispatch_tasks: boolean;
+  task_runtime?: ChatRuntime;
+  task_model?: string;
+  task_reasoning_effort?: ChatReasoningEffort;
+  task_network_access: boolean;
 }
 
 export interface ProjectExecutionRoutingResponse {
@@ -518,9 +526,13 @@ export interface ChatToolEvent {
   images?: ChatToolImage[];
 }
 
+export type ChatSessionKind = "chat" | "task";
+
 export interface ChatSessionRecord {
   id: string;
   project_id: string;
+  kind: ChatSessionKind;
+  task_id: string | null;
   title: string;
   runtime: ChatRuntime;
   model: string;
@@ -594,6 +606,16 @@ export interface UtilityAiTestResult {
 
 export type ChatStreamEvent =
   | { type: "session"; session: ChatSessionRecord; user_message: ChatMessageRecord; assistant_message_id: string }
+  | {
+      type: "snapshot";
+      run_id: string;
+      session: ChatSessionRecord;
+      user_message: ChatMessageRecord;
+      assistant_message: ChatMessageRecord;
+      status_line: string;
+      reasoning: string;
+      started_at: number;
+    }
   | { type: "session_updated"; session: ChatSessionRecord }
   | { type: "task_updated"; task_id?: string; action: string }
   | { type: "status"; message: string; external_session_id?: string }

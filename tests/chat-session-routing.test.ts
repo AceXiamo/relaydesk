@@ -41,7 +41,13 @@ describe("chat session routing storage", () => {
 
     store = new Store(path);
     expect(store.getProjectRow("p").execution_routing_json).toBe("{}");
-    expect(store.getProjectExecutionRouting("p")).toEqual({ priority: [], auto_fallback: true, route_cli_runs: true });
+    expect(store.getProjectExecutionRouting("p")).toEqual({
+      priority: [],
+      auto_fallback: true,
+      route_cli_runs: true,
+      auto_dispatch_tasks: false,
+      task_network_access: true,
+    });
     expect(store.getChatSession("p", "resumed")).toMatchObject({
       model: "custom/old", execution_target: "auto", resolved_target: "cloud",
       reasoning_effort: "default", external_session_id: "old-thread", updated_at: "t",
@@ -57,7 +63,11 @@ describe("chat session routing storage", () => {
     expect(store.getChatSession("p", "resumed")).toEqual(changed);
     expect(store.getChatSession("p", "empty").resolved_target).toBe("");
     expect(store.getProjectExecutionRouting("p")).toEqual({
-      priority: ["local:desktop", "cloud"], auto_fallback: false, route_cli_runs: false,
+      priority: ["local:desktop", "cloud"],
+      auto_fallback: false,
+      route_cli_runs: false,
+      auto_dispatch_tasks: false,
+      task_network_access: true,
     });
   });
 

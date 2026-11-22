@@ -2,7 +2,8 @@ import type { api } from "./api.ts";
 import type { ChatContextRef, ChatMessageRecord, ChatSessionRecord, ChatStreamEvent } from "./types.ts";
 import type { TraceEntry } from "../components/agent-chat/AgentPrimitives.tsx";
 
-type Transport = Pick<typeof api, "streamCodexChatMessage" | "abortCodexChatSession" | "getCodexChatSession">;
+type Transport = Pick<typeof api, "streamCodexChatMessage" | "abortCodexChatSession" | "getCodexChatSession">
+  & Partial<Pick<typeof api, "subscribeCodexChatStream">>;
 type StopRequest = "user_stop" | "follow_up";
 
 export interface TurnTrace {
@@ -26,11 +27,14 @@ interface Turn extends MessagePair {
   stopFailed?: boolean;
   statusLine: string;
   running: boolean;
+  saved?: boolean;
 }
 
 interface Run {
   turn: Turn;
   registered: boolean;
+  awaitingPair?: boolean;
+  error?: string;
   retryStop?: () => void;
   queued?: { resolve: () => void; reject: (err: Error) => void };
 }
@@ -48,19 +52,45 @@ export function messagesWithTurn(history: ChatMessageRecord[], turn?: Turn) {
   if (!turn) return history;
   const overlay = [...turn.previous, turn].flatMap(pair => [pair.user, pair.assistant]);
   if (turn.pending) overlay.push(turn.pending);
-  const ids = new Set(overlay.map(m => m.id));
-  return [...history.filter(m => !ids.has(m.id)), ...overlay];
+  const pending = new Map(overlay.map(message => [message.id, message]));
+  const merged = history.map(message => {
+    const replacement = pending.get(message.id);
+    pending.delete(message.id);
+    return replacement ?? message;
+  });
+  return [...merged, ...pending.values()];
 }
 
 // One instance per project in the console. Views subscribe without owning the fetch.
 export class ProjectChatStreams {
   private selectedId: string | null | undefined;
   private turns = new Map<string, Turn>();
+  private chatTurns = new Map<string, Turn>();
+  private resumeAfterDraft = new Map<string, Awaited<ReturnType<Transport["getCodexChatSession"]>>>();
   private runs = new Map<string, Run>();
   private listeners = new Set<() => void>();
   private taskUpdatedHandler?: (ev: { task_id?: string; action: string }) => void;
 
+  private activityListeners = new Map<string, Set<() => void>>();
+
   constructor(private readonly transport: Transport) {}
+
+  subscribeTaskActivity(taskId: string, listener: () => void) {
+    const listeners = this.activityListeners.get(taskId) ?? new Set();
+    this.activityListeners.set(taskId, listeners);
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size) this.activityListeners.delete(taskId);
+    };
+  }
+
+  private taskActivity(task_id: string | undefined, action: string) {
+    const listeners = task_id && this.activityListeners.get(task_id);
+    if (listeners && listeners.size) {
+      for (const listener of listeners) listener();
+    } else this.taskUpdatedHandler?.({ task_id, action });
+  }
 
   setTaskUpdatedHandler(handler?: (ev: { task_id?: string; action: string }) => void) {
     this.taskUpdatedHandler = handler;
@@ -73,6 +103,7 @@ export class ProjectChatStreams {
     for (const listener of this.listeners) listener();
   };
   snapshot = () => this.turns;
+  chatSnapshot = () => this.chatTurns;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
@@ -80,6 +111,11 @@ export class ProjectChatStreams {
 
   private publish(id: string, turn?: Turn) {
     this.turns = new Map(this.turns);
+    if (turn ? turn.session.kind !== "task" : this.chatTurns.has(id)) {
+      this.chatTurns = new Map(this.chatTurns);
+      if (turn) this.chatTurns.set(id, turn);
+      else this.chatTurns.delete(id);
+    }
     if (turn) this.turns.set(id, turn);
     else this.turns.delete(id);
     for (const listener of this.listeners) listener();
@@ -100,6 +136,11 @@ export class ProjectChatStreams {
     const turn = this.turns.get(id);
     if (turn?.running || !turn?.pending) return;
     this.publish(id, { ...turn, pending: undefined });
+    const latest = this.resumeAfterDraft.get(id);
+    if (latest) {
+      this.resumeAfterDraft.delete(id);
+      this.observe(latest.session, latest.messages);
+    }
     return turn.pending;
   }
 
@@ -152,7 +193,7 @@ export class ProjectChatStreams {
 
   private finish(run: Run, assistant: ChatMessageRecord, session: ChatSessionRecord, saved: boolean) {
     if (!this.current(run)) return;
-    const turn = { ...run.turn, assistant, session, running: false, stopping: undefined, statusLine: "",
+    const turn = { ...run.turn, assistant, session, running: false, saved, stopping: undefined, statusLine: "",
       trace: { ...run.turn.trace, durationMs: Date.now() - run.turn.trace.startedAt } };
     this.runs.delete(session.id);
     run.retryStop?.();
@@ -163,31 +204,85 @@ export class ProjectChatStreams {
       this.publish(session.id, turn);
       run.queued?.reject(new Error("未能确认上一轮已保存，追问未发送"));
     }
+    if (session.task_id) this.taskActivity(session.task_id, "turn_finished");
   }
 
-  // Adopt a run from GET only when the user interacts with it. No session-wide abort fallback.
   observe(session: ChatSessionRecord, history: ChatMessageRecord[]) {
-    if (!session.active_run_id || session.status !== "running" || this.turns.has(session.id)) return;
+    const runId = session.active_run_id;
+    const last = this.turns.get(session.id);
+    if (!runId || session.status !== "running") return;
     const assistant = history.at(-1), user = history.at(-2);
-    if (assistant?.role !== "assistant" || assistant.status !== "streaming" || user?.role !== "user") return;
-    const run: Run = { registered: true, turn: { runId: session.active_run_id, session, user, assistant, previous: [],
-      running: true, statusLine: "正在等待回复完成", trace: { startedAt: Date.parse(assistant.created_at), entries: [] } } };
+    const hasPair = assistant?.role === "assistant" && assistant.status === "streaming" && user?.role === "user";
+    const active = this.runs.get(session.id);
+    if (active?.awaitingPair && active.turn.runId === runId && hasPair) {
+      // A task history GET can arrive after dispatch but before the first stream frame.
+      active.awaitingPair = false;
+      this.update(active, { user, assistant });
+    }
+    if (active || (last?.runId === runId && last.saved) || last?.pending || (!hasPair && !this.transport.subscribeCodexChatStream)) return;
+    // Dispatch returns the run ID before the client has received either message.
+    const initialUser = hasPair ? user : userMessage(session.id, "", []);
+    const initialAssistant: ChatMessageRecord = hasPair ? assistant : {
+      ...initialUser, id: `tmp-a-${runId}`, role: "assistant", status: "streaming",
+    };
+    const run: Run = { registered: true, awaitingPair: !hasPair, turn: {
+      runId, session, user: initialUser, assistant: initialAssistant, previous: [],
+      running: true, statusLine: "正在连接执行会话", trace: { startedAt: Date.parse(initialAssistant.created_at) || Date.now(), entries: [] },
+    } };
     this.runs.set(session.id, run);
     this.publish(session.id, run.turn);
-    void this.waitForHistory(run);
+    void this.follow(run);
+  }
+
+  private async follow(run: Run) {
+    const { session } = run.turn;
+    if (this.transport.subscribeCodexChatStream) {
+      const controller = new AbortController();
+      try {
+        await this.transport.subscribeCodexChatStream(session.project_id, session.id, ev => {
+          if (controller.signal.aborted || !this.current(run)) return;
+          if (ev.type === "snapshot" && ev.run_id !== run.turn.runId) {
+            // Another client started a successor between the history GET and subscription.
+            controller.abort();
+            return;
+          }
+          this.onEvent(run, ev);
+        }, controller.signal);
+      } catch {
+        // Reconcile even if the connection closed before the snapshot arrived.
+      }
+    }
+    if (this.current(run)) await this.waitForHistory(run);
   }
 
   private async waitForHistory(run: Run) {
-    const { session, assistant } = run.turn;
+    const { session } = run.turn;
     try {
       while (this.current(run)) {
         const res = await this.transport.getCodexChatSession(session.project_id, session.id);
-        const saved = res.messages.find(m => m.id === assistant.id && m.status !== "streaming");
+        if (!this.current(run)) return;
+        const candidate = res.messages.at(-1), user = res.messages.at(-2);
+        const knownPair = !run.awaitingPair;
+        if (run.awaitingPair && candidate?.role === "assistant" && user?.role === "user" &&
+            (res.session.active_run_id === run.turn.runId || res.session.status !== "running")) {
+          run.awaitingPair = false;
+          this.update(run, { user, assistant: candidate });
+        }
+        const saved = res.messages.find(m => m.id === run.turn.assistant.id && m.status !== "streaming");
         if (saved && res.session.status !== "running") {
-          this.finish(run, saved, res.session, true);
+          // The history tail is enough to display, but not proof that an unknown/older turn
+          // owns a pending follow-up. Preserve the draft rather than steering its successor.
+          const safeToContinue = !run.queued || (knownPair && candidate?.id === saved.id);
+          this.finish(run, saved, res.session, safeToContinue);
           return true;
         }
-        if (res.session.active_run_id !== run.turn.runId) throw new Error("会话状态已变化，请重新打开对话");
+        if (res.session.active_run_id !== run.turn.runId) {
+          // Never release a queued follow-up into a different active run.
+          if (run.turn.pending) this.resumeAfterDraft.set(session.id, res);
+          this.fail(run, "执行轮次已变化，插话尚未发送");
+          if (!run.turn.pending) this.observe(res.session, res.messages);
+          return;
+        }
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     } catch (err) {
@@ -200,6 +295,67 @@ export class ProjectChatStreams {
     this.finish(run, { ...assistant, status: "error", content: assistant.content || error }, { ...session, status: "error" }, false);
   }
 
+  private onEvent(run: Run, ev: ChatStreamEvent) {
+    if (!this.current(run)) return;
+    const { assistant, trace, session } = run.turn;
+    const update = (patch: Partial<Turn>) => this.update(run, patch);
+    switch (ev.type) {
+      case "snapshot": {
+        if (ev.run_id !== run.turn.runId || ev.session.id !== session.id) return;
+        run.awaitingPair = false;
+        const entries: TraceEntry[] = [];
+        if (ev.reasoning.trim()) entries.push({ id: `reason-${ev.run_id}`, kind: "reasoning", text: ev.reasoning });
+        for (const tool of ev.assistant_message.events) {
+          entries.push({ id: `tool-${tool.id}`, kind: "tool", text: tool.summary || tool.tool });
+        }
+        update({ session: ev.session, user: ev.user_message, assistant: ev.assistant_message,
+          statusLine: ev.status_line, trace: { startedAt: ev.started_at, entries } });
+        break;
+      }
+      case "session": {
+        run.registered = true;
+        update({ session: ev.session, user: ev.user_message, assistant: { ...assistant, id: ev.assistant_message_id } });
+        run.retryStop?.();
+        run.retryStop = undefined;
+        break;
+      }
+      case "session_updated": update({ session: ev.session }); break;
+      case "task_updated": this.taskActivity(ev.task_id ?? session.task_id ?? undefined, ev.action); break;
+      case "reasoning":
+      case "status": {
+        const kind = ev.type;
+        const text = ev.type === "status" ? ev.message.trim() : ev.text;
+        if (!text) break;
+        const entries = [...trace.entries];
+        const last = entries.at(-1);
+        if (kind === "reasoning" && last?.kind === kind) entries[entries.length - 1] = { ...last, text: last.text + text };
+        else if (kind !== "status" || last?.kind !== kind || last.text !== text) {
+          entries.push({ id: `tr-${trace.startedAt}-${entries.length}`, kind, text: text.trimStart() });
+        }
+        update({ statusLine: kind === "status" ? text : "正在深度推理", trace: { ...trace, entries } });
+        break;
+      }
+      case "tool": {
+        const events = assistant.events.some(e => e.id === ev.event.id)
+          ? assistant.events.map(e => e.id === ev.event.id ? ev.event : e) : [...assistant.events, ev.event];
+        update({ statusLine: `执行工具 · ${ev.event.tool}`, assistant: { ...assistant, events } });
+        break;
+      }
+      case "text_delta": update({ statusLine: "正在生成回复", assistant: { ...assistant, content: assistant.content + ev.delta } }); break;
+      case "text_replace": update({ assistant: { ...assistant, content: ev.text } }); break;
+      case "done":
+        if (ev.session.id === session.id && ev.message.session_id === session.id && ev.message.status !== "streaming" &&
+            (!run.registered || ev.message.id === assistant.id)) this.finish(run, ev.message, ev.session, true);
+        break;
+      case "error":
+        run.error = ev.error;
+        if (ev.message && ev.message.id === assistant.id && ev.message.status !== "streaming") {
+          this.finish(run, ev.message, { ...run.turn.session, status: "error" }, true);
+        } else this.fail(run, ev.error);
+        break;
+    }
+  }
+
   private async start(session: ChatSessionRecord, user: ChatMessageRecord, previous: MessagePair[]) {
     const runId = newRunId();
     const startedAt = Date.now();
@@ -210,68 +366,19 @@ export class ProjectChatStreams {
     } };
     this.runs.set(session.id, run);
     this.publish(session.id, run.turn);
-    let error = "";
-    const onEvent = (ev: ChatStreamEvent) => {
-      if (!this.current(run)) return;
-      const { assistant, trace } = run.turn;
-      const update = (patch: Partial<Turn>) => this.update(run, patch);
-      switch (ev.type) {
-        case "session": {
-          run.registered = true;
-          update({ session: ev.session, user: ev.user_message, assistant: { ...assistant, id: ev.assistant_message_id } });
-          run.retryStop?.();
-          run.retryStop = undefined;
-          break;
-        }
-        case "session_updated": update({ session: ev.session }); break;
-        case "task_updated": this.taskUpdatedHandler?.({ task_id: ev.task_id, action: ev.action }); break;
-        case "reasoning":
-        case "status": {
-          const kind = ev.type;
-          const text = ev.type === "status" ? ev.message.trim() : ev.text;
-          if (!text) break;
-          const entries = [...trace.entries];
-          const last = entries.at(-1);
-          if (kind === "reasoning" && last?.kind === kind) entries[entries.length - 1] = { ...last, text: last.text + text };
-          else if (kind !== "status" || last?.kind !== kind || last.text !== text) {
-            entries.push({ id: `tr-${startedAt}-${entries.length}`, kind, text: text.trimStart() });
-          }
-          update({ statusLine: kind === "status" ? text : "正在深度推理", trace: { ...trace, entries } });
-          break;
-        }
-        case "tool": {
-          const events = assistant.events.some(e => e.id === ev.event.id)
-            ? assistant.events.map(e => e.id === ev.event.id ? ev.event : e) : [...assistant.events, ev.event];
-          update({ statusLine: `执行工具 · ${ev.event.tool}`, assistant: { ...assistant, events } });
-          break;
-        }
-        case "text_delta": update({ statusLine: "正在生成回复", assistant: { ...assistant, content: assistant.content + ev.delta } }); break;
-        case "text_replace": update({ assistant: { ...assistant, content: ev.text } }); break;
-        case "done":
-          if (ev.session.id === session.id && ev.message.session_id === session.id && ev.message.status !== "streaming" &&
-              (!run.registered || ev.message.id === assistant.id)) this.finish(run, ev.message, ev.session, true);
-          break;
-        case "error":
-          error = ev.error;
-          if (ev.message && ev.message.id === assistant.id && ev.message.status !== "streaming") {
-            this.finish(run, ev.message, { ...run.turn.session, status: "error" }, true);
-          } else this.fail(run, error);
-          break;
-      }
-    };
     try {
       await this.transport.streamCodexChatMessage(session.project_id, session.id,
-        { run_id: runId, content: user.content, attachments: user.attachments }, onEvent);
+        { run_id: runId, content: user.content, attachments: user.attachments }, ev => this.onEvent(run, ev));
       if (this.current(run)) throw new Error("回复连接已中断");
     } catch (err) {
       if (this.current(run)) {
-        error = err instanceof Error ? err.message : "发送失败";
+        run.error = err instanceof Error ? err.message : "发送失败";
         if (run.registered && run.turn.stopping) {
           // A disconnected reader is not a save barrier. Reconcile the exact assistant via GET.
-          if (await this.waitForHistory(run)) error = "";
-        } else this.fail(run, error);
+          if (await this.waitForHistory(run)) run.error = "";
+        } else this.fail(run, run.error);
       }
     }
-    if (error) throw new Error(error);
+    if (run.error) throw new Error(run.error);
   }
 }

@@ -14,6 +14,7 @@ import type {
   ModelCatalogItem,
   ChatRuntimeInfo,
   ChatSandboxMode,
+  ChatSessionKind,
   ChatSessionRecord,
   ChatStreamEvent,
   CliRun,
@@ -104,6 +105,41 @@ async function request<T>(
   return data as T;
 }
 
+async function readChatStream(response: Response, onEvent: (event: ChatStreamEvent) => void) {
+  if (!response.ok || !response.body) {
+    let msg = `请求失败（HTTP ${response.status}）`;
+    try {
+      const err = (await response.json()) as { error?: string };
+      if (typeof err.error === "string") msg = err.error;
+    } catch {
+      // ignore
+    }
+    throw new ClientApiError(response.status, msg);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = blocks.pop() ?? "";
+    for (const block of blocks) {
+      const dataLines = block
+        .split(/\r?\n/)
+        .filter((l) => l.startsWith("data:"))
+        .map((l) => l.slice(5).trim());
+      if (!dataLines.length) continue;
+      let event: ChatStreamEvent;
+      try { event = JSON.parse(dataLines.join("\n")) as ChatStreamEvent; }
+      catch { continue; }
+      onEvent(event);
+    }
+  }
+}
+
 export const api = {
   getAuthStatus: () => request<AuthStatusPayload>("/api/auth/status"),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", "POST", {}),
@@ -146,8 +182,8 @@ export const api = {
     request<{ binding: BridgeAgentBindingSummary }>(`/api/projects/${encodeURIComponent(projectId)}/agent-bindings/${encodeURIComponent(agentId)}`, "PATCH", patch),
   getProjectExecutionRouting: (projectId: string) =>
     request<ProjectExecutionRoutingResponse>(`/api/projects/${encodeURIComponent(projectId)}/execution-routing`),
-  updateProjectExecutionRouting: (projectId: string, patch: Partial<ProjectRoutingConfig>) =>
-    request<ProjectExecutionRoutingResponse>(`/api/projects/${encodeURIComponent(projectId)}/execution-routing`, "PATCH", patch),
+  updateProjectExecutionRouting: (projectId: string, patch: Partial<Omit<ProjectRoutingConfig, "task_runtime">> & { task_runtime?: ChatRuntime | null }) =>
+    request<ProjectExecutionRoutingResponse>(`/api/projects/${encodeURIComponent(projectId)}/routing`, "PATCH", patch),
 
   getProjectCliConfig: (projectId: string) =>
     request<ProjectCliStatus>(`/api/projects/${encodeURIComponent(projectId)}/cli-config`),
@@ -175,6 +211,11 @@ export const api = {
     ),
   getTaskDetail: (taskId: string) =>
     request<TaskDetailPayload>(`/api/tasks/${encodeURIComponent(taskId)}`),
+  getTaskAgentSession: (taskId: string) =>
+    request<{ session: ChatSessionRecord | null; messages: ChatMessageRecord[] }>(`/api/tasks/${encodeURIComponent(taskId)}/agent-session`),
+  dispatchTaskToAgent: (taskId: string, payload?: {
+    prompt?: string; runtime?: ChatRuntime; model?: string; reasoning_effort?: ChatReasoningEffort; execution_target?: string;
+  }) => request<{ session: ChatSessionRecord; task: TaskRecord; run_id: string }>(`/api/tasks/${encodeURIComponent(taskId)}/dispatch`, "POST", payload ?? {}),
   addTaskMessage: (taskId: string, body: string, options?: { reopen?: boolean }) =>
     request<{ message: TaskMessage; task?: TaskRecord; reopened?: boolean }>(
       `/api/tasks/${encodeURIComponent(taskId)}/messages`,
@@ -481,9 +522,9 @@ export const api = {
     request<ChatRuntimeInfo>(
       `/api/projects/${encodeURIComponent(projectId)}/codex-chat/runtime`,
     ),
-  listCodexChatSessions: (projectId: string) =>
+  listCodexChatSessions: (projectId: string, kind?: ChatSessionKind | "all") =>
     request<{ sessions: ChatSessionRecord[] }>(
-      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions`,
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions${kind ? `?kind=${kind}` : ""}`,
     ),
   createCodexChatSession: (
     projectId: string,
@@ -541,6 +582,16 @@ export const api = {
       "POST",
       {},
     ),
+  subscribeCodexChatStream: async (
+    projectId: string, sessionId: string, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal,
+  ): Promise<boolean> => {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}/stream`, {
+      headers: { Accept: "text/event-stream" }, signal,
+    });
+    if (response.status === 204) return false;
+    await readChatStream(response, onEvent);
+    return true;
+  },
   streamCodexChatMessage: async (
     projectId: string,
     sessionId: string,
@@ -557,39 +608,6 @@ export const api = {
         signal,
       },
     );
-    if (!response.ok || !response.body) {
-      let msg = `请求失败（HTTP ${response.status}）`;
-      try {
-        const err = (await response.json()) as { error?: string };
-        if (typeof err.error === "string") msg = err.error;
-      } catch {
-        // ignore
-      }
-      throw new ClientApiError(response.status, msg);
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const blocks = buffer.split("\n\n");
-      buffer = blocks.pop() ?? "";
-      for (const block of blocks) {
-        const dataLines = block
-          .split(/\r?\n/)
-          .filter((l) => l.startsWith("data:"))
-          .map((l) => l.slice(5).trim());
-        if (!dataLines.length) continue;
-        try {
-          const parsed = JSON.parse(dataLines.join("\n")) as ChatStreamEvent;
-          onEvent(parsed);
-        } catch {
-          // ignore malformed chunk
-        }
-      }
-    }
+    await readChatStream(response, onEvent);
   },
 };

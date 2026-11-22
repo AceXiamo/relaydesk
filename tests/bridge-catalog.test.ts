@@ -146,7 +146,13 @@ describe("target-scoped model catalog resolution", () => {
       default_effort: "medium",
     },
     auth_mode: { claude: "project_key", codex: "local_cli" },
-    routing: { priority: ["local:agent-mac", "cloud"], auto_fallback: true, route_cli_runs: true },
+    routing: {
+      priority: ["local:agent-mac", "cloud"],
+      auto_fallback: true,
+      route_cli_runs: true,
+      auto_dispatch_tasks: false,
+      task_network_access: true,
+    },
     effective_priority: ["local:agent-mac", "cloud"],
     agents: [macAgent],
   };
@@ -192,14 +198,26 @@ describe("target-scoped model catalog resolution", () => {
     const cloudFirstNoCli: ChatRuntimeInfo = {
       ...runtimeInfo,
       local_clis: { claude: false, codex: false },
-      routing: { priority: ["cloud", "local:agent-mac"], auto_fallback: true, route_cli_runs: true },
+      routing: {
+        priority: ["cloud", "local:agent-mac"],
+        auto_fallback: true,
+        route_cli_runs: true,
+        auto_dispatch_tasks: false,
+        task_network_access: true,
+      },
       effective_priority: ["cloud", "local:agent-mac"],
     };
     expect(resolveActiveLocalAgent(cloudFirstNoCli, "proj-1", "auto", "claude")?.id).toBe("agent-mac");
 
     const strictCloudFirst: ChatRuntimeInfo = {
       ...cloudFirstNoCli,
-      routing: { priority: ["cloud", "local:agent-mac"], auto_fallback: false, route_cli_runs: true },
+      routing: {
+        priority: ["cloud", "local:agent-mac"],
+        auto_fallback: false,
+        route_cli_runs: true,
+        auto_dispatch_tasks: false,
+        task_network_access: true,
+      },
     };
     expect(resolveActiveLocalAgent(strictCloudFirst, "proj-1", "auto", "claude")).toBeNull();
   });

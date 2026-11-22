@@ -267,3 +267,80 @@ export function resolveCliRunBridgeTarget(options: {
 
   return null;
 }
+
+export interface LocalTaskTargetResolution {
+  target: {
+    targetKey: string;
+    agent: BridgeAgentSummary;
+    binding: BridgeAgentBindingSummary;
+  } | null;
+  reasons: string[];
+}
+
+export function resolveLocalTaskExecutionTarget(options: {
+  store: Store;
+  bridgeHub: BridgeHub | null;
+  projectId: string;
+  runtime: ChatRuntime;
+  executionTarget?: string;
+}): LocalTaskTargetResolution {
+  const { store, bridgeHub, projectId, runtime, executionTarget } = options;
+  if (!bridgeHub) {
+    return { target: null, reasons: ["本地执行节点服务未启用"] };
+  }
+
+  const agents = store.listBridgeAgents().map((a) => bridgeHub.describe(a));
+  const agentMap = new Map(agents.map((a) => [a.id, a]));
+
+  const tryAgent = (agent: BridgeAgentSummary): { ok: true; binding: BridgeAgentBindingSummary } | { ok: false; reason: string } => {
+    const check = evaluateLocalAgentEligibility({
+      agent,
+      projectId,
+      runtime,
+      bridgeHub,
+      store,
+    });
+    if (!check.eligible || !check.binding) {
+      return { ok: false, reason: check.reason || `本机节点「${agent.name}」不可用` };
+    }
+    if (bridgeHub.hasActiveRunForProject(agent.id, projectId)) {
+      return { ok: false, reason: `本机节点「${agent.name}」正在当前项目目录执行其他会话` };
+    }
+    return { ok: true, binding: check.binding };
+  };
+
+  if (executionTarget && executionTarget.startsWith("local:")) {
+    const agentId = executionTarget.slice("local:".length);
+    const agent = agentMap.get(agentId);
+    if (!agent) {
+      return { target: null, reasons: [`未找到指定的本机节点：${executionTarget}`] };
+    }
+    const res = tryAgent(agent);
+    if (res.ok) {
+      return { target: { targetKey: executionTarget, agent, binding: res.binding }, reasons: [] };
+    }
+    return { target: null, reasons: [res.reason] };
+  }
+
+  const routing = store.getProjectExecutionRouting(projectId);
+  const priority = normalizeExecutionPriority(routing, agents);
+  const reasons: string[] = [];
+
+  for (const candidate of priority) {
+    if (!candidate.startsWith("local:")) continue;
+    const agentId = candidate.slice("local:".length);
+    const agent = agentMap.get(agentId);
+    if (!agent) continue;
+    const res = tryAgent(agent);
+    if (res.ok) {
+      return { target: { targetKey: candidate, agent, binding: res.binding }, reasons: [] };
+    }
+    reasons.push(res.reason);
+  }
+
+  if (reasons.length === 0) {
+    reasons.push("未配置可用的本机执行节点（请先绑定并上线 Local Agent）");
+  }
+  return { target: null, reasons };
+}
+

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MetaFunction } from "react-router";
 import { ProjectChatStreams } from "~/lib/chat-streams.ts";
+import { AgentExecutionView } from "~/components/AgentExecutionView.tsx";
 import { CodexChatView } from "~/components/CodexChatView.tsx";
 import { Icon } from "~/components/Icon.tsx";
 import {
@@ -26,6 +27,7 @@ import type {
   ChatSandboxMode,
   GithubConnectionSummary,
   ProjectDetail,
+  ProjectExecutionRoutingResponse,
   ProjectSummary,
   TaskDetailPayload,
   TaskRecord,
@@ -95,6 +97,22 @@ function ConsoleWorkspace() {
 
   // Detail Drawer & Stack
   const [detail, setDetail] = useState<TaskDetailPayload | null>(null);
+  const [executionRouting, setExecutionRouting] = useState<ProjectExecutionRoutingResponse>();
+  const routingProject = view === "agents" || detail ? currentProject?.id : undefined;
+  useEffect(() => {
+    setExecutionRouting(undefined);
+    if (!routingProject) return;
+    let active = true;
+    const load = async () => {
+      try {
+        const routing = await api.getProjectExecutionRouting(routingProject);
+        if (active) setExecutionRouting(routing);
+      } catch { if (active) setExecutionRouting(undefined); }
+    };
+    void load();
+    const timer = window.setInterval(() => { if (!document.hidden) void load(); }, 20000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [routingProject]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailStack, setDetailStack] = useState<string[]>([]);
 
@@ -279,20 +297,26 @@ function ConsoleWorkspace() {
     void boot();
   }, [boot]);
 
+  const taskRefreshSequence = useRef(0);
   const refreshTasks = useCallback(async () => {
+    const request = ++taskRefreshSequence.current;
     const pid = projectIdRef.current;
     if (!pid) return;
     setRefreshing(true);
     try {
       const { tasks: nextTasks } = await api.listTasks(pid);
-      if (projectIdRef.current === pid) {
+      if (projectIdRef.current === pid && request === taskRefreshSequence.current) {
         setTasks(nextTasks);
+        setDetail(current => {
+          const updated = current && nextTasks.find(t => t.id === current.task.id);
+          return current && updated && updated.version >= current.task.version ? { ...current, task: { ...current.task, ...updated } } : current;
+        });
         setOnline(true);
       }
     } catch {
-      setOnline(false);
+      if (projectIdRef.current === pid && request === taskRefreshSequence.current) setOnline(false);
     } finally {
-      setRefreshing(false);
+      if (request === taskRefreshSequence.current) setRefreshing(false);
     }
   }, []);
 
@@ -503,6 +527,7 @@ function ConsoleWorkspace() {
         else setProjectModalOpen(true);
       } else if (
         (e.key === "j" || e.key === "k") &&
+        view !== "agents" &&
         view !== "settings" &&
         view !== "sources" &&
         visibleTasks.length > 0
@@ -713,6 +738,10 @@ function ConsoleWorkspace() {
               void openTaskDetail(task.id, false);
             }}
           />
+        ) : view === "agents" ? (
+          <AgentExecutionView key={currentProject?.id} project={currentProject} tasks={tasks} routing={executionRouting}
+            streams={chatStreams} onOpenTaskDetail={taskId => void openTaskDetail(taskId, false)}
+            onRefreshTasks={refreshTasks} onOpenRoutingSettings={openRoutingSettings} />
         ) : view === "settings" || view === "sources" ? (
           <SettingsView
             mode={view}
@@ -804,20 +833,9 @@ function ConsoleWorkspace() {
           setDetailStack([]);
           openCliSettings();
         }}
-        onAssignToAgent={(task, opts) => {
-          setPendingChatContext({
-            ref: {
-              kind: "task",
-              label: `RD-${task.number} · ${task.title.slice(0, 48)}`,
-              ref: task.id,
-            },
-            ...(opts?.prompt ? { prompt: opts.prompt } : {}),
-            ...(opts?.sandboxMode ? { sandboxMode: opts.sandboxMode } : {}),
-          });
-          setDetail(null);
-          setDetailStack([]);
-          changeView("chat");
-        }}
+        streams={chatStreams}
+        routing={executionRouting}
+        onRefreshTasks={refreshTasks}
       />
 
       {/* Modals */}

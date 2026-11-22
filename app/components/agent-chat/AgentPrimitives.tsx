@@ -131,7 +131,7 @@ export function PixelGridLoader({
 
 export interface TraceEntry {
   id: string;
-  kind: "status" | "reasoning";
+  kind: "status" | "reasoning" | "tool";
   text: string;
 }
 

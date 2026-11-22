@@ -399,6 +399,8 @@ describe("ProjectChatStreams task_updated callback", () => {
     const session: ChatSessionRecord = {
       id: "s1",
       project_id: "p1",
+      kind: "chat",
+      task_id: null,
       title: "Test",
       runtime: "claude",
       model: "",

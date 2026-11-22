@@ -70,7 +70,7 @@ export function Sidebar({
     queue: openTasks.filter((t) => t.status !== "done").length,
     triage: openTasks.filter((t) => t.status === "triage").length,
     mine: openTasks.filter((t) => t.owner === "human" && t.status !== "done").length,
-    agents: openTasks.filter((t) => t.owner === "agent").length,
+    agents: openTasks.filter((t) => t.owner === "agent" || t.agent_session_status === "running").length,
     review: openTasks.filter((t) => t.status === "review").length,
     workspace: 0,
     chat: 0,

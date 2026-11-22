@@ -42,19 +42,34 @@ describe("Execution routing, priority fallback, and local cli_runs dispatch", ()
   it("normalizes execution priority with default local-first ordering and preserves explicit cloud position", () => {
     const agents = [{ id: "a1" }, { id: "a2" }];
     expect(
-      normalizeExecutionPriority({ priority: [], auto_fallback: true, route_cli_runs: true }, agents),
+      normalizeExecutionPriority(
+        { priority: [], auto_fallback: true, route_cli_runs: true, auto_dispatch_tasks: false, task_network_access: true },
+        agents,
+      ),
     ).toEqual(["local:a1", "local:a2", "cloud"]);
 
     expect(
       normalizeExecutionPriority(
-        { priority: ["local:a2", "local:deleted", "local:a2"], auto_fallback: true, route_cli_runs: true },
+        {
+          priority: ["local:a2", "local:deleted", "local:a2"],
+          auto_fallback: true,
+          route_cli_runs: true,
+          auto_dispatch_tasks: false,
+          task_network_access: true,
+        },
         agents,
       ),
     ).toEqual(["local:a2", "local:a1", "cloud"]);
 
     expect(
       normalizeExecutionPriority(
-        { priority: ["cloud", "local:a2"], auto_fallback: true, route_cli_runs: true },
+        {
+          priority: ["cloud", "local:a2"],
+          auto_fallback: true,
+          route_cli_runs: true,
+          auto_dispatch_tasks: false,
+          task_network_access: true,
+        },
         agents,
       ),
     ).toEqual(["cloud", "local:a2", "local:a1"]);

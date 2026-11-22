@@ -109,6 +109,7 @@ export async function startRelaydeskServer(
   }
 
   const store = new Store(dbPath);
+  store.recoverInterruptedSessionRuns();
   const bridgeHub = new BridgeHub(store, options.bridgeHubOptions);
   const api = new ApiRouter({
     store, bridgeHub,
@@ -289,6 +290,7 @@ export async function startRelaydeskServer(
   const url = `http://${host}:${actualPort}`;
 
   const close = async () => {
+    api.close();
     await bridgeHub.close();
     if (viteDevServer) {
       await viteDevServer.close();

@@ -14,6 +14,7 @@ import type {
   ChatMessageRecord,
   ChatRuntime,
   ChatSandboxMode,
+  ChatSessionKind,
   ChatSessionRecord,
   ChatToolEvent,
   DeliveryMode,
@@ -118,6 +119,8 @@ CREATE INDEX IF NOT EXISTS cli_thread ON cli_runs(task_id, created_at);
 CREATE TABLE IF NOT EXISTS chat_sessions (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id),
+    kind TEXT NOT NULL DEFAULT 'chat' CHECK(kind IN ('chat','task')),
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude')),
     model TEXT NOT NULL DEFAULT '',
@@ -345,6 +348,9 @@ export interface RawTaskRow {
   last_seen: string | null;
   message_count?: number;
   merged_count?: number;
+  agent_session_id?: string | null;
+  agent_session_status?: string | null;
+  agent_session_target?: string | null;
 }
 
 function normalizeDeliveryMode(value: unknown): DeliveryMode {
@@ -442,6 +448,17 @@ export function toTaskView(row: RawTaskRow): TaskRecord {
   }
   if (typeof row.merged_count === "number") {
     result.merged_count = row.merged_count;
+  }
+  if (row.agent_session_id !== undefined) {
+    result.agent_session_id = row.agent_session_id || null;
+  }
+  if (row.agent_session_status !== undefined) {
+    const st = row.agent_session_status;
+    result.agent_session_status =
+      st === "idle" || st === "running" || st === "error" ? st : null;
+  }
+  if (row.agent_session_target !== undefined) {
+    result.agent_session_target = row.agent_session_target || null;
   }
   return result;
 }
@@ -580,6 +597,14 @@ export class Store {
     if (!chatSessionCols.some((c) => c.name === "resolved_target")) {
       this.db.exec("ALTER TABLE chat_sessions ADD COLUMN resolved_target TEXT NOT NULL DEFAULT ''");
     }
+    if (!chatSessionCols.some((c) => c.name === "kind")) {
+      this.db.exec("ALTER TABLE chat_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'");
+    }
+    if (!chatSessionCols.some((c) => c.name === "task_id")) {
+      this.db.exec("ALTER TABLE chat_sessions ADD COLUMN task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS chat_sessions_project_kind ON chat_sessions(project_id, kind, updated_at DESC)");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS chat_sessions_task_unique ON chat_sessions(task_id) WHERE task_id IS NOT NULL");
     // Before routing existed, only the cloud runner could have issued a thread ID.
     this.db.exec("UPDATE chat_sessions SET resolved_target = 'cloud' WHERE resolved_target = '' AND external_session_id != ''");
     const unmigrated = this.db
@@ -766,15 +791,28 @@ export class Store {
       priority: stored.priority ?? [],
       auto_fallback: stored.auto_fallback ?? true,
       route_cli_runs: stored.route_cli_runs ?? true,
+      auto_dispatch_tasks: stored.auto_dispatch_tasks ?? false,
+      ...(stored.task_runtime ? { task_runtime: stored.task_runtime } : {}),
+      ...(stored.task_model !== undefined ? { task_model: stored.task_model } : {}),
+      ...(stored.task_reasoning_effort ? { task_reasoning_effort: stored.task_reasoning_effort } : {}),
+      task_network_access: stored.task_network_access ?? true,
     };
   }
 
   updateProjectExecutionRouting(projectId: string, patch: Partial<ProjectRoutingConfig>): ProjectRoutingConfig {
     const current = this.getProjectExecutionRouting(projectId);
-    const routing = {
+    const nextRuntime = "task_runtime" in patch ? patch.task_runtime : current.task_runtime;
+    const nextModel = "task_model" in patch ? patch.task_model : current.task_model;
+    const nextEffort = "task_reasoning_effort" in patch ? patch.task_reasoning_effort : current.task_reasoning_effort;
+    const routing: ProjectRoutingConfig = {
       priority: patch.priority ?? current.priority,
       auto_fallback: patch.auto_fallback ?? current.auto_fallback,
       route_cli_runs: patch.route_cli_runs ?? current.route_cli_runs,
+      auto_dispatch_tasks: patch.auto_dispatch_tasks ?? current.auto_dispatch_tasks,
+      ...(nextRuntime ? { task_runtime: nextRuntime } : {}),
+      ...(nextModel ? { task_model: nextModel } : {}),
+      ...(nextEffort ? { task_reasoning_effort: nextEffort } : {}),
+      task_network_access: patch.task_network_access ?? current.task_network_access,
     };
     this.db.prepare("UPDATE projects SET execution_routing_json = ? WHERE id = ?")
       .run(JSON.stringify(routing), projectId);
@@ -911,13 +949,35 @@ export class Store {
       .prepare(
         `SELECT t.*,
            (SELECT COUNT(*) FROM messages m WHERE m.task_id = t.id AND m.kind = 'comment') AS message_count,
-           (SELECT COUNT(*) FROM tasks sub WHERE sub.merged_into = t.id) AS merged_count
+           (SELECT COUNT(*) FROM tasks sub WHERE sub.merged_into = t.id) AS merged_count,
+           s.id AS agent_session_id,
+           s.status AS agent_session_status,
+           s.resolved_target AS agent_session_target
          FROM tasks t
+         LEFT JOIN chat_sessions s ON s.task_id = t.id AND s.kind = 'task'
          WHERE t.project_id = ?
          ORDER BY t.updated_at DESC, t.number DESC`,
       )
       .all(projectId) as unknown as RawTaskRow[];
     return rows.map(toTaskView);
+  }
+
+  getTaskView(taskId: string): TaskRecord {
+    const row = this.db
+      .prepare(
+        `SELECT t.*,
+           (SELECT COUNT(*) FROM messages m WHERE m.task_id = t.id AND m.kind = 'comment') AS message_count,
+           (SELECT COUNT(*) FROM tasks sub WHERE sub.merged_into = t.id) AS merged_count,
+           s.id AS agent_session_id,
+           s.status AS agent_session_status,
+           s.resolved_target AS agent_session_target
+         FROM tasks t
+         LEFT JOIN chat_sessions s ON s.task_id = t.id AND s.kind = 'task'
+         WHERE t.id = ?`,
+      )
+      .get(taskId) as unknown as RawTaskRow | undefined;
+    if (!row) throw new ApiError(404, "Record not found");
+    return toTaskView(row);
   }
 
   addMessage(
@@ -1434,6 +1494,7 @@ export class Store {
     projectId: string,
     action: string,
     params: Record<string, unknown>,
+    context?: { sessionId?: string },
   ): { result: unknown; mutated?: { task_id?: string; action: string } } {
     this.getProjectRow(projectId);
 
@@ -1573,6 +1634,10 @@ export class Store {
       if (updatedFields.length === 0) {
         throw new ApiError(400, "No fields specified to update");
       }
+      const ownSessionLease = Boolean(context?.sessionId && row.lease === `session:${context.sessionId}`);
+      if (ownSessionLease && !row.triaged_by) {
+        changes.triaged_by = "local_agent";
+      }
       this.updateTaskFields(row, changes);
       this.addMessage(row.id, "event", "agent", `Agent updated ${updatedFields.join(", ")}`);
       const updated = toTaskView(this.getTaskRow(row.id));
@@ -1587,7 +1652,8 @@ export class Store {
       if (row.merged_into) {
         throw new ApiError(409, "Open the primary task to continue");
       }
-      if (row.owner === "agent" && row.lease) {
+      const ownSessionLease = Boolean(context?.sessionId && row.lease === `session:${context.sessionId}`);
+      if (row.owner === "agent" && row.lease && !ownSessionLease) {
         throw new ApiError(
           409,
           "Another autonomous agent worker currently holds an active lease on this task",
@@ -1638,7 +1704,7 @@ export class Store {
       const changes: Record<string, string | number | null> = { status: nextStatus };
       if (nextStatus === "working") {
         changes.owner = "agent";
-        changes.lease = null;
+        changes.lease = ownSessionLease ? row.lease : null;
         changes.last_seen = nowIso();
         changes.resolution = null;
       } else if (nextStatus === "done") {
@@ -1652,6 +1718,9 @@ export class Store {
         changes.owner = "none";
         changes.lease = null;
         changes.resolution = (rawRes || "shipped") as TaskResolution;
+        if (ownSessionLease && rawRes === "dismissed" && !row.triaged_by) {
+          changes.triaged_by = "local_agent";
+        }
       } else {
         changes.owner = "none";
         changes.lease = null;
@@ -2149,20 +2218,24 @@ export class Store {
     };
   }
 
-  listChatSessions(projectId: string): ChatSessionRecord[] {
+  listChatSessions(projectId: string, kind: ChatSessionKind | "all" = "chat"): ChatSessionRecord[] {
     this.getProjectRow(projectId);
-    const rows = this.db
-      .prepare(
-        `SELECT s.*,
+    const whereKind = kind === "all" ? "" : " AND s.kind = ?";
+    const sql = `SELECT s.*,
           (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id) AS message_count,
           (SELECT m.content FROM chat_messages m WHERE m.session_id = s.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS last_message_preview
          FROM chat_sessions s
-         WHERE s.project_id = ?
+         WHERE s.project_id = ?${whereKind}
          ORDER BY s.updated_at DESC, s.rowid DESC
-         LIMIT 100`,
-      )
-      .all(projectId) as unknown as Array<
-      Omit<ChatSessionRecord, "network_access"> & {
+         LIMIT 100`;
+    const rows = (
+      kind === "all"
+        ? this.db.prepare(sql).all(projectId)
+        : this.db.prepare(sql).all(projectId, kind)
+    ) as unknown as Array<
+      Omit<ChatSessionRecord, "network_access" | "kind" | "task_id"> & {
+        kind?: string;
+        task_id?: string | null;
         network_access?: number;
         message_count: number;
         last_message_preview: string | null;
@@ -2170,6 +2243,8 @@ export class Store {
     >;
     return rows.map((row) => ({
       ...row,
+      kind: row.kind === "task" ? "task" : "chat",
+      task_id: row.task_id ?? null,
       network_access: Boolean(row.network_access),
       message_count: Number(row.message_count ?? 0),
       last_message_preview: row.last_message_preview
@@ -2183,11 +2258,36 @@ export class Store {
     const row = this.db
       .prepare("SELECT * FROM chat_sessions WHERE id = ? AND project_id = ?")
       .get(sessionId, projectId) as unknown as
-      | (Omit<ChatSessionRecord, "network_access"> & { network_access?: number })
+      | (Omit<ChatSessionRecord, "network_access" | "kind" | "task_id"> & {
+          kind?: string;
+          task_id?: string | null;
+          network_access?: number;
+        })
       | undefined;
     if (!row) throw new ApiError(404, "对话会话不存在");
     return {
       ...row,
+      kind: row.kind === "task" ? "task" : "chat",
+      task_id: row.task_id ?? null,
+      network_access: Boolean(row.network_access),
+    };
+  }
+
+  getTaskChatSession(taskId: string): ChatSessionRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM chat_sessions WHERE task_id = ? AND kind = 'task' LIMIT 1")
+      .get(taskId) as unknown as
+      | (Omit<ChatSessionRecord, "network_access" | "kind" | "task_id"> & {
+          kind?: string;
+          task_id?: string | null;
+          network_access?: number;
+        })
+      | undefined;
+    if (!row) return null;
+    return {
+      ...row,
+      kind: "task",
+      task_id: row.task_id ?? taskId,
       network_access: Boolean(row.network_access),
     };
   }
@@ -2195,10 +2295,14 @@ export class Store {
   createChatSession(
     projectId: string,
     data: Partial<Pick<ChatSessionRecord,
-      "title" | "runtime" | "model" | "reasoning_effort" | "execution_target" | "sandbox_mode" | "network_access"
+      "kind" | "task_id" | "title" | "runtime" | "model" | "reasoning_effort" | "execution_target" | "sandbox_mode" | "network_access"
     >> = {},
   ): ChatSessionRecord {
     this.getProjectRow(projectId);
+    const kind: ChatSessionKind = data.kind === "task" ? "task" : "chat";
+    const taskId = kind === "task" && typeof data.task_id === "string" && data.task_id.trim()
+      ? data.task_id.trim()
+      : null;
     const title =
       typeof data.title === "string" && data.title.trim()
         ? data.title.trim().slice(0, 120)
@@ -2213,12 +2317,164 @@ export class Store {
     const now = nowIso();
     this.db
       .prepare(
-        `INSERT INTO chat_sessions(id, project_id, title, runtime, model, reasoning_effort, execution_target, sandbox_mode, network_access, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chat_sessions(id, project_id, kind, task_id, title, runtime, model, reasoning_effort, execution_target, sandbox_mode, network_access, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, projectId, title, runtime, model, data.reasoning_effort ?? "default",
+      .run(id, projectId, kind, taskId, title, runtime, model, data.reasoning_effort ?? "default",
         data.execution_target ?? "auto", sandboxMode, networkAccess, now, now);
     return this.getChatSession(projectId, id);
+  }
+
+  /* ── Event-Driven Task Session Lifecycle Helpers ──────────────────────── */
+
+  hasActiveAgentTask(projectId: string): boolean {
+    const working = this.db
+      .prepare(
+        "SELECT 1 FROM tasks WHERE project_id = ? AND owner = 'agent' AND status = 'working' AND merged_into IS NULL LIMIT 1",
+      )
+      .get(projectId);
+    if (working) return true;
+    const runningSession = this.db
+      .prepare(
+        "SELECT 1 FROM chat_sessions WHERE project_id = ? AND kind = 'task' AND status = 'running' LIMIT 1",
+      )
+      .get(projectId);
+    return Boolean(runningSession);
+  }
+
+  findNextDispatchableTask(projectId: string): RawTaskRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE project_id = ? AND status IN ('ready', 'triage') AND owner = 'none' AND merged_into IS NULL
+         ORDER BY
+           CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+           CASE status WHEN 'ready' THEN 0 ELSE 1 END,
+           number ASC
+         LIMIT 1`,
+      )
+      .get(projectId) as unknown as RawTaskRow | undefined;
+    return row ?? null;
+  }
+
+  claimTaskForSession(
+    taskId: string,
+    sessionId: string,
+    agentLabel: string,
+    reason: "auto" | "manual" | "followup" = "auto",
+  ): TaskRecord {
+    const task = this.getTaskRow(taskId);
+    if (task.merged_into) {
+      throw new ApiError(409, "Open the primary task to continue");
+    }
+    const lease = `session:${sessionId}`;
+    const alreadyOwnedBySelf = task.owner === "agent" && task.lease === lease;
+    if (task.owner === "agent" && task.lease && !alreadyOwnedBySelf) {
+      throw new ApiError(409, "Another agent worker currently holds an active lease on this task");
+    }
+    const nextAttempts = reason === "followup" ? (task.attempts ?? 0) : (task.attempts ?? 0) + 1;
+    this.updateTaskFields(task, {
+      status: "working",
+      owner: "agent",
+      lease,
+      resolution: null,
+      attempts: nextAttempts,
+      last_seen: nowIso(),
+    });
+    const eventText =
+      reason === "auto"
+        ? `Auto-dispatched to local agent「${agentLabel}」`
+        : reason === "manual"
+          ? `Dispatched to local agent「${agentLabel}」`
+          : "Human followed up in agent session";
+    this.addMessage(taskId, "event", reason === "followup" ? "human" : "agent", eventText);
+    return this.getTaskView(taskId);
+  }
+
+  touchTaskSessionLease(taskId: string, sessionId: string): void {
+    this.db
+      .prepare("UPDATE tasks SET last_seen = ? WHERE id = ? AND owner = 'agent' AND lease = ?")
+      .run(nowIso(), taskId, `session:${sessionId}`);
+  }
+
+  finalizeTaskSessionTurn(
+    taskId: string,
+    sessionId: string,
+    outcome: {
+      status: "done" | "error" | "aborted";
+      stopReason?: string;
+      error?: string;
+      replyContent?: string;
+    },
+  ): TaskRecord | null {
+    // Follow-up interruption hands over immediately to the next turn in the same session.
+    if (outcome.status === "aborted" && outcome.stopReason === "follow_up") {
+      return null;
+    }
+    const task = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId) as unknown as RawTaskRow | undefined;
+    if (!task) return null;
+    const expectedLease = `session:${sessionId}`;
+    if (task.owner !== "agent" || task.lease !== expectedLease || task.status !== "working") {
+      return null;
+    }
+    this.updateTaskFields(task, {
+      status: "waiting",
+      owner: "none",
+      lease: null,
+      last_seen: nowIso(),
+    });
+    if (outcome.status === "error") {
+      const detail = outcome.error?.trim() ? `：${outcome.error.trim().slice(0, 300)}` : "";
+      this.addMessage(taskId, "event", "agent", `Agent execution interrupted or failed${detail}; moved to waiting`);
+    } else if (outcome.status === "aborted") {
+      this.addMessage(taskId, "event", "agent", "Agent execution stopped by operator; moved to waiting");
+    } else {
+      const preview = outcome.replyContent?.trim();
+      if (preview) {
+        this.addMessage(taskId, "comment", "agent", preview.slice(0, 12_000));
+      }
+      this.addMessage(
+        taskId,
+        "event",
+        "agent",
+        "Agent finished reply without changing task status; moved to waiting",
+      );
+    }
+    return this.getTaskView(taskId);
+  }
+
+  recoverInterruptedSessionRuns(): { recoveredSessions: number; recoveredTasks: number } {
+    return this.transaction(true, () => {
+      const now = nowIso();
+      const runningMessages = this.db
+        .prepare("UPDATE chat_messages SET status = 'error' WHERE status = 'streaming'")
+        .run();
+      const runningSessions = this.db
+        .prepare("UPDATE chat_sessions SET status = 'idle', updated_at = ? WHERE status = 'running'")
+        .run(now);
+      const staleTasks = this.db
+        .prepare("SELECT * FROM tasks WHERE owner = 'agent' AND status = 'working' AND lease LIKE 'session:%'")
+        .all() as unknown as RawTaskRow[];
+      for (const task of staleTasks) {
+        this.updateTaskFields(task, {
+          status: "waiting",
+          owner: "none",
+          lease: null,
+          last_seen: now,
+        });
+        this.addMessage(
+          task.id,
+          "event",
+          "system",
+          "Server restarted while agent session was running; moved to waiting",
+        );
+      }
+      void runningMessages;
+      return {
+        recoveredSessions: Number(runningSessions.changes ?? 0),
+        recoveredTasks: staleTasks.length,
+      };
+    });
   }
 
   updateChatSession(

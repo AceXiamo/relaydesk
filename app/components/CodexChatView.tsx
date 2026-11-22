@@ -1,3 +1,4 @@
+import { splitInlineThinkContent, STOP_LABELS } from "~/lib/chat-content.ts";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "~/lib/api.ts";
 import { messagesWithTurn, type ProjectChatStreams, type TurnTrace } from "~/lib/chat-streams.ts";
@@ -107,14 +108,6 @@ function buildContextualFollowUps(msg: ChatMessageRecord): QuickPromptItem[] {
   return list.slice(0, 2);
 }
 
-const STOP_LABELS: Record<NonNullable<ChatMessageRecord["stop_reason"]>, string> = {
-  user_stop: "已手动停止",
-  follow_up: "已停止，继续追问",
-  queue_timeout: "排队超时",
-  idle_timeout: "长时间无响应，已停止",
-  total_timeout: "回复超时，已停止",
-};
-
 type TimeGroupKey = "今天" | "昨天" | "最近 7 天" | "更早";
 
 function getTimeGroup(iso: string): TimeGroupKey {
@@ -127,35 +120,6 @@ function getTimeGroup(iso: string): TimeGroupKey {
   if (ts >= startOfToday - oneDay) return "昨天";
   if (ts >= startOfToday - 7 * oneDay) return "最近 7 天";
   return "更早";
-}
-
-function splitInlineThinkContent(raw: string): {
-  thinkingBlocks: string[];
-  visibleContent: string;
-  hasOpenThink: boolean;
-} {
-  if (!raw || !raw.includes("<think>")) {
-    return { thinkingBlocks: [], visibleContent: raw, hasOpenThink: false };
-  }
-  const thinkingBlocks: string[] = [];
-  let hasOpenThink = false;
-  let visible = raw.replace(/<think>([\s\S]*?)<\/think>/gi, (_m, inner: string) => {
-    const cleaned = inner.trim();
-    if (cleaned) thinkingBlocks.push(cleaned);
-    return "";
-  });
-  const openIdx = visible.toLowerCase().indexOf("<think>");
-  if (openIdx !== -1) {
-    hasOpenThink = true;
-    const partial = visible.slice(openIdx + "<think>".length).trim();
-    if (partial) thinkingBlocks.push(partial);
-    visible = visible.slice(0, openIdx);
-  }
-  return {
-    thinkingBlocks,
-    visibleContent: visible.trimStart(),
-    hasOpenThink,
-  };
 }
 
 export function CodexChatView({
@@ -186,7 +150,7 @@ export function CodexChatView({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const activeSessionId = useSyncExternalStore(streams.subscribe, streams.selection, streams.selection) ?? null;
   const setActiveSessionId = streams.select;
-  const turns = useSyncExternalStore(streams.subscribe, streams.snapshot, streams.snapshot);
+  const turns = useSyncExternalStore(streams.subscribe, streams.chatSnapshot, streams.chatSnapshot);
   const turn = activeSessionId ? turns.get(activeSessionId) : undefined;
   const [loadedSession, setActiveSession] = useState<ChatSessionRecord | null>(null);
   const activeSession = turn?.session ?? (loadedSession?.id === activeSessionId ? loadedSession : null);

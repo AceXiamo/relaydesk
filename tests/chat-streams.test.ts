@@ -4,7 +4,7 @@ import { api } from "../app/lib/api.ts";
 import type { ChatSessionRecord, ChatStreamEvent } from "../app/lib/types.ts";
 
 function session(project_id: string, id: string): ChatSessionRecord {
-  return { project_id, id, title: id, runtime: "codex", model: "", sandbox_mode: "read-only",
+  return { project_id, id, kind: "chat", task_id: null, title: id, runtime: "codex", model: "", sandbox_mode: "read-only",
     network_access: false, execution_target: "auto", resolved_target: "", reasoning_effort: "default",
     external_session_id: "", status: "idle", created_at: "", updated_at: "" };
 }
@@ -248,4 +248,138 @@ describe("project chat streams", () => {
     req.end();
     await next;
   });
+
+  function observedFixture() {
+    const { transport, requests } = fixture();
+    const eof = deferred<boolean>();
+    const subscribe = vi.fn<typeof api.subscribeCodexChatStream>(() => eof.promise);
+    const streams = new ProjectChatStreams({ ...transport, subscribeCodexChatStream: subscribe });
+    const idle = { ...session("p", "s"), kind: "task" as const, task_id: "task-1" };
+    const remote = { ...idle, active_run_id: "remote", status: "running" as const };
+    const user = { id: "u", role: "user" as const, session_id: "s", created_at: "", content: "brief", status: "done" as const, attachments: [], events: [] };
+    const tool = { id: "file", tool: "read", summary: "读取配置", status: "running" as const };
+    const assistant = { ...user, id: "a", role: "assistant" as const, content: "partial", status: "streaming" as const, events: [tool] };
+    const snapshot: ChatStreamEvent = { type: "snapshot", run_id: "remote", session: remote, user_message: user, assistant_message: assistant,
+      status_line: "正在读取", reasoning: "检查配置", started_at: 1234 };
+    return { streams, transport, requests, eof, subscribe, remote, idle, user, assistant, tool, snapshot };
+  }
+
+  it("hydrates an already-dispatched turn from a snapshot and streams the rest without polling", async () => {
+    const { streams, transport, eof, subscribe, remote, idle, user, assistant, tool, snapshot } = observedFixture();
+    const freeform = streams.chatSnapshot();
+    const activity = vi.fn();
+    streams.subscribeTaskActivity("task-1", activity);
+    streams.observe(remote, []);
+    streams.observe(remote, [user, assistant]);
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    const emit = subscribe.mock.calls[0][2];
+    emit(snapshot);
+    expect(streams.snapshot().get("s")).toMatchObject({ user, assistant, statusLine: "正在读取", trace: { startedAt: 1234,
+      entries: [{ kind: "reasoning", text: "检查配置" }, { kind: "tool", text: "读取配置" }] } });
+    emit({ type: "reasoning", text: "下一步" });
+    emit({ type: "reasoning", text: "验证" });
+    emit({ type: "status", message: "验证中" });
+    emit({ type: "tool", event: { ...tool, status: "done", output: "ok" } });
+    emit({ type: "text_delta", delta: " response" });
+    emit({ type: "session_updated", session: { ...remote, resolved_target: "local:node" } });
+    expect(streams.snapshot().get("s")).toMatchObject({ session: { resolved_target: "local:node" }, assistant: { content: "partial response", events: [{ output: "ok", status: "done" }] } });
+    expect(streams.snapshot().get("s")!.trace.entries.map(e => e.text)).toContain("下一步验证");
+    emit({ type: "text_replace", text: "replacement" });
+    expect(streams.snapshot().get("s")!.assistant.content).toBe("replacement");
+    emit({ type: "task_updated", task_id: "task-1", action: "comment" });
+    expect(activity).toHaveBeenCalledTimes(1);
+    await streams.abort("s", "obsolete");
+    await streams.abort("s", "remote");
+    expect(transport.abortCodexChatSession).toHaveBeenCalledExactlyOnceWith("p", "s", "remote", "user_stop");
+    emit({ type: "done", session: idle, message: { ...assistant, content: "saved", status: "aborted" } });
+    eof.resolve(true);
+    await Promise.resolve();
+    expect(streams.chatSnapshot()).toBe(freeform);
+    expect(streams.chatSnapshot().size).toBe(0);
+    expect(activity).toHaveBeenCalledTimes(2);
+    expect(streams.snapshot().get("s")).toMatchObject({ running: false, assistant: { content: "saved" } });
+    expect(transport.getCodexChatSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["done", "error"] as const)("hands a live observed run to its follow-up exactly once on saved %s", async terminal => {
+    const { streams, transport, requests, eof, subscribe, remote, idle, assistant, snapshot } = observedFixture();
+    streams.observe(remote, []);
+    const emit = subscribe.mock.calls[0][2];
+    emit(snapshot);
+    const follow = streams.send(remote, "改为检查目录", [], "remote");
+    expect(follow).toBeInstanceOf(Promise);
+    expect(transport.abortCodexChatSession).toHaveBeenCalledExactlyOnceWith("p", "s", "remote", "follow_up");
+    const message = { ...assistant, status: terminal === "error" ? "error" as const : "aborted" as const };
+    emit(terminal === "error" ? { type: "error", error: "中断", message } : { type: "done", session: idle, message });
+    const successor = streams.snapshot().get("s")!;
+    expect(successor.previous[0].assistant).toEqual(message);
+    expect(transport.streamCodexChatMessage).toHaveBeenCalledExactlyOnceWith("p", "s", { run_id: successor.runId, content: "改为检查目录", attachments: [] }, expect.any(Function));
+    emit({ type: "text_delta", delta: "late" });
+    eof.resolve(true);
+    await Promise.resolve();
+    expect(transport.getCodexChatSession).not.toHaveBeenCalled();
+    expect(streams.snapshot().get("s")).toBe(successor);
+    const next = requests.get("p/s")!;
+    next.emit({ type: "done", session: idle, message: { ...successor.assistant, status: "done" } });
+    next.end();
+    await follow;
+  });
+
+  it.each([false, true])("reconciles persisted history after a 204 or early EOF (connected=%s)", async connected => {
+    const { streams, transport, eof, subscribe, remote, idle, user, assistant, snapshot } = observedFixture();
+    const saved = { ...assistant, status: "done" as const, content: "persisted" };
+    transport.getCodexChatSession.mockResolvedValue({ session: idle, messages: [user, saved] });
+    streams.observe(remote, []);
+    if (connected) subscribe.mock.calls[0][2](snapshot);
+    eof.resolve(connected);
+    await vi.waitFor(() => expect(streams.snapshot().get("s")).toMatchObject({ running: false, user, assistant: saved }));
+    expect(transport.getCodexChatSession).toHaveBeenCalledExactlyOnceWith("p", "s");
+  });
+
+  it("never releases a queued interruption into a concurrent successor", async () => {
+    const { streams, transport, subscribe, eof, remote, user, assistant, snapshot, idle } = observedFixture();
+    const newer = { ...remote, active_run_id: "different" };
+    const newerUser = { ...user, id: "u2" }, newerAssistant = { ...assistant, id: "a2" };
+    transport.getCodexChatSession.mockResolvedValue({ session: newer, messages: [user, { ...assistant, status: "done" }, newerUser, newerAssistant] });
+    streams.observe(remote, [user, assistant]);
+    const follow = streams.send(remote, "仅针对原轮次", [], "remote");
+    const rejected = expect(follow).rejects.toThrow("未发送");
+    const [, , emit, signal] = subscribe.mock.calls[0];
+    emit({ ...snapshot, run_id: "different", session: newer, user_message: newerUser, assistant_message: newerAssistant });
+    expect(signal?.aborted).toBe(true);
+    eof.resolve(true);
+    await rejected;
+    expect(transport.streamCodexChatMessage).not.toHaveBeenCalled();
+    const secondEof = deferred<boolean>();
+    subscribe.mockReturnValueOnce(secondEof.promise);
+    expect(streams.takeUnsent("s")?.content).toBe("仅针对原轮次");
+    expect(streams.snapshot().get("s")).toMatchObject({ runId: "different", user: newerUser, running: true });
+    subscribe.mock.calls[1][2]({ type: "done", session: idle, message: { ...newerAssistant, status: "done" } });
+    secondEof.resolve(true);
+  });
+
+  it("does not infer ownership of a saved assistant when a dispatch never received its snapshot", async () => {
+    const { streams, transport, eof, remote, idle, user, assistant } = observedFixture();
+    transport.getCodexChatSession.mockResolvedValue({ session: idle, messages: [user, { ...assistant, status: "done" }] });
+    streams.observe(remote, []);
+    const follow = streams.send(remote, "草稿", [], "remote");
+    eof.resolve(false);
+    await expect(follow).rejects.toThrow("未发送");
+    expect(transport.streamCodexChatMessage).not.toHaveBeenCalled();
+    expect(streams.takeUnsent("s")?.content).toBe("草稿");
+  });
+
+  it("parses a subscribed SSE across mixed line endings and split UTF-8 codepoints, and distinguishes 204", async () => {
+    const bytes = new TextEncoder().encode('data: {"type":"text_delta","delta":"你"}\r\n\r\ndata: {"type":"status","message":"ok"}\n\n');
+    const body = new ReadableStream({ start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close(); } });
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(body)).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    try {
+      const emit = vi.fn();
+      expect(await api.subscribeCodexChatStream("p/1", "s/1", emit)).toBe(true);
+      expect(emit.mock.calls).toEqual([[{ type: "text_delta", delta: "你" }], [{ type: "status", message: "ok" }]]);
+      expect(await api.subscribeCodexChatStream("p/1", "s/1", emit)).toBe(false);
+      expect(fetch.mock.calls[0][0]).toBe("/api/projects/p%2F1/codex-chat/sessions/s%2F1/stream");
+    } finally { fetch.mockRestore(); }
+  });
+
 });

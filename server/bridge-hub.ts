@@ -147,6 +147,7 @@ export class BridgeHub {
   private readonly connections = new Map<string, Connection>();
   private readonly runs = new Map<string, Run>();
   private readonly cliRuns = new Map<string, CliRunHandle>();
+  private readonly availabilityListeners = new Set<(projectIds?: string[]) => void>();
   private readonly heartbeat: NodeJS.Timeout;
   private readonly timeout: number;
   private closing?: Promise<void>;
@@ -237,6 +238,24 @@ export class BridgeHub {
     const cliCount = Array.from(this.cliRuns.values()).filter(run => run.owner.id === agent.id).length;
     return { ...agent, online: !!this.live(agent.id), active_runs: chatCount + cliCount };
   }
+  onAvailabilityChange(listener: (projectIds?: string[]) => void): () => void {
+    this.availabilityListeners.add(listener);
+    return () => { this.availabilityListeners.delete(listener); };
+  }
+  private notifyAvailability(projectIds?: string[]) {
+    for (const listener of this.availabilityListeners) {
+      try { listener(projectIds); } catch { /* listener errors must not break hub */ }
+    }
+  }
+  hasActiveRunForProject(agentId: string, projectId: string): boolean {
+    for (const run of this.runs.values()) {
+      if (run.owner.id === agentId && run.project === projectId) return true;
+    }
+    for (const cli of this.cliRuns.values()) {
+      if (cli.owner.id === agentId && cli.project === projectId) return true;
+    }
+    return false;
+  }
   refresh(agentId: string) {
     const conn = this.live(agentId);
     if (!conn) throw new ApiError(409, "本机节点离线");
@@ -301,6 +320,12 @@ export class BridgeHub {
         const agent = this.agent(conn.id);
         this.send(conn, "hello.ack", { agent_id: conn.id, agent_name: agent.name, bindings: agent.bindings }, id);
       }
+      if (conn.ready) {
+        const readyProjects = Array.from(conn.projects.entries())
+          .filter(([, b]) => b.path_ok)
+          .map(([pid]) => pid);
+        if (readyProjects.length > 0) this.notifyAvailability(readyProjects);
+      }
     } else if (type === "workspace.fetch" || type === "workspace.push") {
       if (!id) throw new Error();
       try {
@@ -333,10 +358,13 @@ export class BridgeHub {
         }
         const mutating = MUTATING_TASK_ACTIONS.has(req.action);
         const { result, mutated } = this.store.transaction(mutating, () =>
-          this.store.chatAgentTaskOp(req.project_id, req.action, req.params),
+          this.store.chatAgentTaskOp(req.project_id, req.action, req.params, { sessionId: run.session }),
         );
         if (mutated) {
           run.emitTaskUpdated(mutated);
+          if (mutated.action === "create_task") {
+            this.notifyAvailability([req.project_id]);
+          }
         }
         this.send(conn, "task.rpc.result", { ok: true, data: result }, id);
       } catch (err) {
@@ -358,7 +386,10 @@ export class BridgeHub {
       // Realpath may canonicalize the requested directory on the device. Require
       // an echo of the requested path when accepting a different successful path.
       if ((p.requested_workdir ?? value.workdir) !== pending.workdir) return;
-      if (value.path_ok) this.saveReport(conn, value);
+      if (value.path_ok) {
+        this.saveReport(conn, value);
+        this.notifyAvailability([value.project_id]);
+      }
       pending.settle({ workdir: value.workdir, path_error: value.path_error, path_ok: value.path_ok });
     } else if (type === "chat.event") {
       const run = typeof p.run_id === "string" && this.runs.get(p.run_id);
@@ -466,6 +497,10 @@ export class BridgeHub {
           result = { ...result, content: result.content || redact(content, secrets), events: [...tools.values()] };
         }
         resolve(result);
+        const boundProjects = Array.from(conn.projects.entries())
+          .filter(([, b]) => b.path_ok)
+          .map(([pid]) => pid);
+        if (boundProjects.length > 0) this.notifyAvailability(boundProjects);
       };
       const stop = (reason: string, aborted = false, stopReason?: ChatTimeoutReason) => {
         finish({ status: aborted ? "aborted" : "error", content: "", error: reason, events: [], externalSessionId,
@@ -512,6 +547,10 @@ export class BridgeHub {
         clearTimeout(timer);
         onEvent(result);
         resolve(result);
+        const boundProjects = Array.from(conn.projects.entries())
+          .filter(([, b]) => b.path_ok)
+          .map(([pid]) => pid);
+        if (boundProjects.length > 0) this.notifyAvailability(boundProjects);
       };
       const stop = (reason: string) => {
         if (this.connections.get(agentId) === conn && conn.ws.readyState === WebSocket.OPEN) {

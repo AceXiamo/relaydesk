@@ -4,12 +4,11 @@ import { resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { BridgeHub } from "./bridge-hub.ts";
-import { formatChatHistory } from "./chat-history.ts";
+import { ChatRunManager } from "./chat-run-manager.ts";
+import { TaskDispatcher } from "./task-dispatcher.ts";
 
 import {
-  canResumeExternalSession,
   normalizeExecutionPriority,
-  resolveChatExecutionTarget,
   resolveCliRunBridgeTarget,
 } from "./execution-router.ts";
 import { ApiError } from "./errors.ts";
@@ -113,14 +112,8 @@ import {
   writeWorkspaceTextFile,
 } from "./workspace.ts";
 import {
-  RELAYDESK_MCP_INSTRUCTIONS,
-  abortChatSessionRun,
-  buildAttachmentContext,
-  buildResumePrompt,
   detectLocalClis,
   getChatRuntimeInfo,
-  isChatSessionRunning,
-  runWebCliChatTurn,
 } from "./codex-chat.ts";
 import {
   runWidgetAgentStream,
@@ -138,10 +131,13 @@ import type {
   BridgeAgentTokenResponse,
   ChatContextRef,
   ChatReasoningEffort,
+  ChatRuntime,
+  ChatSessionKind,
   ChatSessionRecord,
   ChatSandboxMode,
   ChatStreamEvent,
   GithubOwnerInfo,
+  ProjectRoutingConfig,
   WidgetConfigPayload,
   WorkspaceDatabaseKind,
 } from "../app/lib/types.ts";
@@ -172,8 +168,6 @@ function chatModelSelection(data: Record<string, unknown>) {
   return fields;
 }
 
-type ActiveChatRun = { id: string; controller: AbortController; reason?: "user_stop" | "follow_up" };
-
 const MAX_BRIDGE_FILE_BYTES = 20 * 1024 * 1024;
 
 export interface ApiContextOptions {
@@ -190,9 +184,8 @@ export class ApiRouter {
   readonly adminToken: string;
   readonly wallet: WalletAuth | null;
   readonly bindHost: string;
-  // Own the run from message creation through the terminal database transaction,
-  // not just while its CLI process is alive.
-  private readonly chatRuns = new Map<string, ActiveChatRun>();
+  readonly chatRuns: ChatRunManager;
+  readonly taskDispatcher: TaskDispatcher;
   private traffic = new Map<string, number[]>();
   private cliPresence = new Map<string, { seen: number; runtime: string; ready: boolean; managed: boolean; runId?: string }>();
   private assistantInFlight = 0;
@@ -205,6 +198,12 @@ export class ApiRouter {
     this.adminToken = options.adminToken ?? "";
     this.wallet = options.wallet ?? null;
     this.bindHost = options.bindHost ?? "127.0.0.1";
+    this.chatRuns = new ChatRunManager(this.store, this.bridgeHub);
+    this.taskDispatcher = new TaskDispatcher(this.store, this.bridgeHub, this.chatRuns);
+  }
+
+  close(): void {
+    this.taskDispatcher.close();
   }
 
   getAuthMode(): AuthMode {
@@ -522,7 +521,11 @@ export class ApiRouter {
       }
 
       // Operator Project execution routing & priority endpoints
-      if (parts.length === 3 && parts[0] === "projects" && parts[2] === "execution-routing") {
+      if (
+        parts.length === 3 &&
+        parts[0] === "projects" &&
+        (parts[2] === "execution-routing" || parts[2] === "routing")
+      ) {
         const result = await this.handleProjectExecutionRouting(req, method, parts[1]);
         this.sendJson(req, res, 200, result, meta);
         return;
@@ -576,6 +579,40 @@ export class ApiRouter {
         if (handled !== undefined) {
           this.sendJson(req, res, 200, handled, meta);
         }
+        return;
+      }
+
+      // Dedicated task agent session lookup and manual local agent dispatch
+      if (method === "GET" && parts.length === 3 && parts[0] === "tasks" && parts[2] === "agent-session") {
+        const result = this.store.transaction(false, () => {
+          const task = this.store.getTaskRow(parts[1]);
+          const session = this.store.getTaskChatSession(task.id);
+          if (!session) return { session: null, messages: [] };
+          const messages = this.store.listChatMessages(task.project_id, session.id);
+          const activeRunId = this.chatRuns.getActiveRunId(session.id);
+          return {
+            session: activeRunId ? { ...session, active_run_id: activeRunId } : session,
+            messages,
+          };
+        });
+        this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
+      if (method === "POST" && parts.length === 3 && parts[0] === "tasks" && parts[2] === "dispatch") {
+        const hasBody =
+          Number(req.headers["content-length"]) > 0 || req.headers["transfer-encoding"] !== undefined;
+        const body = hasBody ? await this.readJson(req, 32 * 1024) : {};
+        const selection = chatModelSelection(body);
+        const prompt =
+          typeof body.prompt === "string" && body.prompt.trim()
+            ? body.prompt.trim().slice(0, 16_000)
+            : undefined;
+        const dispatched = this.taskDispatcher.dispatchTaskManually(parts[1], {
+          ...selection,
+          ...(prompt ? { prompt } : {}),
+        });
+        this.sendJson(req, res, 200, dispatched, meta);
         return;
       }
 
@@ -989,6 +1026,9 @@ export class ApiRouter {
           }
           return latest;
         });
+        if (binding.enabled && binding.path_ok) {
+          this.taskDispatcher.schedule(projectId);
+        }
         return { binding };
       }
 
@@ -1000,6 +1040,9 @@ export class ApiRouter {
           ...(enabled !== undefined ? { enabled } : {}),
         }),
       );
+      if (binding.enabled && binding.path_ok) {
+        this.taskDispatcher.schedule(projectId);
+      }
       return { binding };
     }
 
@@ -1029,7 +1072,7 @@ export class ApiRouter {
       const data = await this.readJson(req, 16 * 1024);
       const agents = listDescribedAgents();
       const validIds = new Set(agents.map((a) => a.id));
-      const patch: { priority?: string[]; auto_fallback?: boolean; route_cli_runs?: boolean } = {};
+      const patch: Partial<ProjectRoutingConfig> = {};
 
       if ("priority" in data) {
         if (!Array.isArray(data.priority) || data.priority.length > 100) {
@@ -1074,10 +1117,59 @@ export class ApiRouter {
         }
         patch.route_cli_runs = data.route_cli_runs;
       }
+      if ("auto_dispatch_tasks" in data) {
+        if (typeof data.auto_dispatch_tasks !== "boolean") {
+          throw new ApiError(400, "auto_dispatch_tasks 必须为布尔值");
+        }
+        patch.auto_dispatch_tasks = data.auto_dispatch_tasks;
+      }
+      if ("task_runtime" in data) {
+        if (data.task_runtime === "" || data.task_runtime === null || data.task_runtime === undefined) {
+          patch.task_runtime = undefined;
+        } else if (data.task_runtime === "codex" || data.task_runtime === "claude") {
+          patch.task_runtime = data.task_runtime as ChatRuntime;
+        } else {
+          throw new ApiError(400, "task_runtime 无效");
+        }
+      }
+      if ("task_model" in data) {
+        if (data.task_model === "" || data.task_model === null || data.task_model === undefined) {
+          patch.task_model = "";
+        } else if (validCatalogId(data.task_model)) {
+          patch.task_model = data.task_model;
+        } else {
+          throw new ApiError(400, "task_model 无效");
+        }
+      }
+      if ("task_reasoning_effort" in data) {
+        if (
+          data.task_reasoning_effort === "" ||
+          data.task_reasoning_effort === null ||
+          data.task_reasoning_effort === undefined
+        ) {
+          patch.task_reasoning_effort = undefined;
+        } else if (
+          typeof data.task_reasoning_effort === "string" &&
+          Object.hasOwn(effortLabels, data.task_reasoning_effort)
+        ) {
+          patch.task_reasoning_effort = data.task_reasoning_effort as ChatReasoningEffort;
+        } else {
+          throw new ApiError(400, "task_reasoning_effort 无效");
+        }
+      }
+      if ("task_network_access" in data) {
+        if (typeof data.task_network_access !== "boolean") {
+          throw new ApiError(400, "task_network_access 必须为布尔值");
+        }
+        patch.task_network_access = data.task_network_access;
+      }
 
       const routing = this.store.transaction(true, () =>
         this.store.updateProjectExecutionRouting(projectId, patch),
       );
+      if (routing.auto_dispatch_tasks) {
+        this.taskDispatcher.schedule(projectId);
+      }
       return {
         routing,
         effective_priority: normalizeExecutionPriority(routing, agents),
@@ -1808,8 +1900,15 @@ export class ApiRouter {
     // GET / POST /api/projects/:id/codex-chat/sessions
     if (subparts.length === 1 && subparts[0] === "sessions") {
       if (method === "GET") {
+        const urlObj = new URL(req.url ?? "/", "http://127.0.0.1");
+        const rawKind = urlObj.searchParams.get("kind");
+        const kind: ChatSessionKind | "all" =
+          rawKind === "task" || rawKind === "all" ? rawKind : "chat";
         const sessions = this.store.transaction(false, () =>
-          this.store.listChatSessions(projectInfo.id),
+          this.store.listChatSessions(projectInfo.id, kind).map((s) => {
+            const activeRunId = this.chatRuns.getActiveRunId(s.id);
+            return activeRunId ? { ...s, active_run_id: activeRunId } : s;
+          }),
         );
         return { sessions };
       }
@@ -1862,8 +1961,8 @@ export class ApiRouter {
         return this.store.transaction(false, () => {
           const session = this.store.getChatSession(projectInfo.id, sessionId);
           const messages = this.store.listChatMessages(projectInfo.id, sessionId);
-          const run = this.chatRuns.get(sessionId);
-          return { session: run ? { ...session, active_run_id: run.id } : session, messages };
+          const activeRunId = this.chatRuns.getActiveRunId(sessionId);
+          return { session: activeRunId ? { ...session, active_run_id: activeRunId } : session, messages };
         });
       }
       if (method === "PATCH") {
@@ -1888,12 +1987,83 @@ export class ApiRouter {
       }
       if (method === "DELETE") {
         const removed = this.store.transaction(true, () => this.store.deleteChatSession(projectInfo.id, sessionId));
-        this.chatRuns.get(sessionId)?.controller.abort();
-        abortChatSessionRun(sessionId);
-        this.bridgeHub?.abortChatSessionRun(sessionId);
+        this.chatRuns.forceAbortSession(sessionId);
         return removed;
       }
       throw new ApiError(405, "Method not allowed");
+    }
+
+    // GET /api/projects/:id/codex-chat/sessions/:sessionId/stream
+    if (
+      subparts.length === 3 &&
+      subparts[0] === "sessions" &&
+      subparts[2] === "stream" &&
+      method === "GET"
+    ) {
+      const sessionId = subparts[1];
+      this.store.transaction(false, () => this.store.getChatSession(projectInfo.id, sessionId));
+      if (!this.chatRuns.getActiveRunId(sessionId)) {
+        res.statusCode = 204;
+        res.setHeader("Cache-Control", "no-store");
+        res.end();
+        return undefined;
+      }
+
+      let headersSent = false;
+      const preflush: ChatStreamEvent[] = [];
+      const writeEvent = (event: ChatStreamEvent) => {
+        if (!headersSent) {
+          preflush.push(event);
+          return;
+        }
+        if (res.writableEnded || res.destroyed) return;
+        res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      };
+
+      const unsubscribe = this.chatRuns.subscribe(
+        sessionId,
+        {
+          onEvent: writeEvent,
+          onClose: () => {
+            if (!res.writableEnded) res.end();
+          },
+        },
+        { replaySnapshot: true },
+      );
+      if (!unsubscribe) {
+        res.statusCode = 204;
+        res.setHeader("Cache-Control", "no-store");
+        res.end();
+        return undefined;
+      }
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.flushHeaders?.();
+      headersSent = true;
+      for (const ev of preflush) {
+        writeEvent(ev);
+      }
+      preflush.length = 0;
+
+      res.on("close", () => {
+        unsubscribe();
+      });
+
+      await new Promise<void>((resolveStream) => {
+        if (res.writableEnded || res.destroyed) {
+          resolveStream();
+          return;
+        }
+        res.once("close", resolveStream);
+        res.once("finish", resolveStream);
+      });
+      return undefined;
     }
 
     // POST /api/projects/:id/codex-chat/sessions/:sessionId/abort
@@ -1910,11 +2080,12 @@ export class ApiRouter {
       if (data.reason !== undefined && data.reason !== "follow_up" && data.reason !== "user_stop") {
         throw new ApiError(400, "无效的停止原因");
       }
-      const run = this.chatRuns.get(sessionId);
-      if (!run || run.id !== data.run_id) return { aborted: false };
-      run.reason ??= data.reason === "follow_up" ? "follow_up" : "user_stop";
-      run.controller.abort();
-      return { aborted: true };
+      const aborted = this.chatRuns.abort(
+        sessionId,
+        data.run_id,
+        data.reason === "follow_up" ? "follow_up" : "user_stop",
+      );
+      return { aborted };
     }
 
     // POST /api/projects/:id/codex-chat/sessions/:sessionId/title
@@ -1994,71 +2165,30 @@ export class ApiRouter {
 
       const runId = data.run_id === undefined ? randomUUID() : data.run_id;
       if (typeof runId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(runId)) throw new ApiError(400, "无效的运行 ID");
-      if (this.chatRuns.has(sessionId) || isChatSessionRunning(sessionId) || this.bridgeHub?.isChatSessionRunning(sessionId)) {
-        throw new ApiError(409, "当前会话正在生成回复，请等待完成或先点击停止。");
-      }
 
-      const localClis = detectLocalClis();
-      const {
-        session,
-        priorMessages,
-        userMessage,
-        assistantMessage,
-        provisionalTitle,
-        resolvedTarget,
-      } = this.store.transaction(true, () => {
-        let current = this.store.getChatSession(projectInfo.id, sessionId);
-        const resolved = resolveChatExecutionTarget({
-          store: this.store,
-          bridgeHub: this.bridgeHub,
-          projectId: projectInfo.id,
-          executionTarget: current.execution_target || "auto",
-          runtime: current.runtime,
-          localClis: { codex: localClis.codex, claude: localClis.claude },
-        });
-        const prior = this.store.listChatMessages(projectInfo.id, sessionId);
-        // Auto-title session from the first user message when still using default title.
-        const autoTitle =
-          prior.length === 0 && (!current.title || current.title === "新对话")
-            ? buildFallbackSessionTitle(content)
-            : undefined;
-        current = this.store.updateChatSession(projectInfo.id, sessionId, {
-          ...(autoTitle ? { title: autoTitle } : {}),
-          status: "running",
-        });
-        const userMsg = this.store.addChatMessage(sessionId, {
-          role: "user",
-          content,
-          attachments,
-          status: "done",
-        });
-        const assistantMsg = this.store.addChatMessage(sessionId, {
-          id: createHash("sha256").update(`${sessionId}:${runId}`).digest("hex").slice(0, 32),
-          role: "assistant",
-          content: "",
-          events: [],
-          status: "streaming",
-        });
-        return {
-          session: current,
-          priorMessages: prior,
-          userMessage: userMsg,
-          assistantMessage: assistantMsg,
-          provisionalTitle: autoTitle,
-          resolvedTarget: resolved,
-        };
-      });
-      const { targetKey, localAgentId, localBinding } = resolvedTarget;
-
-      const abortController = new AbortController();
-      const run: ActiveChatRun = {
-        id: runId, controller: abortController,
-      };
-      this.chatRuns.set(sessionId, run);
-      res.on("close", () => {
-        if (!res.writableEnded) {
-          abortController.abort();
+      let headersSent = false;
+      const preflush: ChatStreamEvent[] = [];
+      const writeEvent = (event: ChatStreamEvent) => {
+        if (!headersSent) {
+          preflush.push(event);
+          return;
         }
+        if (res.writableEnded || res.destroyed) return;
+        res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      };
+
+      const started = this.chatRuns.startTurn({
+        projectInfo,
+        sessionId,
+        content,
+        attachments,
+        runId,
+        initialSubscriber: {
+          onEvent: writeEvent,
+          onClose: () => {
+            if (!res.writableEnded) res.end();
+          },
+        },
       });
 
       res.statusCode = 200;
@@ -2069,240 +2199,25 @@ export class ApiRouter {
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("Referrer-Policy", "no-referrer");
       res.flushHeaders?.();
+      headersSent = true;
+      for (const ev of preflush) {
+        writeEvent(ev);
+      }
+      preflush.length = 0;
 
-      const writeEvent = (event: ChatStreamEvent) => {
-        if (res.writableEnded || res.destroyed) return;
-        res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-      };
-
-      writeEvent({
-        type: "session",
-        session: { ...session, active_run_id: runId },
-        user_message: userMessage,
-        assistant_message_id: assistantMessage.id,
+      // Client disconnect only unsubscribes from the SSE stream; the run continues on the server.
+      res.on("close", () => {
+        started.unsubscribe();
       });
 
-      // Asynchronously refine the session title with the global utility model (or project fallback).
-      const titlePromise = provisionalTitle
-        ? generateSessionTitle(this.store.dbPath, {
-            projectId: projectInfo.id,
-            userMessage: content,
-          })
-            .then((aiTitle) => {
-              if (!aiTitle || aiTitle === provisionalTitle) return;
-              const updated = this.store.transaction(true, () => {
-                try {
-                  const latest = this.store.getChatSession(projectInfo.id, sessionId);
-                  if (latest.title !== provisionalTitle) return null;
-                  return this.store.updateChatSession(projectInfo.id, sessionId, {
-                    title: aiTitle,
-                  });
-                } catch {
-                  return null;
-                }
-              });
-              if (updated) {
-                writeEvent({ type: "session_updated", session: updated });
-              }
-            })
-            .catch(() => {
-              // Non-fatal: keep provisional fallback title
-            })
-        : Promise.resolve();
-
-      const canResumePrior = canResumeExternalSession(session, targetKey);
-      // A thread ID can be issued before the CLI checkpoints its first turn.
-      // Carry the interrupted turn on resume as well as on a fresh invocation.
-      const last = priorMessages.at(-1);
-      const prompt = canResumePrior && last?.role === "assistant" && (last.status === "aborted" || last.status === "error")
-        ? `## Interrupted turn\n${formatChatHistory(priorMessages.slice(-2))}\n\n## User Message\n${content}`
-        : content;
-      if (resolvedTarget.fallbackFrom) {
-        const destLabel = localAgentId
-          ? `本机「${resolvedTarget.agentName || localAgentId}」`
-          : "云端执行器";
-        writeEvent({
-          type: "status",
-          message: `${resolvedTarget.fallbackReason || `${resolvedTarget.fallbackFrom}不可用`}，已自动降级到${destLabel}执行`,
-        });
-      } else if (localAgentId) {
-        writeEvent({
-          type: "status",
-          message: `正在由本机节点「${resolvedTarget.agentName || localAgentId}」执行…`,
-        });
-      }
-      const resolveTask = (taskId: string) => {
-        try {
-          const row = this.store.getTaskRow(taskId);
-          if (row.project_id !== projectInfo.id) return null;
-          return {
-            task: toTaskView(row),
-            messages: this.store.getTaskMessages(row.id),
-            merged: this.store.getMergedTasks(row.id),
-          };
-        } catch {
-          return null;
-        }
-      };
-
-      try {
-        let result;
-        if (localAgentId) {
-          const workspaceManifest = buildWorkspaceManifest(this.store.dbPath, projectInfo.id);
-          const datasourceRuntime = getWorkspaceDatasourceRuntimeEnv(this.store.dbPath, projectInfo.id);
-          const workspaceFilePaths = new Set(workspaceManifest.files.map((file) => file.path));
-          const bridgeAttachments = attachments.filter(
-            (att) => (att.kind !== "file" && att.kind !== "image") || workspaceFilePaths.has(att.ref),
-          );
-          const bridgeImagePaths = bridgeAttachments
-            .filter((att) => att.kind === "image")
-            .map((att) => att.ref);
-          const attachmentContext = buildAttachmentContext(
-            this.store.dbPath,
-            projectInfo,
-            bridgeAttachments,
-            workspaceManifest.databases,
-            resolveTask,
-            { spaceDirVar: "$RELAYDESK_SPACE_DIR" },
-          );
-          const contextBlocks = [RELAYDESK_MCP_INSTRUCTIONS];
-          if (projectInfo.agent_instructions.trim()) {
-            contextBlocks.push(`## Project Instructions\n${projectInfo.agent_instructions.trim().slice(0, 4000)}`);
-          }
-          if (workspaceManifest.databases.length > 0) {
-            const dbLines = workspaceManifest.databases.map((db) => {
-              if (db.source === "workspace_file") {
-                return `- [SQLite] ${db.name}: path=$RELAYDESK_SPACE_DIR/files/${db.file_path} (${db.table_count ?? 0} tables; queryable via relaydesk MCP tools)`;
-              }
-              const envPart =
-                localBinding?.allow_datasource_secrets && db.has_connection_url && db.env_var
-                  ? `env=$${db.env_var} (queryable via relaydesk MCP tools)`
-                  : "credentials not exported to this device";
-              const accessPart = db.read_only ? "STRICT READ-ONLY" : "read-write";
-              const notePart = db.notes ? `\n  Notes: ${db.notes.slice(0, 1000)}` : "";
-              return `- [${db.kind.toUpperCase()}] ${db.name}: ${envPart}, endpoint=${db.host_preview || "external"}, access=${accessPart}${notePart}`;
-            });
-            contextBlocks.push(`## Project Databases\n${dbLines.join("\n")}`);
-          }
-          if (priorMessages.length) contextBlocks.push(`## Previous Conversation Summary\n${formatChatHistory(priorMessages)}`);
-          if (!canResumePrior && attachmentContext) contextBlocks.push(`## Explicitly Attached Context\n${attachmentContext}`);
-          result = await this.bridgeHub!.runChatTurn(
-            localAgentId,
-            {
-              session_id: sessionId,
-              project_id: projectInfo.id,
-              runtime: session.runtime,
-              model: session.model,
-              reasoning_effort: session.reasoning_effort,
-              sandbox_mode: session.sandbox_mode,
-              network_access: session.network_access,
-              resume_session_id: canResumePrior ? session.external_session_id : "",
-              prompt: canResumePrior ? buildResumePrompt(prompt, attachmentContext) : prompt,
-              system_context: contextBlocks.join("\n\n"),
-              workspace_manifest: workspaceManifest,
-              ...(bridgeImagePaths.length ? { image_paths: bridgeImagePaths } : {}),
-              ...(localBinding?.allow_datasource_secrets
-                ? {
-                    datasource_env: datasourceRuntime.env,
-                    pg_read_only_enforced: datasourceRuntime.pgReadOnlyEnforced,
-                  }
-                : {}),
-            },
-            writeEvent,
-            abortController.signal,
-            datasourceRuntime.secrets,
-          );
-        } else {
-          const mutatingActions = new Set(["comment_task", "update_task", "transition_task", "create_task"]);
-          result = await runWebCliChatTurn({
-            dbPath: this.store.dbPath,
-            project: projectInfo,
-            session: canResumePrior ? session : { ...session, external_session_id: "" },
-            prompt,
-            attachments,
-            priorMessages,
-            signal: abortController.signal,
-            resolveTask,
-            taskClient: {
-              call: async (action, params) => {
-                const { result: opResult, mutated } = this.store.transaction(
-                  mutatingActions.has(action),
-                  () => this.store.chatAgentTaskOp(projectInfo.id, action, params),
-                );
-                if (mutated) {
-                  writeEvent({ type: "task_updated", task_id: mutated.task_id, action: mutated.action });
-                }
-                return opResult;
-              },
-            },
-            onEvent: writeEvent,
-          });
-        }
-
-        // Wait briefly for concurrent title generation if it is almost done.
-        if (provisionalTitle) {
-          await Promise.race([
-            titlePromise,
-            new Promise((resolve) => setTimeout(resolve, 600)),
-          ]);
-        }
-
-        const saved = this.store.transaction(true, () => {
-          const updatedMsg = this.store.updateChatMessage(assistantMessage.id, {
-            content:
-              result.status === "error" && !result.content && result.error
-                ? `执行失败：${result.error}`
-                : result.content,
-            events: result.events,
-            status: result.status,
-            stop_reason: result.stopReason ?? (result.status === "aborted" ? run.reason : undefined),
-          });
-          const current = this.store.getChatSession(projectInfo.id, sessionId);
-          const canResume =
-            current.runtime === session.runtime &&
-            current.sandbox_mode === session.sandbox_mode &&
-            current.network_access === session.network_access &&
-            current.execution_target === session.execution_target;
-          const nextExternalId = canResume ? result.externalSessionId : "";
-          const updatedSession = this.store.updateChatSession(projectInfo.id, sessionId, {
-            external_session_id: nextExternalId,
-            resolved_target: targetKey,
-            status: result.status === "error" ? "error" : "idle",
-          });
-          return { updatedMsg, updatedSession };
-        });
-
-        if (result.status === "error" && result.error) {
-          writeEvent({ type: "error", error: result.error, message: saved.updatedMsg });
-        } else {
-          writeEvent({
-            type: "done",
-            message: saved.updatedMsg,
-            session: saved.updatedSession,
-          });
-        }
-      } catch (err) {
-        // A DELETE during the turn removes the session and messages before the runner settles.
-        if (err instanceof ApiError && err.status === 404) {
-          writeEvent({ type: "error", error: "对话已删除或不可用" });
+      await new Promise<void>((resolveStream) => {
+        if (res.writableEnded || res.destroyed) {
+          resolveStream();
           return;
         }
-        const errMsg = err instanceof Error ? err.message : "对话执行异常";
-        const savedMsg = this.store.transaction(true, () => {
-          const msg = this.store.updateChatMessage(assistantMessage.id, {
-            content: `执行异常：${errMsg}`,
-            status: "error",
-          });
-          this.store.updateChatSession(projectInfo.id, sessionId, { status: "error" });
-          return msg;
-        });
-        writeEvent({ type: "error", error: errMsg, message: savedMsg });
-      } finally {
-        this.chatRuns.delete(sessionId);
-        if (!res.writableEnded) {
-          res.end();
-        }
-      }
+        res.once("close", resolveStream);
+        res.once("finish", resolveStream);
+      });
       return undefined;
     }
 
@@ -2700,7 +2615,11 @@ export class ApiRouter {
           return { project: toProjectView(project) };
         }
         if (method === "PATCH") {
-          return { project: this.store.updateProject(projectId, data) };
+          const updated = this.store.updateProject(projectId, data);
+          if (!updated.automation_paused) {
+            postCommit.push(() => this.taskDispatcher.schedule(projectId));
+          }
+          return { project: updated };
         }
       }
 
@@ -2710,10 +2629,13 @@ export class ApiRouter {
         }
         if (method === "POST") {
           const created = this.store.createTask(projectId, data, "console");
-          if (data.skip_prescreen !== true) {
+          const routing = this.store.getProjectExecutionRouting(projectId);
+          if (!project.automation_paused && routing.auto_dispatch_tasks) {
+            postCommit.push(() => this.taskDispatcher.schedule(projectId));
+          } else if (data.skip_prescreen !== true) {
             postCommit.push(() => this.schedulePrescreen(project, created));
           }
-          return { task: toTaskView(created) };
+          return { task: this.store.getTaskView(created.id) };
         }
       }
 
@@ -2726,7 +2648,10 @@ export class ApiRouter {
         this.checkBearer(req, source === "bot" ? project.bot_key : project.intake_key);
         this.rateLimit(`${projectId}:intake`, 120);
         const created = this.store.createTask(projectId, data, source);
-        if (data.skip_prescreen !== true) {
+        const routing = this.store.getProjectExecutionRouting(projectId);
+        if (!project.automation_paused && routing.auto_dispatch_tasks) {
+          postCommit.push(() => this.taskDispatcher.schedule(projectId));
+        } else if (data.skip_prescreen !== true) {
           postCommit.push(() => this.schedulePrescreen(project, created));
         }
         return { task_id: created.id, number: created.number };
@@ -2762,20 +2687,28 @@ export class ApiRouter {
       const taskRow = this.store.getTaskRow(parts[1]);
       if (parts.length === 2 && method === "GET") {
         return {
-          task: toTaskView(taskRow),
+          task: this.store.getTaskView(taskRow.id),
           messages: this.store.getTaskMessages(taskRow.id),
           merged: this.store.getMergedTasks(taskRow.id),
         };
       }
       if (parts.length === 3 && parts[2] === "messages" && method === "POST") {
-        return this.store.operatorAddComment(
+        const res = this.store.operatorAddComment(
           taskRow.id,
           field(data, "body", 12000),
           data.reopen !== false,
         );
+        if (res.task.owner === "none" && (res.task.status === "ready" || res.task.status === "triage")) {
+          postCommit.push(() => this.taskDispatcher.schedule(taskRow.project_id));
+        }
+        return { ...res, task: this.store.getTaskView(taskRow.id) };
       }
       if (parts.length === 3 && parts[2] === "action" && method === "POST") {
-        return this.store.operatorAction(taskRow.id, data);
+        const res = this.store.operatorAction(taskRow.id, data);
+        if (res.task.owner === "none" && (res.task.status === "ready" || res.task.status === "triage")) {
+          postCommit.push(() => this.taskDispatcher.schedule(taskRow.project_id));
+        }
+        return { task: this.store.getTaskView(taskRow.id) };
       }
     }
 
