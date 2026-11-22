@@ -460,10 +460,10 @@ export function TaskQueueView({
   return (
     <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
       {/* Page Header */}
-      <header className="shrink-0 px-3.5 sm:px-5 lg:px-7 py-2.5 sm:py-4 border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)]">
+      <header className="shrink-0 px-3.5 sm:px-5 lg:px-7 py-2 lg:py-4 border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)]">
         {/* Autonomous Pipeline Control Bar */}
         <div
-          className={`mb-2.5 sm:mb-3.5 px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl border flex items-center justify-between gap-2 transition-colors duration-200 ${
+          className={`mb-2 lg:mb-3.5 px-2.5 sm:px-3.5 py-1.5 lg:py-2 rounded-xl border flex items-center justify-between gap-2 transition-colors duration-200 ${
             paused
               ? "border-amber-500/25 bg-amber-500/[0.045] dark:bg-amber-500/[0.06]"
               : "border-emerald-500/20 bg-emerald-500/[0.035] dark:bg-emerald-500/[0.05]"
@@ -542,7 +542,7 @@ export function TaskQueueView({
         {/* Pending Deploy Status Bar */}
         {showDeployBar && (
           <div
-            className={`mb-2.5 sm:mb-3.5 px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl border flex flex-wrap items-center justify-between gap-2 transition-colors ${
+            className={`mb-2 lg:mb-3.5 px-2.5 sm:px-3.5 py-1.5 lg:py-2 rounded-xl border flex flex-wrap items-center justify-between gap-2 transition-colors ${
               metrics.deployingDeploy > 0
                 ? "border-indigo-500/30 bg-indigo-500/[0.06]"
                 : metrics.failedDeploy > 0 && metrics.pendingDeploy === 0
@@ -647,8 +647,8 @@ export function TaskQueueView({
         {/* Interactive Telemetry Strip (KPI Cards on Queue view) */}
         {view === "queue" && (
           <>
-            {/* Mobile (< sm): Compact 4-column telemetry strip */}
-            <div className="grid grid-cols-4 gap-1.5 mt-2.5 sm:hidden">
+            {/* Compact strip for the mobile and tablet navigation layout */}
+            <div className="mt-2 grid grid-cols-4 gap-1.5 lg:hidden">
               {telemetryCards.map((card) => {
                 const mobileLabel =
                   card.key === "auto_pending"
@@ -663,7 +663,7 @@ export function TaskQueueView({
                     key={card.key}
                     type="button"
                     onClick={card.onClick}
-                    className={`flex flex-col items-center justify-center px-1.5 py-1.5 rounded-xl border text-center transition-colors cursor-pointer ${
+                    className={`flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-lg border px-1.5 text-center sm:flex-row sm:gap-2 transition-colors cursor-pointer ${
                       card.active
                         ? `${card.activeRing} shadow-2xs`
                         : "border-[var(--border-subtle)] bg-[var(--surface-card)] active:bg-[var(--surface-hover)]"
@@ -674,7 +674,7 @@ export function TaskQueueView({
                       {card.pulse && <LivePulseDot tone="amber" active />}
                     </div>
                     <div
-                      className={`text-[16px] font-semibold font-mono tabular-nums leading-tight mt-1 ${
+                      className={`text-[16px] font-semibold font-mono tabular-nums leading-tight ${
                         card.key === "shipped" && card.count > 0
                           ? "text-emerald-600 dark:text-emerald-400"
                           : card.key === "attention" && card.count > 0
@@ -689,8 +689,8 @@ export function TaskQueueView({
               })}
             </div>
 
-            {/* Desktop (>= sm): Full KPI cards */}
-            <div className="hidden sm:grid sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3.5">
+            {/* Full KPI cards alongside the desktop navigation */}
+            <div className="hidden lg:grid grid-cols-4 gap-2.5 mt-3.5">
               {telemetryCards.map((card) => (
                 <button
                   key={card.key}
@@ -736,7 +736,7 @@ export function TaskQueueView({
         )}
 
         {/* Filter Bar */}
-        <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 mt-2.5 sm:mt-3.5">
+        <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 mt-2 lg:mt-3.5">
           <div className="relative w-full sm:flex-1 sm:min-w-[200px] sm:max-w-md">
             <Icon
               name="search"
