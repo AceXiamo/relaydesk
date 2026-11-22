@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { getAddress, isAddress, recoverMessageAddress } from "viem";
 import type { Hex } from "viem";
 
@@ -31,7 +31,19 @@ export class WalletAuth {
   private pending = new Map<string, { expiresAt: number; message: string }>();
   private sessions = new Map<string, number>();
 
-  constructor(address: string, origin: string) {
+  private passwordDigest?: Buffer;
+
+  get passwordEnabled(): boolean {
+    return !!this.passwordDigest;
+  }
+
+  constructor(address: string, origin: string, passwordHash?: string) {
+    if (passwordHash) {
+      if (passwordHash.length !== 64 || /[^0-9a-f]/i.test(passwordHash)) {
+        throw new Error("Invalid RELAYDESK_ADMIN_PASSWORD_SHA256");
+      }
+      this.passwordDigest = Buffer.from(passwordHash, "hex");
+    }
     let parsed: URL;
     try {
       parsed = new URL(origin);
@@ -107,6 +119,16 @@ export class WalletAuth {
     if (getAddress(signer) !== this.address) {
       return null;
     }
+    return this.createSession();
+  }
+
+  verifyPassword(password: unknown): string | null {
+    if (!this.passwordDigest || typeof password !== "string" || !password.endsWith(".")) return null;
+    const digest = createHash("sha256").update(password, "utf8").digest();
+    return timingSafeEqual(this.passwordDigest, digest) ? this.createSession() : null;
+  }
+
+  private createSession(): string {
     const token = randomBytes(32).toString("base64url");
     if (this.sessions.size >= 128) {
       const oldest = this.sessions.keys().next().value;

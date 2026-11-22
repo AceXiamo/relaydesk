@@ -336,6 +336,7 @@ if (isEntrypoint) {
     wallet = new WalletAuth(
       process.env.RELAYDESK_ADMIN_WALLET,
       process.env.RELAYDESK_ORIGIN ?? "",
+      process.env.RELAYDESK_ADMIN_PASSWORD_SHA256,
     );
   }
   const running = await startRelaydeskServer({

@@ -1218,6 +1218,7 @@ export class ApiRouter {
       const status: AuthStatusPayload = {
         mode,
         authenticated,
+        ...(this.wallet?.passwordEnabled ? { passwordEnabled: true } : {}),
         ...(this.wallet ? { address: this.wallet.address } : {}),
       };
       return status;
@@ -1240,6 +1241,13 @@ export class ApiRouter {
       } catch (err) {
         throw new ApiError(400, err instanceof Error ? err.message : "Invalid chain ID");
       }
+    }
+    if (endpoint === "password" && subparts.length === 1 && this.wallet.passwordEnabled) {
+      this.rateLimit("admin:password", 10);
+      const token = this.wallet.verifyPassword(data.password);
+      if (!token) throw new ApiError(401, "登录失败，请检查密码。");
+      meta.sessionCookie = formatSessionCookie(token);
+      return { ok: true };
     }
     if (endpoint === "verify" && subparts.length === 1) {
       const nonce = field(data, "nonce", 48);

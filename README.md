@@ -61,6 +61,7 @@ pnpm start
 公网部署时请通过 HTTPS 反向代理暴露服务，并设置：
 
 - `RELAYDESK_ADMIN_WALLET`：管理员以太坊地址（EOA）
+- `RELAYDESK_ADMIN_PASSWORD_SHA256`（可选）：在服务端密钥配置中设置完整密码（包含末尾英文句点，UTF-8，无额外换行）的 64 位十六进制 SHA-256 摘要，重启后启用同一管理员的密码登录。未设置时仅保留钱包入口。
 - `RELAYDESK_ORIGIN`：完整 HTTPS 来源，例如 `https://relaydesk.acexiamo.com`
 
 登录页支持 EIP-6963 多钱包发现与 SIWE 签名验证，签发 12 小时 `HttpOnly; Secure; SameSite=Strict` 会话 Cookie。钱包模式优先于 `RELAYDESK_ADMIN_TOKEN`；未配置时仅允许本机回环访问。

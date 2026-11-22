@@ -162,6 +162,7 @@ export interface DiscussResult {
 export type AuthMode = "none" | "token" | "wallet";
 
 export interface AuthStatusPayload {
+  passwordEnabled?: boolean;
   mode: AuthMode;
   authenticated: boolean;
   address?: string;

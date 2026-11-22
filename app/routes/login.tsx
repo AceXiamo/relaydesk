@@ -162,7 +162,7 @@ function extractErrorMessage(error: unknown): string {
   return "登录失败，请重试。";
 }
 
-async function postAuth<T>(action: "challenge" | "verify", payload: Record<string, unknown>): Promise<T> {
+async function postAuth<T>(action: "challenge" | "verify" | "password", payload: Record<string, unknown>): Promise<T> {
   const response = await fetch(`/api/auth/${action}`, {
     method: "POST",
     credentials: "same-origin",
@@ -186,6 +186,9 @@ async function postAuth<T>(action: "challenge" | "verify", payload: Record<strin
 
 export default function LoginRoute() {
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const [passwordEnabled, setPasswordEnabled] = useState(false);
+  const [passwordPending, setPasswordPending] = useState(false);
+  const [passwordError, setPasswordError] = useState("");
   const [redirecting, setRedirecting] = useState(false);
   const [expectedAdminAddress, setExpectedAdminAddress] = useState<string | null>(null);
   const [eip6963Wallets, setEip6963Wallets] = useState<WalletOption[]>([]);
@@ -251,6 +254,7 @@ export default function LoginRoute() {
         if (response.ok) {
           const data = (await response.json()) as AuthStatusPayload;
           if (!active) return;
+          setPasswordEnabled(data.passwordEnabled === true);
           if (data.address) {
             setExpectedAdminAddress(data.address);
           }
@@ -420,7 +424,7 @@ export default function LoginRoute() {
     }
   }, [selectedWallet]);
 
-  const isBusy = phase === "connect" || phase === "verify_address" || phase === "sign" || phase === "complete";
+  const isBusy = passwordPending || phase === "connect" || phase === "verify_address" || phase === "sign" || phase === "complete";
   const activeStepIndex =
     phase === "connect"
       ? 0
@@ -598,6 +602,38 @@ export default function LoginRoute() {
                 </div>
 
                 {/* Wallet Selection */}
+                {passwordEnabled && (
+                  <form className="space-y-2" onSubmit={async (event) => {
+                    event.preventDefault();
+                    if (inFlightRef.current) return;
+                    const form = event.currentTarget;
+                    const password = new FormData(form).get("password");
+                    inFlightRef.current = true;
+                    setPasswordPending(true);
+                    setPasswordError("");
+                    try {
+                      await postAuth("password", { password });
+                      form.reset();
+                      window.location.replace(resolveSafeRedirectTarget());
+                    } catch (error) {
+                      setPasswordError(extractErrorMessage(error));
+                    } finally {
+                      inFlightRef.current = false;
+                      setPasswordPending(false);
+                    }
+                  }}>
+                    <label htmlFor="admin-password" className="text-sm">管理员密码</label>
+                    <div className="flex gap-2">
+                      <input id="admin-password" name="password" type="password" required
+                        autoComplete="current-password" autoCapitalize="none" spellCheck={false}
+                        className="min-w-0 flex-1 rounded-lg border bg-transparent px-3 py-2 text-base" />
+                      <button disabled={isBusy} className="rounded-lg bg-indigo-600 px-3 text-sm text-white">
+                        {passwordPending ? "登录中…" : "密码登录"}
+                      </button>
+                    </div>
+                    {passwordError && <p role="alert" className="text-sm text-red-600">{passwordError}</p>}
+                  </form>
+                )}
                 <div className="space-y-2.5">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
