@@ -122,7 +122,7 @@ describe("RD-6 SQLite migration & store invariants", () => {
 
       // Default deploy policy applied to legacy project
       const project = store.getProjectDetail("proj_legacy");
-      expect(project.deploy_policy.mode).toBe("none");
+      expect(project.deploy_policy).toMatchObject({ mode: "none", runtime: null, model: null });
 
       // New kind='release' session and releases table work cleanly
       const { release: rel, session: relSession } = store.createRelease("proj_legacy", {
@@ -284,6 +284,8 @@ describe("RD-6 deploy window calculation & ReleaseDispatcher scheduling logic", 
     window_end: "06:00",
     timezone: "Asia/Shanghai",
     allow_urgent_override: true,
+    runtime: null,
+    model: null,
     doc_path: "",
   };
 
@@ -459,7 +461,9 @@ describe("RD-6 end-to-end API, Bridge Release Agent, Concurrency Lock, Abnormal 
     const projectId = await f.project("Release E2E");
     const { token } = await f.register("deploy-mac");
     const conn = await f.connect(token);
-    await conn.hello([{ project_id: projectId, workdir: "/repo/e2e", path_ok: true }]);
+    await conn.hello([{ project_id: projectId, workdir: "/repo/e2e", path_ok: true }], {
+      runtimes: { codex: { available: true }, claude: { available: true } },
+    });
 
     // 1. Validate deploy-policy REST API
     const badTz = await f.api(`/projects/${projectId}/deploy-policy`, "PUT", {
@@ -474,11 +478,17 @@ describe("RD-6 end-to-end API, Bridge Release Agent, Concurrency Lock, Abnormal 
     });
     expect(badTime.status).toBe(400);
 
+    for (const invalid of [{ runtime: "unknown" }, { runtime: "claude", model: "bad model" }]) {
+      expect((await f.api(`/projects/${projectId}/deploy-policy`, "PUT", invalid)).status).toBe(400);
+    }
     const policyRes = await f.ok(`/projects/${projectId}/deploy-policy`, "PUT", {
       mode: "immediate",
+      runtime: "claude",
+      model: "release-model",
       doc_path: "",
     });
-    expect(policyRes.deploy_policy.mode).toBe("immediate");
+    expect(policyRes.deploy_policy).toMatchObject({ mode: "immediate", runtime: "claude", model: "release-model" });
+    expect((await f.ok(`/projects/${projectId}/deploy-policy`)).deploy_policy).toEqual(policyRes.deploy_policy);
 
     // 2. Save and read workspace DEPLOY.md and verify manifest includes deploy_doc
     const docBefore = await f.ok(`/projects/${projectId}/workspace/deploy-doc`);
@@ -498,12 +508,15 @@ describe("RD-6 end-to-end API, Bridge Release Agent, Concurrency Lock, Abnormal 
     expect(manifest.deploy_doc?.sha256).toMatch(/^[0-9a-f]{64}$/);
 
     // 3. Enable auto_dispatch_tasks and create a task -> task agent finishes via MCP transition_task
-    await f.ok(`/projects/${projectId}/execution-routing`, "PATCH", { auto_dispatch_tasks: true });
+    await f.ok(`/projects/${projectId}/execution-routing`, "PATCH", {
+      auto_dispatch_tasks: true, task_runtime: "codex", task_model: "task-model",
+    });
     const created = await f.ok(`/projects/${projectId}/tasks`, "POST", {
       title: "修复首页加载闪烁",
       body: "首屏渲染闪烁",
     });
     const taskStart = await conn.next("chat.start");
+    expect(taskStart.payload).toMatchObject({ runtime: "codex", model: "task-model" });
     expect(String(taskStart.payload.system_context)).toContain("Do NOT deploy to production");
 
     // Task Agent transitions task to done (shipped) -> enters deploy_status='pending'
@@ -531,6 +544,7 @@ describe("RD-6 end-to-end API, Bridge Release Agent, Concurrency Lock, Abnormal 
     });
 
     const releaseStart = await conn.next("chat.start");
+    expect(releaseStart.payload).toMatchObject({ runtime: "claude", model: "release-model" });
     expect(String(releaseStart.payload.system_context)).toContain("REL-1");
     expect(String(releaseStart.payload.system_context)).toContain("DEPLOY.md");
     expect(String(releaseStart.payload.prompt)).toContain("RD-1");
@@ -624,6 +638,61 @@ describe("RD-6 end-to-end API, Bridge Release Agent, Concurrency Lock, Abnormal 
       event: { type: "done" },
       result: { content: "ok", events: [], status: "done", externalSessionId: "" },
     });
+  });
+
+  it.each(["scheduled", "urgent"] as const)("uses the project release selection for the %s trigger", async (trigger) => {
+    const projectId = await f.project();
+    const { token } = await f.register();
+    const conn = await f.connect(token);
+    await conn.hello([{ project_id: projectId, workdir: "/repo", path_ok: true }], {
+      runtimes: { claude: { available: true } },
+    });
+    const { store, bridgeHub, api } = f.srv;
+    store.updateProjectDeployPolicy(projectId, {
+      mode: "scheduled", timezone: "UTC", window_start: "02:00", window_end: "06:00",
+      runtime: "claude", model: "release-model",
+    });
+    const task = store.createTask(projectId, { title: "Release change", body: "Deploy the pending change", priority: "urgent" }, "console");
+    store.chatAgentTaskOp(projectId, "transition_task", { task: task.id, status: "done" });
+    const now = new Date(trigger === "scheduled" ? "2026-11-23T03:00:00Z" : "2026-11-23T09:00:00Z");
+    const dispatcher = new ReleaseDispatcher(store, bridgeHub, api.chatRuns, { now: () => now, pollIntervalMs: 0 });
+    try {
+      const result = dispatcher.tryDispatchProject(projectId);
+      expect(result.dispatched).toBe(true);
+      expect(store.getRelease(projectId, result.releaseId!).trigger).toBe(trigger);
+      expect((await conn.next("chat.start")).payload).toMatchObject({ runtime: "claude", model: "release-model" });
+    } finally {
+      dispatcher.close();
+    }
+  });
+
+  it("inherits task routing until configured and keeps manual overrides scoped to one release", async () => {
+    const projectId = await f.project();
+    const api = `/projects/${projectId}`;
+    const { token } = await f.register();
+    const conn = await f.connect(token);
+    await conn.hello([{ project_id: projectId, workdir: "/repo", path_ok: true }], {
+      runtimes: { codex: { available: true }, claude: { available: true } },
+    });
+    await f.ok(`${api}/execution-routing`, "PATCH", { task_runtime: "codex", task_model: "task-model" });
+    async function checkRelease(overrides: Record<string, string>, expectedRuntime: string, expectedModel: string) {
+      const started = await f.ok(`${api}/releases/trigger`, "POST", { force: true, ...overrides });
+      const { payload } = await conn.next("chat.start");
+      expect(started.session).toMatchObject({ runtime: expectedRuntime, model: expectedModel });
+      expect(payload).toMatchObject({ runtime: expectedRuntime, model: expectedModel });
+      conn.send("chat.event", { run_id: payload.run_id, session_id: payload.session_id, event: { type: "done" },
+        result: { content: "done", events: [], status: "done", externalSessionId: "" } });
+      await expect.poll(() => f.srv.store.getChatSession(projectId, payload.session_id).status).toBe("idle");
+    }
+    await checkRelease({}, "codex", "task-model");
+    await f.ok(`${api}/deploy-policy`, "PUT", { runtime: "claude" });
+    await checkRelease({}, "claude", "");
+    await f.ok(`${api}/deploy-policy`, "PUT", { model: "release-model" });
+    await checkRelease({ runtime: "codex", model: "one-off" }, "codex", "one-off");
+    await checkRelease({ runtime: "codex" }, "codex", "");
+    await checkRelease({}, "claude", "release-model");
+    await f.ok(`${api}/deploy-policy`, "PUT", { runtime: null });
+    await checkRelease({}, "codex", "task-model");
   });
 
   it("handles manual force release and marks release failed on abnormal session exit without finish_release", async () => {

@@ -351,6 +351,22 @@ export class ReleaseDispatcher {
     };
   }
 
+  private releaseSelection(project: AgentProjectInfo, overrides: ManualReleaseOptions = {}) {
+    const routing = this.store.getProjectExecutionRouting(project.id);
+    const policy = project.deploy_policy;
+    const runtime = overrides.runtime ?? policy.runtime ?? routing.task_runtime ??
+      getChatRuntimeInfo(this.store.dbPath, project.id).project_cli.runtime ?? "codex";
+    // A configured harness with no model uses that harness's own default.
+    const defaultModel = policy.runtime === null ? routing.task_model :
+      runtime === policy.runtime ? policy.model : null;
+    return {
+      runtime,
+      model: overrides.model ?? defaultModel ?? "",
+      reasoningEffort: overrides.reasoning_effort ?? routing.task_reasoning_effort ?? "default",
+      networkAccess: routing.task_network_access ?? true,
+    };
+  }
+
   tryDispatchProject(projectId: string): {
     dispatched: boolean;
     reason?: string;
@@ -367,15 +383,13 @@ export class ReleaseDispatcher {
         return { dispatched: false, reason: check.reason };
       }
 
-      const projectRow = this.store.getProjectRow(projectId);
-      const routing = this.store.getProjectExecutionRouting(projectId);
-      const runtimeInfo = getChatRuntimeInfo(this.store.dbPath, projectId);
-      const runtime: ChatRuntime = routing.task_runtime ?? runtimeInfo.project_cli.runtime ?? "codex";
+      const projectInfo = toAgentProject(this.store.getProjectRow(projectId));
+      const selection = this.releaseSelection(projectInfo);
       const resolution = resolveLocalTaskExecutionTarget({
         store: this.store,
         bridgeHub: this.bridgeHub,
         projectId,
-        runtime,
+        runtime: selection.runtime,
       });
       if (!resolution.target) {
         return { dispatched: false, reason: resolution.reasons.join("；") || "no_local_agent" };
@@ -387,16 +401,11 @@ export class ReleaseDispatcher {
         localBinding: resolution.target.binding,
         agentName: resolution.target.agent.name,
       };
-      const model = routing.task_model ?? "";
-      const reasoningEffort = routing.task_reasoning_effort ?? "default";
       const started = this.launchReleaseSession({
-        projectInfo: toAgentProject(projectRow),
+        projectInfo,
         trigger: check.trigger,
         taskIds: check.tasks.map((t) => t.id),
-        runtime,
-        model,
-        reasoningEffort,
-        networkAccess: routing.task_network_access ?? true,
+        ...selection,
         resolvedTarget,
       });
       return {
@@ -415,7 +424,7 @@ export class ReleaseDispatcher {
     projectId: string,
     options: ManualReleaseOptions = {},
   ): { release: ReleaseRecord; session: ChatSessionRecord; runId: string } {
-    const projectRow = this.store.getProjectRow(projectId);
+    const projectInfo = toAgentProject(this.store.getProjectRow(projectId));
     if (this.store.hasActiveAgentTask(projectId) || this.chatRuns.hasActiveRunForProject(projectId)) {
       throw new ApiError(409, "当前项目已有正在执行的任务或发布会话，请等待完成后再触发发布");
     }
@@ -428,19 +437,12 @@ export class ReleaseDispatcher {
       );
     }
 
-    const routing = this.store.getProjectExecutionRouting(projectId);
-    const runtimeInfo = getChatRuntimeInfo(this.store.dbPath, projectId);
-    const runtime: ChatRuntime =
-      options.runtime ?? routing.task_runtime ?? runtimeInfo.project_cli.runtime ?? "codex";
-    const model = options.model ?? routing.task_model ?? "";
-    const reasoningEffort: ChatReasoningEffort =
-      options.reasoning_effort ?? routing.task_reasoning_effort ?? "default";
-
+    const selection = this.releaseSelection(projectInfo, options);
     const resolution = resolveLocalTaskExecutionTarget({
       store: this.store,
       bridgeHub: this.bridgeHub,
       projectId,
-      runtime,
+      runtime: selection.runtime,
       executionTarget: options.execution_target,
     });
     if (!resolution.target) {
@@ -458,13 +460,10 @@ export class ReleaseDispatcher {
     };
 
     return this.launchReleaseSession({
-      projectInfo: toAgentProject(projectRow),
+      projectInfo,
       trigger: "manual",
       taskIds: batchTasks.map((t) => t.id),
-      runtime,
-      model,
-      reasoningEffort,
-      networkAccess: routing.task_network_access ?? true,
+      ...selection,
       resolvedTarget,
       extraPrompt: options.prompt,
     });

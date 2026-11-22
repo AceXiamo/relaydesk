@@ -18,6 +18,8 @@ export type DeliveryMode = "direct_push" | "pr_automerge" | "review_only";
 export type DeployMode = "none" | "manual" | "immediate" | "scheduled";
 
 export interface ProjectDeployPolicy {
+  runtime: ChatRuntime | null;
+  model: string | null;
   mode: DeployMode;
   window_start: string;
   window_end: string;

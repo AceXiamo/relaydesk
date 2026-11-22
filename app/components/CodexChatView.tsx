@@ -363,9 +363,10 @@ export function CodexChatView({
         } else if (res.session.status !== "running") {
           streams.syncSession(res.session);
         }
-        // Another tab owns the SSE connection. Only the terminal result is persisted.
-        if (res.session.status === "running" && !streams.snapshot().has(activeSessionId)) {
-          timer = setTimeout(readHistory, 1500);
+        if (res.session.status === "running") {
+          // Server-started turns publish their live output through the same project stream store.
+          if (res.session.active_run_id) streams.observe(res.session, res.messages);
+          else if (!streams.snapshot().has(activeSessionId)) timer = setTimeout(readHistory, 1500);
         }
         setTitleDraft(res.session.title);
         isNearBottomRef.current = true;

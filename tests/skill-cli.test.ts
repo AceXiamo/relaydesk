@@ -114,6 +114,8 @@ async function startMockRelaydeskServer(initial?: Partial<MockServerState>) {
         window_end: "06:00",
         timezone: "Asia/Shanghai",
         allow_urgent_override: true,
+        runtime: null,
+        model: null,
         doc_path: "",
       },
       widget_code_context: true,

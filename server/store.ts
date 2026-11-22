@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { validCatalogId } from "../app/lib/model-catalog.ts";
 import { ApiError } from "./errors.ts";
 import type {
   AgentProjectInfo,
@@ -88,6 +89,8 @@ export const RELEASE_TRIGGERS = new Set<ReleaseTrigger>([
 ]);
 
 export const DEFAULT_DEPLOY_POLICY: ProjectDeployPolicy = {
+  runtime: null,
+  model: null,
   mode: "none",
   window_start: "02:00",
   window_end: "06:00",
@@ -148,7 +151,10 @@ export function normalizeDeployPolicy(raw: unknown): ProjectDeployPolicy {
   const doc_path =
     typeof parsed.doc_path === "string" ? parsed.doc_path.trim().slice(0, 240) : "";
 
+  const runtime = parsed.runtime === "codex" || parsed.runtime === "claude" ? parsed.runtime : null;
   return {
+    runtime,
+    model: runtime && validCatalogId(parsed.model) ? parsed.model : null,
     mode,
     window_start,
     window_end,
@@ -222,7 +228,23 @@ export function parseDeployPolicyPatch(
     doc_path = cleaned;
   }
 
+  const runtime = patch.runtime === undefined ? current.runtime : patch.runtime;
+  if (runtime !== null && runtime !== "codex" && runtime !== "claude") {
+    throw new ApiError(400, "Invalid release runtime");
+  }
+  let model = runtime === current.runtime ? current.model : null;
+  if (patch.model !== undefined) {
+    if (patch.model === null || patch.model === "") {
+      model = null;
+    } else if (runtime && validCatalogId(patch.model)) {
+      model = patch.model;
+    } else {
+      throw new ApiError(400, "Invalid release model or missing release runtime");
+    }
+  }
   return {
+    runtime,
+    model,
     mode,
     window_start,
     window_end,

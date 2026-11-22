@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Icon } from "./Icon.tsx";
-import { Button, Switch, useToast } from "./ui.tsx";
+import { Button, Select, Switch, useToast } from "./ui.tsx";
+import { LocalAgentModelCombobox } from "./LocalAgentModelPicker.tsx";
+import { resolveLocalTaskAgent } from "~/lib/model-catalog.ts";
 import { api, ClientApiError } from "~/lib/api.ts";
 import { DEPLOY_MODE_DESCRIPTIONS, DEPLOY_MODE_LABELS } from "~/lib/format.ts";
-import type { DeployMode, ProjectDeployPolicy, ProjectDetail } from "~/lib/types.ts";
+import type { ChatRuntime, DeployMode, ProjectDeployPolicy, ProjectDetail, ProjectExecutionRoutingResponse } from "~/lib/types.ts";
 
 interface ProjectDeployPolicyCardProps {
   project: ProjectDetail;
@@ -48,10 +50,22 @@ export function ProjectDeployPolicyCard({
     project.deploy_policy.allow_urgent_override,
   );
   const [docPath, setDocPath] = useState(project.deploy_policy.doc_path);
+  const [runtime, setRuntime] = useState<ChatRuntime | null>(project.deploy_policy.runtime ?? null);
+  const [model, setModel] = useState(project.deploy_policy.model ?? "");
+  const [routing, setRouting] = useState<ProjectExecutionRoutingResponse | null>(null);
+  const [routingError, setRoutingError] = useState(false);
+  const releaseAgent = runtime && routing ? resolveLocalTaskAgent({
+    agents: routing.agents,
+    effectivePriority: routing.effective_priority,
+    projectId: project.id,
+    runtime,
+  }).agent : null;
   const [saving, setSaving] = useState(false);
   const [deployDocExists, setDeployDocExists] = useState<boolean | null>(null);
 
   useEffect(() => {
+    setRuntime(project.deploy_policy.runtime ?? null);
+    setModel(project.deploy_policy.model ?? "");
     setMode(project.deploy_policy.mode);
     setWindowStart(project.deploy_policy.window_start);
     setWindowEnd(project.deploy_policy.window_end);
@@ -62,6 +76,9 @@ export function ProjectDeployPolicyCard({
 
   useEffect(() => {
     let active = true;
+    api.getProjectExecutionRouting(project.id)
+      .then((res) => { if (active) setRouting(res); })
+      .catch(() => { if (active) setRoutingError(true); });
     api
       .getWorkspaceDeployDoc(project.id)
       .then((res) => {
@@ -81,6 +98,8 @@ export function ProjectDeployPolicyCard({
     try {
       const res = await api.updateProjectDeployPolicy(project.id, {
         mode,
+        runtime,
+        model: model || null,
         window_start: windowStart,
         window_end: windowEnd,
         timezone: timezone.trim() || "Asia/Shanghai",
@@ -178,6 +197,47 @@ export function ProjectDeployPolicyCard({
               );
             })}
           </div>
+        </div>
+
+        <div className="grid items-start gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <p className="text-xs text-[var(--text-secondary)]">发布 Agent Harness</p>
+            <Select<ChatRuntime | "inherit">
+              ariaLabel="发布 Agent Harness"
+              fullWidth
+              size="sm"
+              value={runtime ?? "inherit"}
+              disabled={saving}
+              options={[
+                { value: "inherit", label: "跟随任务 Harness 和模型" },
+                { value: "codex", label: "Codex CLI" },
+                { value: "claude", label: "Claude Code" },
+              ]}
+              onChange={(value) => {
+                const nextRuntime = value === "inherit" ? null : value;
+                if (nextRuntime !== runtime) {
+                  setRuntime(nextRuntime);
+                  setModel("");
+                }
+              }}
+            />
+          </div>
+          {runtime && (
+            <div className="space-y-1.5">
+              <p className="text-xs text-[var(--text-secondary)]">发布 Agent 模型</p>
+              <LocalAgentModelCombobox
+                key={runtime}
+                runtime={runtime}
+                agent={releaseAgent}
+                model={model}
+                fullWidth
+                ariaLabel="发布 Agent 模型"
+                disabled={saving || !routing}
+                onChange={setModel}
+              />
+              {routingError && <p className="text-xs text-[var(--text-muted)]">读取节点模型失败，请刷新重试。</p>}
+            </div>
+          )}
         </div>
 
         {/* Scheduled Window Settings */}
