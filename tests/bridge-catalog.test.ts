@@ -60,6 +60,20 @@ describe("local bridge model discovery", () => {
     expect(JSON.stringify(result)).not.toMatch(/private-value|in-a-description|not-a-model|claude-sonnet-4-6|my codex/);
   });
 
+  it("discovers all Claude picker options and merges the default without exporting option metadata", async () => {
+    const options = Array.from({ length: 11 }, (_, i) => ({
+      model: `gateway/model-${i}[1m]`, label: `Gateway model ${i}`, description: marker(i),
+    }));
+    await json(join(homeDir, ".claude/settings.json"), {
+      model: options[0].model,
+      modelPicker: { replaceBuiltInOptions: true, options },
+    });
+    const { models } = await detectBridgeCatalog({}, { homeDir, configDir });
+    expect(models).toEqual(options.map(({ model, label }, i) => ({
+      id: model, label, runtime: "claude", source: "cli_config", ...(i === 0 && { is_default: true }),
+    })));
+  });
+
   it("disables native discovery independently of explicitly configured files and watches absent files", async () => {
     await json(join(homeDir, ".claude/settings.json"), { model: "hidden" });
     await json(join(homeDir, "manual.json"), [{ id: "declared", runtime: "codex" }]);

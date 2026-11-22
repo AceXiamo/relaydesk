@@ -145,6 +145,13 @@ export async function detectBridgeCatalog(config: BridgeCatalogConfig, options: 
     for (const list of [settings.availableModels, settings.models]) {
       if (Array.isArray(list)) add(list.map(row => typeof row === "string" ? { id: row, runtime: "claude" } : { ...record(row), runtime: "claude" }), "cli_config");
     }
+    const pickerOptions = record(settings.modelPicker).options;
+    if (Array.isArray(pickerOptions)) {
+      add(pickerOptions.map(option => {
+        const { model, label } = record(option);
+        return { id: model, label, runtime: "claude" };
+      }), "cli_config");
+    }
   }
   for (const value of codex) {
     const settings = record(value);

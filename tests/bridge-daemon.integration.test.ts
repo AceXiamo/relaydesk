@@ -151,6 +151,21 @@ describe("real bridge daemon + HTTP chat", () => {
     await expect.poll(async () => (await agent()).models, { timeout: 6000 }).toContainEqual(expect.objectContaining({ id: "hot-loaded", context_window: 99000 }));
   });
 
+  it("refreshes the reported Claude catalog when only the picker options change", async () => {
+    const { agent } = await start();
+    const settingsPath = join(f.root, "home", ".claude", "settings.json");
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    for (const model of ["gateway/first", "gateway/replacement[1m]"]) {
+      settings.modelPicker = { replaceBuiltInOptions: true, options: [{ model, label: "Custom model" }] };
+      writeFileSync(settingsPath, JSON.stringify(settings));
+      await expect.poll(async () => (await agent()).models.filter((item: { runtime: string }) => item.runtime === "claude"),
+        { timeout: 6000 }).toEqual([
+        expect.objectContaining({ id: settings.model, is_default: true }),
+        expect.objectContaining({ id: model, label: "Custom model" }),
+      ]);
+    }
+  });
+
   it("revalidates locally configured project paths when allowed roots change", async () => {
     const { p, id, configPath } = await start();
     const config = JSON.parse(readFileSync(configPath, "utf8"));
