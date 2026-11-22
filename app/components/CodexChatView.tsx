@@ -159,6 +159,7 @@ export function CodexChatView({
   const [messagesLoading, setMessagesLoading] = useState(false);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [titlingSessionId, setTitlingSessionId] = useState<string | null>(null);
@@ -778,235 +779,287 @@ export function CodexChatView({
     ? workspaceSummary.repos_status.repos.filter((r) => r.ready).length
     : 0;
 
-  return (
-    <div className="flex-1 flex min-h-0 overflow-hidden bg-[var(--surface-canvas)]">
-      {/* Left Sessions Sidebar (Beautiful UI Sidebar Nav style) */}
-      {sidebarOpen && (
-        <aside className="w-[256px] shrink-0 border-r border-[var(--border-subtle)] bg-[var(--surface-sidebar)] flex flex-col min-h-0">
-          {/* Sidebar Header */}
-          <div className="px-2.5 pt-2.5 pb-2 flex items-center gap-1.5">
-            {mainSidebarCollapsed && onExpandMainSidebar && (
+  const renderSidebarInner = (isMobileOverlay: boolean) => (
+    <>
+      {/* Sidebar Header */}
+      <div className={`px-2.5 pt-2.5 pb-2 flex items-center gap-1.5 ${isMobileOverlay ? "rd-safe-pt" : ""}`}>
+        {!isMobileOverlay && mainSidebarCollapsed && onExpandMainSidebar && (
+          <button
+            type="button"
+            title="展开主导航栏 (⌘B)"
+            aria-label="展开主导航栏"
+            onClick={onExpandMainSidebar}
+            className="hidden lg:inline-flex h-8 w-8 shrink-0 rounded-lg items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
+          >
+            <Icon name="panel-left-open" size={15} />
+          </button>
+        )}
+        <button
+          type="button"
+          disabled={settingsBusy}
+          onClick={() => {
+            startDraft();
+            setMobileSessionsOpen(false);
+          }}
+          className="flex-1 h-9 lg:h-8 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] hover:bg-[var(--surface-hover)] hover:border-[var(--border-strong)] text-[12.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 shadow-[var(--rd-shadow-sm)] transition-colors cursor-pointer"
+        >
+          <Icon name="plus" size={14} />
+          <span>新建对话</span>
+        </button>
+        <button
+          type="button"
+          title="收起会话列表"
+          aria-label="收起会话列表"
+          onClick={() => (isMobileOverlay ? setMobileSessionsOpen(false) : setSidebarOpen(false))}
+          className="h-9 w-9 lg:h-8 lg:w-8 rounded-lg inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
+        >
+          <Icon name={isMobileOverlay ? "x" : "panel-left-close"} size={15} />
+        </button>
+      </div>
+
+      {/* Search Sessions */}
+      {sessions.length > 0 && (
+        <div className="px-2.5 pb-2">
+          <div className="flex items-center gap-1.5 h-8 lg:h-7 px-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)]/70 focus-within:border-[var(--border-strong)] focus-within:bg-[var(--surface-card)] transition-colors">
+            <Icon name="search" size={12} className="text-[var(--text-muted)] shrink-0" />
+            <input
+              value={sessionSearch}
+              onChange={(e) => setSessionSearch(e.target.value)}
+              placeholder="搜索会话…"
+              className="flex-1 min-w-0 bg-transparent text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+            />
+            {sessionSearch && (
               <button
                 type="button"
-                title="展开主导航栏 (⌘B)"
-                aria-label="展开主导航栏"
-                onClick={onExpandMainSidebar}
-                className="hidden lg:inline-flex h-8 w-8 shrink-0 rounded-lg items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
+                onClick={() => setSessionSearch("")}
+                className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer p-1"
               >
-                <Icon name="panel-left-open" size={15} />
+                <Icon name="x" size={11} />
               </button>
             )}
-            <button
-              type="button"
-              disabled={settingsBusy}
-              onClick={startDraft}
-              className="flex-1 h-8 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] hover:bg-[var(--surface-hover)] hover:border-[var(--border-strong)] text-[12.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 shadow-[var(--rd-shadow-sm)] transition-colors cursor-pointer"
-            >
-              <Icon name="plus" size={14} />
-              <span>新建对话</span>
-            </button>
-            <button
-              type="button"
-              title="收起会话列表"
-              aria-label="收起会话列表"
-              onClick={() => setSidebarOpen(false)}
-              className="h-8 w-8 rounded-lg inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
-            >
-              <Icon name="panel-left-close" size={15} />
-            </button>
           </div>
+        </div>
+      )}
 
-          {/* Search Sessions */}
-          {sessions.length > 0 && (
-            <div className="px-2.5 pb-2">
-              <div className="flex items-center gap-1.5 h-7 px-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)]/70 focus-within:border-[var(--border-strong)] focus-within:bg-[var(--surface-card)] transition-colors">
-                <Icon name="search" size={12} className="text-[var(--text-muted)] shrink-0" />
-                <input
-                  value={sessionSearch}
-                  onChange={(e) => setSessionSearch(e.target.value)}
-                  placeholder="搜索会话…"
-                  className="flex-1 min-w-0 bg-transparent text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
-                />
-                {sessionSearch && (
-                  <button
-                    type="button"
-                    onClick={() => setSessionSearch("")}
-                    className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+      {/* Grouped Session List */}
+      <div className="flex-1 overflow-y-auto rd-scroll px-2 pb-2 space-y-3">
+        {sessionsLoading ? (
+          <div className="py-8 text-center text-[12px] text-[var(--text-muted)]">加载会话…</div>
+        ) : sessions.length === 0 && turns.size === 0 ? (
+          <div className="px-3 py-8 text-center text-[12px] text-[var(--text-muted)] leading-relaxed">
+            暂无历史对话，点击上方「新建对话」或在右侧直接输入即可开始。
+          </div>
+        ) : groupedSessions.length === 0 ? (
+          <div className="px-3 py-6 text-center text-[12px] text-[var(--text-muted)]">
+            未找到匹配的会话
+          </div>
+        ) : (
+          groupedSessions.map((group) => (
+            <div key={group.label} className="space-y-0.5">
+              <div className="px-2 pt-1 pb-0.5 text-[10.5px] font-medium text-[var(--text-muted)] tracking-wide">
+                {group.label}
+              </div>
+              {group.items.map((s) => {
+                const rowTurn = turns.get(s.id);
+                const active = s.id === activeSessionId;
+                const confirming = confirmDeleteId === s.id;
+                return (
+                  <div
+                    key={s.id}
+                    onClick={() => {
+                      if (!savingSettings && !confirming) {
+                        setEditingTitle(false);
+                        setActiveSessionId(s.id);
+                        setMobileSessionsOpen(false);
+                      }
+                    }}
+                    className={`group rounded-lg px-2 py-2 lg:py-1.5 transition-colors cursor-pointer ${
+                      active
+                        ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-[var(--rd-shadow-sm)] ring-1 ring-[var(--border-subtle)]"
+                        : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+                    }`}
                   >
-                    <Icon name="x" size={11} />
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
+                    <div className="flex items-center justify-between gap-1.5">
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                            s.runtime === "codex" ? "bg-emerald-500" : "bg-amber-500"
+                          }`}
+                        />
+                        <span className="text-[12.5px] font-medium truncate">{s.title}</span>
+                      </span>
 
-          {/* Grouped Session List */}
-          <div className="flex-1 overflow-y-auto rd-scroll px-2 pb-2 space-y-3">
-            {sessionsLoading ? (
-              <div className="py-8 text-center text-[12px] text-[var(--text-muted)]">加载会话…</div>
-            ) : sessions.length === 0 && turns.size === 0 ? (
-              <div className="px-3 py-8 text-center text-[12px] text-[var(--text-muted)] leading-relaxed">
-                暂无历史对话，点击上方「新建对话」或在右侧直接输入即可开始。
-              </div>
-            ) : groupedSessions.length === 0 ? (
-              <div className="px-3 py-6 text-center text-[12px] text-[var(--text-muted)]">
-                未找到匹配的会话
-              </div>
-            ) : (
-              groupedSessions.map((group) => (
-                <div key={group.label} className="space-y-0.5">
-                  <div className="px-2 pt-1 pb-0.5 text-[10.5px] font-medium text-[var(--text-muted)] tracking-wide">
-                    {group.label}
-                  </div>
-                  {group.items.map((s) => {
-                    const rowTurn = turns.get(s.id);
-                    const active = s.id === activeSessionId;
-                    const confirming = confirmDeleteId === s.id;
-                    return (
-                      <div
-                        key={s.id}
-                        onClick={() => {
-                          if (!savingSettings && !confirming) {
-                            setEditingTitle(false);
-                            setActiveSessionId(s.id);
-                          }
-                        }}
-                        className={`group rounded-lg px-2 py-1.5 transition-colors cursor-pointer ${
-                          active
-                            ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-[var(--rd-shadow-sm)] ring-1 ring-[var(--border-subtle)]"
-                            : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-1.5">
-                          <span className="flex items-center gap-1.5 min-w-0">
-                            <span
-                              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                s.runtime === "codex" ? "bg-emerald-500" : "bg-amber-500"
-                              }`}
+                      {confirming ? (
+                        <span
+                          className="inline-flex items-center gap-1 shrink-0"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteSession(s.id)}
+                            className="px-2 py-1 lg:px-1.5 lg:py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-600 hover:text-white text-[11px] lg:text-[10.5px] font-medium transition cursor-pointer"
+                          >
+                            删除
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteId(null)}
+                            className="px-1.5 py-1 lg:px-1 lg:py-0.5 rounded text-[11px] lg:text-[10.5px] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                          >
+                            取消
+                          </button>
+                        </span>
+                      ) : (
+                        <span
+                          className="inline-flex items-center gap-0.5 shrink-0"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            title="AI 重新总结标题"
+                            aria-label="AI 重新总结标题"
+                            disabled={titlingSessionId === s.id}
+                            onClick={() => void handleRegenerateTitle(s.id)}
+                            className={`p-1.5 lg:p-0.5 rounded text-[var(--text-muted)] hover:text-indigo-500 transition-opacity cursor-pointer shrink-0 ${
+                              titlingSessionId === s.id
+                                ? "opacity-100"
+                                : "opacity-75 lg:opacity-0 lg:group-hover:opacity-100"
+                            }`}
+                          >
+                            <Icon
+                              name={titlingSessionId === s.id ? "loader-2" : "sparkles"}
+                              size={12}
+                              className={titlingSessionId === s.id ? "animate-spin text-indigo-500" : ""}
                             />
-                            <span className="text-[12.5px] font-medium truncate">{s.title}</span>
-                          </span>
+                          </button>
+                          <button
+                            type="button"
+                            title="删除会话"
+                            aria-label="删除会话"
+                            disabled={rowTurn?.running}
+                            onClick={() => setConfirmDeleteId(s.id)}
+                            className="opacity-75 lg:opacity-0 lg:group-hover:opacity-100 p-1.5 lg:p-0.5 rounded text-[var(--text-muted)] hover:text-rose-500 transition-opacity cursor-pointer shrink-0"
+                          >
+                            <Icon name="trash-2" size={12} />
+                          </button>
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between gap-1.5 mt-0.5 pl-3 text-[10.5px] text-[var(--text-muted)]">
+                      <span className="font-mono uppercase text-[10px]">
+                        {s.runtime}
+                        {s.runtime === "codex" && s.network_access ? " · 联网" : ""}
+                      </span>
+                      <span>{rowTurn?.running || (active && streaming) ? "回复中" : formatRelativeTime(s.updated_at)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ))
+        )}
+      </div>
 
-                          {confirming ? (
-                            <span
-                              className="inline-flex items-center gap-1 shrink-0"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <button
-                                type="button"
-                                onClick={() => void handleDeleteSession(s.id)}
-                                className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-600 hover:text-white text-[10.5px] font-medium transition cursor-pointer"
-                              >
-                                删除
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setConfirmDeleteId(null)}
-                                className="px-1 py-0.5 rounded text-[10.5px] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
-                              >
-                                取消
-                              </button>
-                            </span>
-                          ) : (
-                            <span
-                              className="inline-flex items-center gap-0.5 shrink-0"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <button
-                                type="button"
-                                title="AI 重新总结标题"
-                                aria-label="AI 重新总结标题"
-                                disabled={titlingSessionId === s.id}
-                                onClick={() => void handleRegenerateTitle(s.id)}
-                                className={`p-0.5 rounded text-[var(--text-muted)] hover:text-indigo-500 transition-opacity cursor-pointer shrink-0 ${
-                                  titlingSessionId === s.id
-                                    ? "opacity-100"
-                                    : "opacity-0 group-hover:opacity-100"
-                                }`}
-                              >
-                                <Icon
-                                  name={titlingSessionId === s.id ? "loader-2" : "sparkles"}
-                                  size={12}
-                                  className={titlingSessionId === s.id ? "animate-spin text-indigo-500" : ""}
-                                />
-                              </button>
-                              <button
-                                type="button"
-                                title="删除会话"
-                                aria-label="删除会话"
-                                disabled={rowTurn?.running}
-                                onClick={() => setConfirmDeleteId(s.id)}
-                                className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-[var(--text-muted)] hover:text-rose-500 transition-opacity cursor-pointer shrink-0"
-                              >
-                                <Icon name="trash-2" size={12} />
-                              </button>
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-center justify-between gap-1.5 mt-0.5 pl-3 text-[10.5px] text-[var(--text-muted)]">
-                          <span className="font-mono uppercase text-[10px]">
-                            {s.runtime}
-                            {s.runtime === "codex" && s.network_access ? " · 联网" : ""}
-                          </span>
-                          <span>{rowTurn?.running || (active && streaming) ? "回复中" : formatRelativeTime(s.updated_at)}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ))
-            )}
+      {/* Compact Engine Status Card */}
+      <div className="p-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] border-t border-[var(--border-subtle)]">
+        <button
+          type="button"
+          onClick={() => {
+            setMobileSessionsOpen(false);
+            onOpenCliSettings();
+          }}
+          className="w-full p-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]/60 transition-colors text-left space-y-1.5 cursor-pointer"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--text-primary)]">
+              <LivePulseDot
+                tone={currentAuthMode === "unavailable" ? "zinc" : "emerald"}
+                active={currentAuthMode !== "unavailable"}
+              />
+              {currentRuntime === "codex" ? "Codex CLI" : "Claude Code"}
+            </span>
+            <span className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+              <Icon name="settings" size={11} />
+              配置
+            </span>
           </div>
+          <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
+            <span className="font-mono truncate">
+              {activeConfiguredModel ||
+                (currentAuthMode === "project_key"
+                  ? "项目密钥已就绪"
+                  : currentAuthMode === "local_cli"
+                    ? "本机登录态"
+                    : "未检测到 CLI")}
+            </span>
+          </div>
+        </button>
+      </div>
+    </>
+  );
 
-          {/* Compact Engine Status Card */}
-          <div className="p-2.5 border-t border-[var(--border-subtle)]">
-            <button
-              type="button"
-              onClick={onOpenCliSettings}
-              className="w-full p-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]/60 transition-colors text-left space-y-1.5 cursor-pointer"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="inline-flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--text-primary)]">
-                  <LivePulseDot
-                    tone={currentAuthMode === "unavailable" ? "zinc" : "emerald"}
-                    active={currentAuthMode !== "unavailable"}
-                  />
-                  {currentRuntime === "codex" ? "Codex CLI" : "Claude Code"}
-                </span>
-                <span className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
-                  <Icon name="settings" size={11} />
-                  配置
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
-                <span className="font-mono truncate">
-                  {activeConfiguredModel ||
-                    (currentAuthMode === "project_key"
-                      ? "项目密钥已就绪"
-                      : currentAuthMode === "local_cli"
-                        ? "本机登录态"
-                        : "未检测到 CLI")}
-                </span>
-              </div>
-            </button>
-          </div>
+  return (
+    <div className="flex-1 flex min-h-0 overflow-hidden bg-[var(--surface-canvas)] relative">
+      {/* Desktop Left Sessions Sidebar */}
+      {sidebarOpen && (
+        <aside className="hidden lg:flex w-[256px] shrink-0 border-r border-[var(--border-subtle)] bg-[var(--surface-sidebar)] flex-col min-h-0">
+          {renderSidebarInner(false)}
         </aside>
+      )}
+
+      {/* Mobile Overlay Sessions Drawer (< lg, collapsed by default) */}
+      {mobileSessionsOpen && (
+        <div
+          className="fixed inset-0 z-40 lg:hidden flex bg-[var(--rd-backdrop)] backdrop-blur-[1px] animate-fade-in"
+          onClick={() => setMobileSessionsOpen(false)}
+        >
+          <aside
+            className="w-[min(288px,86vw)] h-full border-r border-[var(--border-subtle)] bg-[var(--surface-sidebar)] flex flex-col min-h-0 shadow-[var(--rd-shadow-lg)] animate-drawer-in-left"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {renderSidebarInner(true)}
+          </aside>
+        </div>
       )}
 
       {/* Main Agent Column */}
       <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
         {/* Clean Minimal Top Header */}
-        <header className="shrink-0 h-13 px-4 border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)]/90 backdrop-blur-sm flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 min-w-0">
+        <header className="shrink-0 h-12 sm:h-13 px-3 sm:px-4 border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)]/90 backdrop-blur-sm flex items-center justify-between gap-2 sm:gap-3">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+            {/* Mobile (< lg) session drawer toggle + quick new chat */}
+            <div className="flex lg:hidden items-center gap-1 shrink-0">
+              <button
+                type="button"
+                title="打开会话列表"
+                aria-label="打开会话列表"
+                onClick={() => setMobileSessionsOpen(true)}
+                className="h-9 w-9 rounded-lg inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+              >
+                <Icon name="messages-square" size={16} />
+              </button>
+              <button
+                type="button"
+                title="新建对话"
+                aria-label="新建对话"
+                disabled={settingsBusy}
+                onClick={startDraft}
+                className="h-9 w-9 rounded-lg inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+              >
+                <Icon name="plus" size={16} />
+              </button>
+            </div>
+
+            {/* Desktop (>= lg) collapsed sidebar expand controls */}
             {!sidebarOpen && (
-              <div className="flex items-center gap-1 shrink-0">
+              <div className="hidden lg:flex items-center gap-1 shrink-0">
                 {mainSidebarCollapsed && onExpandMainSidebar && (
                   <button
                     type="button"
                     title="展开主导航栏 (⌘B)"
                     aria-label="展开主导航栏"
                     onClick={onExpandMainSidebar}
-                    className="hidden lg:inline-flex h-7 w-7 rounded-lg items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+                    className="inline-flex h-7 w-7 rounded-lg items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
                     <Icon name="panel-left-open" size={15} />
                   </button>
@@ -1139,7 +1192,7 @@ export function CodexChatView({
         <div
           ref={scrollContainerRef}
           onScroll={handleThreadScroll}
-          className="flex-1 overflow-y-auto rd-scroll px-4 pt-6 pb-8"
+          className="flex-1 overflow-y-auto rd-scroll px-3 sm:px-4 pt-4 sm:pt-6 pb-6 sm:pb-8"
         >
           <div className="max-w-[740px] mx-auto">
             {messagesLoading ? (
@@ -1485,7 +1538,7 @@ export function CodexChatView({
 
         {/* Floating Scroll-to-Bottom Pill */}
         {showScrollBottom && (
-          <div className="pointer-events-none absolute inset-x-0 bottom-[168px] flex justify-center z-20 animate-fade-in">
+          <div className="pointer-events-none absolute inset-x-0 bottom-[152px] sm:bottom-[168px] flex justify-center z-20 animate-fade-in">
             <button
               type="button"
               onClick={() => {
@@ -1502,7 +1555,7 @@ export function CodexChatView({
         )}
 
         {/* Bottom Floating Prompt Bar */}
-        <div className="shrink-0 px-4 pt-2 pb-4 bg-gradient-to-t from-[var(--surface-canvas)] via-[var(--surface-canvas)]/95 to-transparent">
+        <div className="shrink-0 px-2.5 sm:px-4 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:pb-4 bg-gradient-to-t from-[var(--surface-canvas)] via-[var(--surface-canvas)]/95 to-transparent">
           <div className="max-w-[740px] mx-auto space-y-2">
             {showDbSecretWarning && activeLocalAgent && (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/8 px-3 py-2 text-[12px] text-amber-800 dark:text-amber-200">

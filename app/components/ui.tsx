@@ -663,7 +663,7 @@ export function Modal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-[var(--rd-backdrop)] backdrop-blur-[3px] animate-fade-in"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6 bg-[var(--rd-backdrop)] backdrop-blur-[3px] animate-fade-in"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           onClose();
@@ -678,12 +678,12 @@ export function Modal({
         aria-describedby={subtitle ? subtitleId : undefined}
         tabIndex={-1}
         className={cn(
-          "relative w-full flex flex-col max-h-[88vh] overflow-hidden rounded-xl outline-none",
-          "bg-[var(--rd-surface)] dark:bg-[var(--rd-elevated)] border border-[var(--rd-border)] shadow-[var(--rd-shadow-lg)] animate-modal-in",
+          "relative w-full flex flex-col max-h-[90dvh] sm:max-h-[88vh] overflow-hidden rounded-t-2xl sm:rounded-xl outline-none",
+          "bg-[var(--rd-surface)] dark:bg-[var(--rd-elevated)] border-t sm:border border-[var(--rd-border)] shadow-[var(--rd-shadow-lg)] animate-sheet-in sm:animate-modal-in",
           MODAL_WIDTH_CLASS[maxWidth],
         )}
       >
-        <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-[var(--rd-border)]">
+        <div className="flex items-start justify-between gap-3 sm:gap-4 px-4 sm:px-5 py-3.5 sm:py-4 border-b border-[var(--rd-border)]">
           <div className="min-w-0">
             <h2
               id={titleId}
@@ -704,16 +704,23 @@ export function Modal({
             type="button"
             onClick={onClose}
             aria-label="关闭弹窗"
-            className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--rd-muted)] hover:text-[var(--rd-ink)] hover:bg-[var(--rd-hover)] transition-colors rd-focus-ring shrink-0"
+            className="inline-flex items-center justify-center w-9 h-9 sm:w-7 sm:h-7 -mr-1 sm:mr-0 rounded-lg sm:rounded-md text-[var(--rd-muted)] hover:text-[var(--rd-ink)] hover:bg-[var(--rd-hover)] transition-colors rd-focus-ring shrink-0"
           >
             <Icon name="x" size={16} />
           </button>
         </div>
 
-        <div className="px-5 py-4 overflow-y-auto rd-scroll">{children}</div>
+        <div
+          className={cn(
+            "px-4 sm:px-5 py-3.5 sm:py-4 overflow-y-auto rd-scroll",
+            !footer && "pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-4",
+          )}
+        >
+          {children}
+        </div>
 
         {footer ? (
-          <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-[var(--rd-border)] bg-[var(--rd-subtle)]/55">
+          <div className="flex items-center justify-end gap-2 px-4 sm:px-5 py-3.5 pb-[max(0.875rem,env(safe-area-inset-bottom))] sm:pb-3.5 border-t border-[var(--rd-border)] bg-[var(--rd-subtle)]/55">
             {footer}
           </div>
         ) : null}
@@ -999,7 +1006,7 @@ export function ToastProvider({ children }: ToastProviderProps) {
       <div
         aria-live="polite"
         aria-relevant="additions text"
-        className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 w-[calc(100vw-2rem)] max-w-[360px] pointer-events-none"
+        className="fixed top-[max(0.75rem,env(safe-area-inset-top))] inset-x-4 mx-auto sm:top-auto sm:inset-x-auto sm:mx-0 sm:bottom-4 sm:right-4 z-[60] flex flex-col gap-2 w-auto sm:w-[calc(100vw-2rem)] max-w-[360px] pointer-events-none"
       >
         {toasts.map((item) => {
           const visual = TOAST_VISUALS[item.tone];

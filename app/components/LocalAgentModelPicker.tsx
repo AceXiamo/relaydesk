@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   effortLabels,
   resolveDefaultModelForTarget,
@@ -215,9 +216,17 @@ export function LocalAgentModelCombobox({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
+  const [coords, setCoords] = useState<{
+    left: number;
+    top?: number;
+    bottom?: number;
+    width: number;
+    placement: "top" | "bottom";
+  } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
   const listId = useId();
 
   const strictCatalog = useMemo(
@@ -275,16 +284,82 @@ export function LocalAgentModelCombobox({
 
   const selectedIndex = Math.min(Math.max(index, 0), Math.max(options.length - 1, 0));
 
+  const computePosition = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return null;
+    const rect = trigger.getBoundingClientRect();
+    const viewportW = window.innerWidth;
+    const viewportH = window.innerHeight;
+    if (rect.bottom < 0 || rect.top > viewportH || rect.right < 0 || rect.left > viewportW) {
+      return null;
+    }
+    const gap = 6;
+    const pad = 8;
+    const width = Math.min(340, Math.max(220, viewportW - pad * 2));
+    const left = Math.max(pad, Math.min(rect.left, viewportW - width - pad));
+    const spaceBelow = viewportH - rect.bottom - gap - pad;
+    const spaceAbove = rect.top - gap - pad;
+    const preferTop = direction === "up";
+    const placement: "top" | "bottom" = preferTop
+      ? spaceAbove < 200 && spaceBelow > spaceAbove
+        ? "bottom"
+        : "top"
+      : spaceBelow < 220 && spaceAbove > spaceBelow
+        ? "top"
+        : "bottom";
+    if (placement === "top") {
+      return { left, bottom: viewportH - rect.top + gap, width, placement };
+    }
+    return { left, top: rect.bottom + gap, width, placement };
+  }, [direction]);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setCoords(null);
+      return;
+    }
+    setCoords(computePosition());
+  }, [open, computePosition]);
+
+  useEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const next = computePosition();
+      if (!next) {
+        setOpen(false);
+        return;
+      }
+      setCoords(next);
+    };
+    const onScroll = (e: Event) => {
+      if (popoverRef.current && e.target instanceof Node && popoverRef.current.contains(e.target)) {
+        return;
+      }
+      update();
+    };
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [open, computePosition]);
+
   useEffect(() => {
     if (open) {
-      inputRef.current?.focus();
+      window.requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [open, runtime]);
 
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        rootRef.current &&
+        !rootRef.current.contains(target) &&
+        (!popoverRef.current || !popoverRef.current.contains(target))
+      ) {
         setOpen(false);
       }
     };
@@ -362,17 +437,31 @@ export function LocalAgentModelCombobox({
         <Icon name="chevron-down" size={12} className="shrink-0 text-[var(--text-muted)]" />
       </button>
 
-      {open && (
-        <div
-          role="dialog"
-          aria-label="选择模型"
-          className={cn(
-            "absolute left-0 z-40 w-[min(340px,85vw)] rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden",
-            direction === "up"
-              ? "bottom-full mb-1.5 animate-popover-in-up"
-              : "top-full mt-1.5",
-          )}
-        >
+      {open && coords && typeof document !== "undefined" &&
+        createPortal(
+          <div
+            ref={popoverRef}
+            role="dialog"
+            aria-label="选择模型"
+            style={{
+              position: "fixed",
+              left: `${coords.left}px`,
+              top: coords.top !== undefined ? `${coords.top}px` : undefined,
+              bottom: coords.bottom !== undefined ? `${coords.bottom}px` : undefined,
+              width: `${coords.width}px`,
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                e.stopPropagation();
+                close();
+              }
+            }}
+            className={cn(
+              "z-[70] rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden",
+              coords.placement === "top" ? "animate-popover-in-up" : "animate-popover-in",
+            )}
+          >
           <div className="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] bg-[var(--surface-subtle)]/50 px-3 py-1.5 text-[11px] text-[var(--text-muted)]">
             <span className="inline-flex min-w-0 items-center gap-1.5 truncate">
               {agent ? (
@@ -524,8 +613,9 @@ export function LocalAgentModelCombobox({
               );
             })}
           </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

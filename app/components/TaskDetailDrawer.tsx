@@ -660,18 +660,18 @@ export function TaskDetailDrawer({
         <aside
           role="dialog"
           aria-label="任务详情"
-          className="relative z-10 w-full max-w-[640px] h-full flex flex-col bg-[var(--surface-elevated)] border-l border-[var(--border-subtle)] shadow-2xl animate-slide-in-right"
+          className="relative z-10 w-full sm:max-w-[640px] h-dvh flex flex-col bg-[var(--surface-elevated)] sm:border-l border-[var(--border-subtle)] shadow-2xl animate-slide-in-right"
         >
           {/* Sticky Header */}
-          <div className="shrink-0 flex items-center justify-between gap-2 px-5 h-13 border-b border-[var(--border-subtle)] bg-[var(--surface-elevated)]/95 backdrop-blur-sm">
+          <div className="shrink-0 rd-safe-pt flex items-center justify-between gap-2 px-3.5 sm:px-5 min-h-13 py-1.5 border-b border-[var(--border-subtle)] bg-[var(--surface-elevated)]/95 backdrop-blur-sm">
             <div className="flex items-center gap-2 min-w-0">
               {canGoBack && (
                 <button
                   type="button"
                   onClick={onGoBack}
-                  className="inline-flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] px-1.5 py-1 rounded-md hover:bg-[var(--surface-hover)] cursor-pointer transition-colors"
+                  className="inline-flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] h-9 sm:h-auto px-2 sm:px-1.5 py-1 rounded-md hover:bg-[var(--surface-hover)] cursor-pointer transition-colors"
                 >
-                  <Icon name="arrow-left" size={13} />
+                  <Icon name="arrow-left" size={14} />
                   返回
                 </button>
               )}
@@ -707,14 +707,14 @@ export function TaskDetailDrawer({
                 type="button"
                 onClick={onClose}
                 aria-label="关闭任务详情"
-                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer rd-focus-ring"
+                className="inline-flex items-center justify-center w-9 h-9 sm:w-7 sm:h-7 rounded-lg sm:rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer rd-focus-ring"
               >
-                <Icon name="x" size={16} />
+                <Icon name="x" size={17} />
               </button>
             </div>
           </div>
 
-          {task && <nav aria-label="任务视图" className="flex gap-4 border-b border-[var(--border-subtle)] px-5">
+          {task && <nav aria-label="任务视图" className="flex gap-4 border-b border-[var(--border-subtle)] px-3.5 sm:px-5">
             {([ ["details", "任务详情"], ["agent", "Agent 执行会话"] ] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={tab === value} onClick={() => setTab(value)} className={`rd-focus-ring inline-flex cursor-pointer items-center gap-2 border-b-2 py-2.5 text-sm ${tab === value ? "border-[var(--rd-accent)] font-medium text-[var(--text-primary)]" : "border-transparent text-[var(--text-muted)]"}`}>
               {label}{value === "agent" && isAgentWorking && <LivePulseDot active tone="emerald" />}
             </button>)}
@@ -728,7 +728,7 @@ export function TaskDetailDrawer({
           ) : task && tab === "agent" ? (
             <TaskAgentSessionPanel task={task} streams={streams} routing={routing} paused={project?.automation_paused} initialDraftConfig={initialDraftConfig} onTaskUpdated={() => { void onRefreshTask(task.id).catch(err => toast.error(err instanceof Error ? err.message : "刷新任务失败")); }} />
           ) : task ? (
-            <div className="flex-1 overflow-y-auto rd-scroll px-5 py-5 space-y-5">
+            <div className="flex-1 overflow-y-auto rd-scroll px-3.5 sm:px-5 py-4 sm:py-5 pb-[max(2rem,env(safe-area-inset-bottom))] space-y-5">
               {isAgentWorking && <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-3 py-2">
                 <span className="inline-flex items-center gap-2 text-xs"><LivePulseDot active tone="emerald" />Agent 正在处理任务</span>
                 <Button size="xs" variant="secondary" onClick={() => setTab("agent")}>查看实时执行 / 插话</Button>
@@ -923,9 +923,9 @@ export function TaskDetailDrawer({
 
                   {!isAgentWorking && (
                     <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40 p-2.5 space-y-2.5">
-                      <div className="flex flex-wrap items-center gap-1.5" aria-label="分配执行配置">
+                      <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-1.5" aria-label="分配执行配置">
                         <div
-                          className="inline-flex h-7 items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)]/70 p-0.5"
+                          className="inline-flex h-8 sm:h-7 w-full sm:w-auto items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)]/70 p-0.5"
                           role="group"
                           aria-label="选择分配 Harness"
                         >
@@ -936,7 +936,7 @@ export function TaskDetailDrawer({
                               disabled={busyAction !== null || savingDispatchConfig}
                               aria-pressed={dispatchRuntime === rt}
                               onClick={() => handleDispatchRuntimeChange(rt)}
-                              className={`rd-focus-ring rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
+                              className={`rd-focus-ring flex-1 sm:flex-initial rounded-md px-2 py-1 sm:py-0.5 text-[11px] font-medium transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
                                 dispatchRuntime === rt
                                   ? "bg-[var(--surface-elevated)] text-[var(--text-primary)] shadow-2xs"
                                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
@@ -954,6 +954,8 @@ export function TaskDetailDrawer({
                           disabled={busyAction !== null || savingDispatchConfig}
                           direction="down"
                           size="xs"
+                          fullWidth
+                          className="sm:w-auto"
                           ariaLabel="选择分配模型"
                           onChange={handleDispatchModelChange}
                         />
@@ -965,7 +967,8 @@ export function TaskDetailDrawer({
                           value={dispatchTarget}
                           disabled={busyAction !== null || savingDispatchConfig}
                           size="xs"
-                          className="max-w-[180px]"
+                          fullWidth
+                          className="sm:w-auto sm:max-w-[180px]"
                           onChange={handleDispatchTargetChange}
                         />
                         <LocalAgentEffortSelect
@@ -975,6 +978,8 @@ export function TaskDetailDrawer({
                           value={dispatchEffort}
                           disabled={busyAction !== null || savingDispatchConfig}
                           size="xs"
+                          fullWidth
+                          className="sm:w-auto"
                           ariaLabel="选择分配推理强度"
                           onChange={handleDispatchEffortChange}
                         />
@@ -1700,7 +1705,7 @@ export function TaskDetailDrawer({
                           </span>
                         </button>
                       ) : (
-                        <span className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+                        <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
                           <Kbd>⌘/Ctrl</Kbd>
                           <span>+</span>
                           <Kbd>Enter</Kbd>

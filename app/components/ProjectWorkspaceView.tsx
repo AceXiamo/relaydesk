@@ -115,6 +115,7 @@ export function ProjectWorkspaceView({
 }: ProjectWorkspaceViewProps) {
   const toast = useToast();
   const [tab, setTab] = useState<WorkspaceTab>("files");
+  const [mobilePane, setMobilePane] = useState<"list" | "detail">("list");
 
   // Files state
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
@@ -666,25 +667,25 @@ export function ProjectWorkspaceView({
   return (
     <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-[var(--surface-canvas)]">
       {/* Header */}
-      <header className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] px-5 py-3.5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+      <header className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] px-3.5 sm:px-5 py-3 sm:py-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h1 className="text-[15px] font-semibold text-[var(--text-primary)] truncate">
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+              <h1 className="text-[14.5px] sm:text-[15px] font-semibold text-[var(--text-primary)] truncate">
                 项目空间 · {project.name}
               </h1>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-[var(--surface-subtle)] text-[var(--text-muted)] border border-[var(--border-subtle)]">
+              <span className="text-[10.5px] sm:text-[11px] font-mono px-2 py-0.5 rounded-full bg-[var(--surface-subtle)] text-[var(--text-muted)] border border-[var(--border-subtle)]">
                 {fileCountOnly} 文件 · {formatBytes(filesTotalBytes)}
               </span>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-[var(--surface-subtle)] text-[var(--text-muted)] border border-[var(--border-subtle)]">
+              <span className="text-[10.5px] sm:text-[11px] font-mono px-2 py-0.5 rounded-full bg-[var(--surface-subtle)] text-[var(--text-muted)] border border-[var(--border-subtle)]">
                 {databases.length} 数据库
               </span>
             </div>
-            <p className="text-[12px] text-[var(--text-muted)] mt-0.5">
+            <p className="hidden sm:block text-[12px] text-[var(--text-muted)] mt-0.5">
               集中管理项目文档、测试夹具、SQLite/外部数据源与项目手册；所有资料会自动挂载给网页 Codex 对话。
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <Button
               variant="secondary"
               size="sm"
@@ -700,7 +701,8 @@ export function ProjectWorkspaceView({
               icon="sparkles"
               onClick={() => onOpenChatWithContext()}
             >
-              打开 Codex 对话
+              <span className="hidden sm:inline">打开 Codex 对话</span>
+              <span className="sm:hidden">Codex 对话</span>
             </Button>
           </div>
         </div>
@@ -732,7 +734,7 @@ export function ProjectWorkspaceView({
         />
 
         {/* Tabs */}
-        <div className="flex items-center gap-1 mt-3 -mb-3.5">
+        <div className="flex items-center gap-1 mt-3 -mb-3 sm:-mb-3.5 overflow-x-auto no-scrollbar whitespace-nowrap">
           {(
             [
               { id: "files", label: "文件管理", icon: "folder-open", count: fileCountOnly },
@@ -756,8 +758,11 @@ export function ProjectWorkspaceView({
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setTab(item.id)}
-                className={`relative inline-flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors cursor-pointer ${
+                onClick={() => {
+                  setTab(item.id);
+                  setMobilePane("list");
+                }}
+                className={`relative shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors cursor-pointer ${
                   active
                     ? "text-indigo-600 dark:text-indigo-400"
                     : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
@@ -808,7 +813,13 @@ export function ProjectWorkspaceView({
           }}
         >
           {/* Left Tree */}
-          <div className="w-[300px] shrink-0 border-r border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-col min-h-0">
+          <div
+            className={`${
+              mobilePane === "detail" && (selectedFilePath || fileLoading)
+                ? "hidden md:flex"
+                : "flex"
+            } w-full md:w-[300px] shrink-0 md:border-r border-[var(--border-subtle)] bg-[var(--surface-card)] flex-col min-h-0`}
+          >
             <div className="p-3 border-b border-[var(--border-subtle)] space-y-2">
               <div className="flex items-center gap-1.5">
                 <Button
@@ -902,7 +913,10 @@ export function ProjectWorkspaceView({
                       <button
                         type="button"
                         onClick={() => {
-                          if (entry.type === "file") void openFile(entry.path);
+                          if (entry.type === "file") {
+                            setMobilePane("detail");
+                            void openFile(entry.path);
+                          }
                         }}
                         className={`flex items-center gap-2 min-w-0 flex-1 text-left ${
                           entry.type === "file" ? "cursor-pointer" : "cursor-default"
@@ -925,15 +939,16 @@ export function ProjectWorkspaceView({
                       </button>
                       <div className="flex items-center gap-1 shrink-0">
                         {entry.type === "file" && (
-                          <span className="text-[10.5px] font-mono text-[var(--text-muted)] group-hover:hidden">
+                          <span className="text-[10.5px] font-mono text-[var(--text-muted)] md:group-hover:hidden">
                             {formatBytes(entry.size)}
                           </span>
                         )}
                         <button
                           type="button"
                           title="删除"
+                          aria-label={`删除 ${entry.name}`}
                           onClick={() => void handleDeleteFile(entry)}
-                          className="hidden group-hover:inline-flex p-1 rounded text-[var(--text-muted)] hover:text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+                          className="inline-flex md:hidden md:group-hover:inline-flex p-1.5 md:p-1 rounded text-[var(--text-muted)] hover:text-rose-500 hover:bg-rose-500/10 cursor-pointer"
                         >
                           <Icon name="trash-2" size={12} />
                         </button>
@@ -946,7 +961,13 @@ export function ProjectWorkspaceView({
           </div>
 
           {/* Right File Viewer / Editor */}
-          <div className="flex-1 flex flex-col min-w-0 min-h-0">
+          <div
+            className={`${
+              mobilePane === "detail" && (selectedFilePath || fileLoading)
+                ? "flex"
+                : "hidden md:flex"
+            } flex-1 flex-col min-w-0 min-h-0`}
+          >
             {fileLoading ? (
               <div className="flex-1 flex items-center justify-center text-[13px] text-[var(--text-muted)] gap-2">
                 <Icon name="loader-2" size={15} className="animate-spin text-indigo-500" />
@@ -986,9 +1007,17 @@ export function ProjectWorkspaceView({
               </div>
             ) : (
               <>
-                <div className="shrink-0 px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
+                <div className="shrink-0 px-3 sm:px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
-                    <Icon name={fileIconName(fileDetail)} size={15} className="text-indigo-500" />
+                    <button
+                      type="button"
+                      onClick={() => setMobilePane("list")}
+                      className="md:hidden inline-flex items-center gap-1 h-8 px-2 -ml-1 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] shrink-0 cursor-pointer"
+                    >
+                      <Icon name="arrow-left" size={14} />
+                      <span>列表</span>
+                    </button>
+                    <Icon name={fileIconName(fileDetail)} size={15} className="text-indigo-500 shrink-0" />
                     <span className="font-mono text-[13px] font-medium text-[var(--text-primary)] truncate">
                       files/{fileDetail.path}
                     </span>
@@ -1144,7 +1173,13 @@ export function ProjectWorkspaceView({
       {tab === "databases" && (
         <div className="flex-1 flex min-h-0 overflow-hidden">
           {/* Left Database List */}
-          <div className="w-[310px] shrink-0 border-r border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-col min-h-0">
+          <div
+            className={`${
+              mobilePane === "detail" && selectedDb
+                ? "hidden md:flex"
+                : "flex"
+            } w-full md:w-[310px] shrink-0 md:border-r border-[var(--border-subtle)] bg-[var(--surface-card)] flex-col min-h-0`}
+          >
             <div className="p-3 border-b border-[var(--border-subtle)] space-y-2">
               <div className="grid grid-cols-2 gap-1.5">
                 <Button
@@ -1205,7 +1240,10 @@ export function ProjectWorkspaceView({
                           ? "border-indigo-500/50 bg-indigo-500/8"
                           : "border-[var(--border-subtle)] bg-[var(--surface-elevated)] hover:border-[var(--border-strong)]"
                       }`}
-                      onClick={() => setSelectedDbId(db.id)}
+                      onClick={() => {
+                        setSelectedDbId(db.id);
+                        setMobilePane("detail");
+                      }}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
@@ -1227,11 +1265,12 @@ export function ProjectWorkspaceView({
                             <button
                               type="button"
                               title="编辑配置"
+                              aria-label={`编辑 ${db.name}`}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 openEditExternalDbModal(db);
                               }}
-                              className="opacity-0 group-hover:opacity-100 p-1 rounded text-[var(--text-muted)] hover:text-indigo-500 hover:bg-indigo-500/10 transition cursor-pointer"
+                              className="opacity-80 md:opacity-0 md:group-hover:opacity-100 p-1.5 md:p-1 rounded text-[var(--text-muted)] hover:text-indigo-500 hover:bg-indigo-500/10 transition cursor-pointer"
                             >
                               <Icon name="pen-line" size={12} />
                             </button>
@@ -1239,11 +1278,12 @@ export function ProjectWorkspaceView({
                           <button
                             type="button"
                             title="删除"
+                            aria-label={`删除 ${db.name}`}
                             onClick={(e) => {
                               e.stopPropagation();
                               void handleDeleteDatabase(db);
                             }}
-                            className="opacity-0 group-hover:opacity-100 p-1 rounded text-[var(--text-muted)] hover:text-rose-500 hover:bg-rose-500/10 transition cursor-pointer"
+                            className="opacity-80 md:opacity-0 md:group-hover:opacity-100 p-1.5 md:p-1 rounded text-[var(--text-muted)] hover:text-rose-500 hover:bg-rose-500/10 transition cursor-pointer"
                           >
                             <Icon name="trash-2" size={12} />
                           </button>
@@ -1343,7 +1383,13 @@ export function ProjectWorkspaceView({
           </div>
 
           {/* Right Database Inspector & SQL Console */}
-          <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+          <div
+            className={`${
+              mobilePane === "detail" && selectedDb
+                ? "flex"
+                : "hidden md:flex"
+            } flex-1 flex-col min-w-0 min-h-0 overflow-hidden`}
+          >
             {!selectedDb ? (
               <div className="flex-1 flex items-center justify-center p-8">
                 <EmptyState
@@ -1381,8 +1427,18 @@ export function ProjectWorkspaceView({
                 const matchedClient = findMatchingDbClient(dbClients, selectedDb.kind);
                 const cliExample = buildDatasourceCliExample(selectedDb);
                 return (
-                  <div className="flex-1 overflow-y-auto p-6">
-                    <div className="max-w-2xl rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-6 space-y-5">
+                  <div className="flex-1 overflow-y-auto p-3.5 sm:p-6">
+                    <div className="md:hidden mb-3">
+                      <button
+                        type="button"
+                        onClick={() => setMobilePane("list")}
+                        className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                      >
+                        <Icon name="arrow-left" size={13} />
+                        <span>返回数据源列表</span>
+                      </button>
+                    </div>
+                    <div className="max-w-2xl rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-4 sm:p-6 space-y-5">
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="flex items-center gap-3 min-w-0">
                           <div className="w-10 h-10 rounded-xl bg-indigo-500/12 text-indigo-500 flex items-center justify-center shrink-0">
@@ -1582,9 +1638,17 @@ export function ProjectWorkspaceView({
             ) : (
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
                 {/* Top bar */}
-                <div className="shrink-0 px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
+                <div className="shrink-0 px-3 sm:px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
-                    <Icon name="database" size={15} className="text-emerald-500" />
+                    <button
+                      type="button"
+                      onClick={() => setMobilePane("list")}
+                      className="md:hidden inline-flex items-center gap-1 h-8 px-2 -ml-1 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] shrink-0 cursor-pointer"
+                    >
+                      <Icon name="arrow-left" size={14} />
+                      <span>列表</span>
+                    </button>
+                    <Icon name="database" size={15} className="text-emerald-500 shrink-0" />
                     <span className="text-[13.5px] font-semibold text-[var(--text-primary)] truncate">
                       {selectedDb.name}
                     </span>
@@ -1859,10 +1923,10 @@ export function ProjectWorkspaceView({
       {/* TAB 4: BOUND REPOSITORIES */}
       {tab === "repos" && (
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          <div className="shrink-0 px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
+          <div className="shrink-0 px-3.5 sm:px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1 sm:flex-initial">
               {reposStatus && reposStatus.repos.length > 0 ? (
-                <div className="w-[260px]">
+                <div className="w-full sm:w-[260px]">
                   <Select
                     ariaLabel="选择绑定仓库"
                     fullWidth
@@ -1875,6 +1939,7 @@ export function ProjectWorkspaceView({
                       setActiveRepo(val);
                       setRepoSubpath("");
                       setRepoFile(null);
+                      setMobilePane("list");
                     }}
                   />
                 </div>
@@ -1900,7 +1965,13 @@ export function ProjectWorkspaceView({
 
           <div className="flex-1 flex min-h-0 overflow-hidden">
             {/* Repo File Tree */}
-            <div className="w-[300px] shrink-0 border-r border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-col min-h-0">
+            <div
+              className={`${
+                mobilePane === "detail" && (repoFile || repoFileLoading)
+                  ? "hidden md:flex"
+                  : "flex"
+              } w-full md:w-[300px] shrink-0 md:border-r border-[var(--border-subtle)] bg-[var(--surface-card)] flex-col min-h-0`}
+            >
               {repoSubpath && (
                 <button
                   type="button"
@@ -1937,6 +2008,7 @@ export function ProjectWorkspaceView({
                         if (item.type === "dir") {
                           setRepoSubpath(item.path);
                         } else {
+                          setMobilePane("detail");
                           void openRepoFile(item.repo, item.path);
                         }
                       }}
@@ -1970,7 +2042,13 @@ export function ProjectWorkspaceView({
             </div>
 
             {/* Repo File Content */}
-            <div className="flex-1 flex flex-col min-w-0 min-h-0">
+            <div
+              className={`${
+                mobilePane === "detail" && (repoFile || repoFileLoading)
+                  ? "flex"
+                  : "hidden md:flex"
+              } flex-1 flex-col min-w-0 min-h-0`}
+            >
               {repoFileLoading ? (
                 <div className="flex-1 flex items-center justify-center text-[13px] text-[var(--text-muted)] gap-2">
                   <Icon name="loader-2" size={15} className="animate-spin text-indigo-500" />
@@ -1986,10 +2064,20 @@ export function ProjectWorkspaceView({
                 </div>
               ) : (
                 <>
-                  <div className="shrink-0 px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex items-center justify-between gap-2">
-                    <span className="font-mono text-[12.5px] text-[var(--text-primary)] truncate">
-                      {repoFile.repo} / {repoFile.path}
-                    </span>
+                  <div className="shrink-0 px-3 sm:px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => setMobilePane("list")}
+                        className="md:hidden inline-flex items-center gap-1 h-8 px-2 -ml-1 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] shrink-0 cursor-pointer"
+                      >
+                        <Icon name="arrow-left" size={14} />
+                        <span>列表</span>
+                      </button>
+                      <span className="font-mono text-[12.5px] text-[var(--text-primary)] truncate">
+                        {repoFile.repo} / {repoFile.path}
+                      </span>
+                    </div>
                     <Button
                       size="xs"
                       variant="primary"

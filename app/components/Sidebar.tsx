@@ -136,7 +136,7 @@ export function Sidebar({
   };
 
   const content = (
-    <aside className="flex flex-col h-full w-[252px] shrink-0 bg-[var(--surface-sidebar)] border-r border-[var(--border-subtle)] select-none">
+    <aside className="flex flex-col h-full w-[min(272px,84vw)] lg:w-[252px] shrink-0 bg-[var(--surface-sidebar)] border-r border-[var(--border-subtle)] select-none rd-safe-pt">
       {/* Brand header */}
       <div className="flex items-center justify-between px-3.5 h-13 border-b border-[var(--border-subtle)]">
         <div className="flex items-center gap-2.5 min-w-0">
@@ -189,6 +189,15 @@ export function Sidebar({
               <Icon name="panel-left-close" size={14} />
             </button>
           )}
+          <button
+            type="button"
+            onClick={onCloseMobile}
+            title="关闭导航"
+            aria-label="关闭导航"
+            className="lg:hidden inline-flex items-center justify-center w-10 h-10 -mr-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+          >
+            <Icon name="x" size={18} />
+          </button>
         </div>
       </div>
 
@@ -502,11 +511,14 @@ export function Sidebar({
       </nav>
 
       {/* Footer */}
-      <div className="p-2.5 border-t border-[var(--border-subtle)] space-y-2">
+      <div className="p-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] border-t border-[var(--border-subtle)] space-y-2">
         <button
           type="button"
-          onClick={onOpenCommand}
-          className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+          onClick={() => {
+            onCloseMobile();
+            onOpenCommand();
+          }}
+          className="w-full flex items-center justify-between px-2.5 py-2 lg:py-1.5 rounded-lg text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
         >
           <span className="flex items-center gap-1.5">
             <Icon name="command" size={13} />

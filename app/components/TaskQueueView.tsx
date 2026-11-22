@@ -179,6 +179,20 @@ function formatDeliveryRef(raw: string | null | undefined): DeliveryRefChip | nu
   };
 }
 
+function formatTaskPreview(raw: string): string {
+  return raw
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/(^|\n)\s{0,3}#{1,6}\s+/g, "$1")
+    .replace(/(^|\n)\s*>\s?/g, "$1")
+    .replace(/(^|\n)\s*[-*+]\s+\[[ xX]\]\s+/g, "$1")
+    .replace(/(^|\n)\s*[-*+]\s+/g, "$1")
+    .replace(/[*_`~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function filterTasksForView(
   tasks: TaskRecord[],
   view: WorkspaceView,
@@ -428,26 +442,29 @@ export function TaskQueueView({
   return (
     <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
       {/* Page Header */}
-      <header className="shrink-0 px-5 lg:px-7 py-4 border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)]">
+      <header className="shrink-0 px-3.5 sm:px-5 lg:px-7 py-2.5 sm:py-4 border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)]">
         {/* Autonomous Pipeline Control Bar */}
         <div
-          className={`mb-3.5 px-3.5 py-2 rounded-xl border flex flex-wrap items-center justify-between gap-2.5 transition-colors duration-200 ${
+          className={`mb-2.5 sm:mb-3.5 px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl border flex items-center justify-between gap-2 transition-colors duration-200 ${
             paused
               ? "border-amber-500/25 bg-amber-500/[0.045] dark:bg-amber-500/[0.06]"
               : "border-emerald-500/20 bg-emerald-500/[0.035] dark:bg-emerald-500/[0.05]"
           }`}
         >
-          <div className="flex flex-wrap items-center gap-2.5 min-w-0">
-            <div className="inline-flex items-center gap-2 min-w-0">
+          <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 overflow-hidden">
+            <div className="inline-flex items-center gap-1.5 sm:gap-2 min-w-0 shrink-0">
               <LivePulseDot tone={paused ? "amber" : "emerald"} active={!paused} />
               <span
-                className={`text-[12.5px] font-semibold tracking-tight ${
+                className={`text-[12px] sm:text-[12.5px] font-semibold tracking-tight whitespace-nowrap ${
                   paused
                     ? "text-amber-700 dark:text-amber-300"
                     : "text-emerald-700 dark:text-emerald-300"
                 }`}
               >
-                {paused ? "自动执行已暂停" : "全自动迭代运行中"}
+                <span className="sm:hidden">{paused ? "已暂停" : "自动中"}</span>
+                <span className="hidden sm:inline">
+                  {paused ? "自动执行已暂停" : "全自动迭代运行中"}
+                </span>
               </span>
             </div>
 
@@ -456,13 +473,13 @@ export function TaskQueueView({
               className="hidden sm:inline-block w-px h-3.5 bg-[var(--border-strong)]/70"
             />
 
-            <DeliveryModeBadge mode={project.delivery_mode} compact />
+            <DeliveryModeBadge mode={project.delivery_mode} compact className="shrink-0" />
 
             {metrics.agent > 0 && (
               <button
                 type="button"
                 onClick={() => onNavigateView("agents")}
-                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/12 text-amber-700 dark:text-amber-300 border border-amber-500/20 hover:bg-amber-500/20 transition-colors cursor-pointer"
+                className="hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/12 text-amber-700 dark:text-amber-300 border border-amber-500/20 hover:bg-amber-500/20 transition-colors cursor-pointer shrink-0"
               >
                 <LivePulseDot tone="amber" active />
                 {metrics.agent} 个 Agent 执行中
@@ -470,21 +487,22 @@ export function TaskQueueView({
             )}
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
             <button
               type="button"
               onClick={handleSkillLink}
-              className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] bg-[var(--surface-card)]/80 hover:bg-[var(--surface-card)] border border-[var(--border-subtle)] hover:border-[var(--border-strong)] transition-all duration-150 cursor-pointer"
+              className="inline-flex items-center gap-1 sm:gap-1.5 h-7 px-2 sm:px-2.5 rounded-lg text-[11.5px] sm:text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] bg-[var(--surface-card)]/80 hover:bg-[var(--surface-card)] border border-[var(--border-subtle)] hover:border-[var(--border-strong)] transition-all duration-150 cursor-pointer"
             >
               <Icon name="terminal" size={12.5} className="text-indigo-500" />
-              配置 Skill
+              <span className="sm:hidden">Skill</span>
+              <span className="hidden sm:inline">配置 Skill</span>
             </button>
 
             <button
               type="button"
               disabled={automationBusy}
               onClick={() => void onToggleAutomation(!paused)}
-              className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[12px] font-medium border transition-all duration-150 cursor-pointer disabled:opacity-50 ${
+              className={`inline-flex items-center gap-1 sm:gap-1.5 h-7 px-2 sm:px-2.5 rounded-lg text-[11.5px] sm:text-[12px] font-medium border transition-all duration-150 cursor-pointer disabled:opacity-50 ${
                 paused
                   ? "bg-emerald-600 hover:bg-emerald-700 text-white border-transparent shadow-2xs"
                   : "bg-[var(--surface-card)] text-[var(--text-secondary)] hover:text-amber-700 dark:hover:text-amber-300 border-[var(--border-subtle)] hover:border-amber-500/40"
@@ -495,27 +513,30 @@ export function TaskQueueView({
               ) : (
                 <Icon name={paused ? "zap" : "pause-circle"} size={12.5} />
               )}
-              {paused ? "恢复自动执行" : "暂停自动执行"}
+              <span className="sm:hidden">{paused ? "恢复" : "暂停"}</span>
+              <span className="hidden sm:inline">
+                {paused ? "恢复自动执行" : "暂停自动执行"}
+              </span>
             </button>
           </div>
         </div>
 
         {/* Title Row */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center justify-between gap-2 sm:gap-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-2.5">
-              <h1 className="text-[18px] font-semibold tracking-tight text-[var(--text-primary)]">
+            <div className="flex items-center gap-2 sm:gap-2.5">
+              <h1 className="text-[16px] sm:text-[18px] font-semibold tracking-tight text-[var(--text-primary)] truncate">
                 {meta.title}
               </h1>
-              <span className="text-xs font-mono tabular-nums px-2 py-0.5 rounded-full bg-[var(--surface-subtle)] text-[var(--text-muted)] border border-[var(--border-subtle)]">
+              <span className="text-xs font-mono tabular-nums px-2 py-0.5 rounded-full bg-[var(--surface-subtle)] text-[var(--text-muted)] border border-[var(--border-subtle)] shrink-0">
                 {visibleTasks.length}
               </span>
             </div>
-            <p className="text-[13px] text-[var(--text-muted)] mt-0.5 truncate">
+            <p className="hidden sm:block text-[13px] text-[var(--text-muted)] mt-0.5 truncate">
               {meta.subtitle}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <Button
               variant="ghost"
               size="sm"
@@ -523,11 +544,14 @@ export function TaskQueueView({
               onClick={onRefresh}
               loading={loading}
               title="刷新队列"
+              aria-label="刷新队列"
+              className="px-2 sm:px-2.5"
             >
-              刷新
+              <span className="hidden sm:inline">刷新</span>
             </Button>
             <Button variant="primary" size="sm" icon="plus" onClick={onNewFeedback}>
-              新建反馈
+              <span className="sm:hidden">新建</span>
+              <span className="hidden sm:inline">新建反馈</span>
               <span className="hidden sm:inline-flex ml-1 opacity-75">
                 <Kbd>N</Kbd>
               </span>
@@ -537,26 +561,35 @@ export function TaskQueueView({
 
         {/* Interactive Telemetry Strip (KPI Cards on Queue view) */}
         {view === "queue" && (
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3.5">
-            {telemetryCards.map((card) => (
-              <button
-                key={card.key}
-                type="button"
-                onClick={card.onClick}
-                className={`group relative flex flex-col justify-between px-3.5 py-2.5 rounded-xl border text-left transition-all duration-150 ease-out cursor-pointer ${
-                  card.active
-                    ? `${card.activeRing} shadow-2xs`
-                    : "border-[var(--border-subtle)] bg-[var(--surface-card)] hover:border-[var(--border-strong)] hover:-translate-y-[1px] hover:shadow-[var(--rd-shadow-sm)]"
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--text-muted)]">
-                      <span className="truncate">{card.label}</span>
+          <>
+            {/* Mobile (< sm): Compact 4-column telemetry strip */}
+            <div className="grid grid-cols-4 gap-1.5 mt-2.5 sm:hidden">
+              {telemetryCards.map((card) => {
+                const mobileLabel =
+                  card.key === "auto_pending"
+                    ? "待消费"
+                    : card.key === "agent"
+                      ? "执行中"
+                      : card.key === "shipped"
+                        ? "已交付"
+                        : "待关注";
+                return (
+                  <button
+                    key={card.key}
+                    type="button"
+                    onClick={card.onClick}
+                    className={`flex flex-col items-center justify-center px-1.5 py-1.5 rounded-xl border text-center transition-colors cursor-pointer ${
+                      card.active
+                        ? `${card.activeRing} shadow-2xs`
+                        : "border-[var(--border-subtle)] bg-[var(--surface-card)] active:bg-[var(--surface-hover)]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-center gap-1 text-[10.5px] font-medium text-[var(--text-muted)] leading-none">
+                      <span className="truncate">{mobileLabel}</span>
                       {card.pulse && <LivePulseDot tone="amber" active />}
                     </div>
                     <div
-                      className={`text-[21px] font-semibold font-mono tabular-nums leading-tight mt-0.5 ${
+                      className={`text-[16px] font-semibold font-mono tabular-nums leading-tight mt-1 ${
                         card.key === "shipped" && card.count > 0
                           ? "text-emerald-600 dark:text-emerald-400"
                           : card.key === "attention" && card.count > 0
@@ -566,24 +599,60 @@ export function TaskQueueView({
                     >
                       {card.count}
                     </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Desktop (>= sm): Full KPI cards */}
+            <div className="hidden sm:grid sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3.5">
+              {telemetryCards.map((card) => (
+                <button
+                  key={card.key}
+                  type="button"
+                  onClick={card.onClick}
+                  className={`group relative flex flex-col justify-between px-3.5 py-2.5 rounded-xl border text-left transition-all duration-150 ease-out cursor-pointer ${
+                    card.active
+                      ? `${card.activeRing} shadow-2xs`
+                      : "border-[var(--border-subtle)] bg-[var(--surface-card)] hover:border-[var(--border-strong)] hover:-translate-y-[1px] hover:shadow-[var(--rd-shadow-sm)]"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--text-muted)]">
+                        <span className="truncate">{card.label}</span>
+                        {card.pulse && <LivePulseDot tone="amber" active />}
+                      </div>
+                      <div
+                        className={`text-[21px] font-semibold font-mono tabular-nums leading-tight mt-0.5 ${
+                          card.key === "shipped" && card.count > 0
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : card.key === "attention" && card.count > 0
+                              ? "text-rose-600 dark:text-rose-400"
+                              : "text-[var(--text-primary)]"
+                        }`}
+                      >
+                        {card.count}
+                      </div>
+                    </div>
+                    <div
+                      className={`w-8 h-8 rounded-lg ${card.accentBg} ${card.accentText} flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform duration-150`}
+                    >
+                      <Icon name={card.icon} size={15} />
+                    </div>
                   </div>
-                  <div
-                    className={`w-8 h-8 rounded-lg ${card.accentBg} ${card.accentText} flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform duration-150`}
-                  >
-                    <Icon name={card.icon} size={15} />
+                  <div className="mt-1.5 text-[11px] text-[var(--text-muted)] truncate">
+                    {card.subtitle}
                   </div>
-                </div>
-                <div className="mt-1.5 text-[11px] text-[var(--text-muted)] truncate">
-                  {card.subtitle}
-                </div>
-              </button>
-            ))}
-          </div>
+                </button>
+              ))}
+            </div>
+          </>
         )}
 
         {/* Filter Bar */}
-        <div className="flex flex-wrap items-center gap-2 mt-3.5">
-          <div className="relative flex-1 min-w-[200px] max-w-md">
+        <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 mt-2.5 sm:mt-3.5">
+          <div className="relative w-full sm:flex-1 sm:min-w-[200px] sm:max-w-md">
             <Icon
               name="search"
               size={14}
@@ -594,8 +663,8 @@ export function TaskQueueView({
               type="search"
               value={search}
               onChange={(e) => onSearchChange(e.target.value)}
-              placeholder="搜索标题、正文、交付引用或 RD-001…"
-              className="w-full h-8.5 pl-8.5 pr-10 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15 transition"
+              placeholder="搜索标题、正文或 RD-001…"
+              className="w-full h-9 sm:h-8.5 pl-8.5 pr-3 sm:pr-10 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15 transition"
             />
             {!search && (
               <span className="hidden sm:inline-flex absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
@@ -604,100 +673,105 @@ export function TaskQueueView({
             )}
           </div>
 
-          {view === "queue" && cockpitFilter && (
-            <button
-              type="button"
-              onClick={() => onCockpitFilterChange?.("")}
-              className="inline-flex items-center gap-1.5 h-8.5 px-2.5 rounded-lg border border-indigo-500/40 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 text-[12px] font-medium hover:bg-indigo-500/15 transition cursor-pointer"
-            >
-              <Icon name="filter" size={12} />
-              {COCKPIT_FILTER_LABELS[cockpitFilter]}
-              <Icon name="x" size={12} className="opacity-75" />
-            </button>
-          )}
+          <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar pb-0.5 sm:pb-0 sm:overflow-visible">
+            {view === "queue" && cockpitFilter && (
+              <button
+                type="button"
+                onClick={() => onCockpitFilterChange?.("")}
+                className="shrink-0 inline-flex items-center gap-1.5 h-8.5 px-2.5 rounded-lg border border-indigo-500/40 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 text-[12px] font-medium hover:bg-indigo-500/15 transition cursor-pointer"
+              >
+                <Icon name="filter" size={12} />
+                {COCKPIT_FILTER_LABELS[cockpitFilter]}
+                <Icon name="x" size={12} className="opacity-75" />
+              </button>
+            )}
 
-          {view === "queue" && (
-            <Select<TaskStatus | "">
-              ariaLabel="按状态筛选"
+            {view === "queue" && (
+              <Select<TaskStatus | "">
+                ariaLabel="按状态筛选"
+                size="sm"
+                minMenuWidth={152}
+                className="shrink-0"
+                value={statusFilter}
+                onChange={(val) => {
+                  onCockpitFilterChange?.("");
+                  onStatusFilterChange(val);
+                }}
+                options={
+                  [
+                    {
+                      value: "",
+                      label: "全部状态",
+                      icon: "list-filter",
+                    },
+                    ...STATUS_ORDER.map((s) => ({
+                      value: s,
+                      label: STATUS_LABELS[s],
+                      dotClassName:
+                        s === "triage"
+                          ? "bg-zinc-400"
+                          : s === "ready"
+                            ? "bg-indigo-500 dark:bg-indigo-400"
+                            : s === "working"
+                              ? "bg-amber-500 dark:bg-amber-400"
+                              : s === "handoff"
+                                ? "bg-violet-500 dark:bg-violet-400"
+                                : s === "waiting"
+                                  ? "bg-rose-500 dark:bg-rose-400"
+                                  : s === "review"
+                                    ? "bg-emerald-500 dark:bg-emerald-400"
+                                    : "bg-zinc-400 dark:bg-zinc-500",
+                    })),
+                  ] satisfies SelectOption<TaskStatus | "">[]
+                }
+              />
+            )}
+
+            <Select<TaskSource | "">
+              ariaLabel="按来源筛选"
               size="sm"
-              minMenuWidth={152}
-              value={statusFilter}
-              onChange={(val) => {
-                onCockpitFilterChange?.("");
-                onStatusFilterChange(val);
-              }}
+              minMenuWidth={150}
+              className="shrink-0"
+              value={sourceFilter}
+              onChange={(val) => onSourceFilterChange(val)}
               options={
                 [
-                  {
-                    value: "",
-                    label: "全部状态",
-                    icon: "list-filter",
-                  },
-                  ...STATUS_ORDER.map((s) => ({
-                    value: s,
-                    label: STATUS_LABELS[s],
-                    dotClassName:
-                      s === "triage"
-                        ? "bg-zinc-400"
-                        : s === "ready"
-                          ? "bg-indigo-500 dark:bg-indigo-400"
-                          : s === "working"
-                            ? "bg-amber-500 dark:bg-amber-400"
-                            : s === "handoff"
-                              ? "bg-violet-500 dark:bg-violet-400"
-                              : s === "waiting"
-                                ? "bg-rose-500 dark:bg-rose-400"
-                                : s === "review"
-                                  ? "bg-emerald-500 dark:bg-emerald-400"
-                                  : "bg-zinc-400 dark:bg-zinc-500",
-                  })),
-                ] satisfies SelectOption<TaskStatus | "">[]
+                  { value: "", label: "全部来源", icon: "layers" },
+                  { value: "widget", label: "应用组件", icon: "message-square" },
+                  { value: "bot", label: "群聊 Bot", icon: "bot" },
+                  { value: "console", label: "手动录入", icon: "pen-line" },
+                ] satisfies SelectOption<TaskSource | "">[]
               }
             />
-          )}
 
-          <Select<TaskSource | "">
-            ariaLabel="按来源筛选"
-            size="sm"
-            minMenuWidth={150}
-            value={sourceFilter}
-            onChange={(val) => onSourceFilterChange(val)}
-            options={
-              [
-                { value: "", label: "全部来源", icon: "layers" },
-                { value: "widget", label: "应用组件", icon: "message-square" },
-                { value: "bot", label: "群聊 Bot", icon: "bot" },
-                { value: "console", label: "手动录入", icon: "pen-line" },
-              ] satisfies SelectOption<TaskSource | "">[]
-            }
-          />
+            <Select<SortMode>
+              ariaLabel="排序方式"
+              size="sm"
+              minMenuWidth={144}
+              leadingIcon="arrow-up-down"
+              className="shrink-0"
+              value={sortMode}
+              onChange={(val) => onSortModeChange(val)}
+              options={
+                [
+                  { value: "updated", label: "最近更新" },
+                  { value: "priority", label: "按优先级" },
+                  { value: "number", label: "按编号" },
+                ] satisfies SelectOption<SortMode>[]
+              }
+            />
 
-          <Select<SortMode>
-            ariaLabel="排序方式"
-            size="sm"
-            minMenuWidth={144}
-            leadingIcon="arrow-up-down"
-            value={sortMode}
-            onChange={(val) => onSortModeChange(val)}
-            options={
-              [
-                { value: "updated", label: "最近更新" },
-                { value: "priority", label: "按优先级" },
-                { value: "number", label: "按编号" },
-              ] satisfies SelectOption<SortMode>[]
-            }
-          />
-
-          {hasFilters && (
-            <Button variant="ghost" size="xs" icon="x" onClick={onClearFilters}>
-              清空筛选
-            </Button>
-          )}
+            {hasFilters && (
+              <Button variant="ghost" size="xs" icon="x" onClick={onClearFilters} className="shrink-0">
+                清空筛选
+              </Button>
+            )}
+          </div>
         </div>
       </header>
 
       {/* Task Rows */}
-      <div className="flex-1 overflow-y-auto rd-scroll">
+      <div className="flex-1 overflow-y-auto rd-scroll pb-[max(1.5rem,env(safe-area-inset-bottom))]">
         {visibleTasks.length === 0 ? (
           <div className="py-16 px-6">
             <EmptyState
@@ -752,6 +826,17 @@ export function TaskQueueView({
               const canQuickClaim =
                 task.owner === "none" && task.status !== "done" && !canQuickDone;
               const deliveryChip = formatDeliveryRef(task.delivery_ref);
+              const previewText =
+                task.body && task.body !== task.title ? formatTaskPreview(task.body) : "";
+              const hasMobileMeta = Boolean(
+                task.resolution ||
+                  deliveryChip ||
+                  (task.attempts > 0 && task.status !== "done") ||
+                  task.requirements ||
+                  (task.merged_count ?? 0) > 0 ||
+                  (task.message_count ?? 0) > 0 ||
+                  task.owner !== "none",
+              );
 
               return (
                 <div
@@ -765,7 +850,7 @@ export function TaskQueueView({
                       onSelectTask(task.id);
                     }
                   }}
-                  className={`group relative flex items-center gap-3 px-5 lg:px-7 py-3 transition-colors duration-150 cursor-pointer outline-none focus-visible:bg-[var(--surface-hover)] ${
+                  className={`group relative px-3.5 py-3 md:flex md:items-center md:gap-3 md:px-5 lg:px-7 transition-colors duration-150 cursor-pointer outline-none focus-visible:bg-[var(--surface-hover)] ${
                     selected
                       ? "bg-indigo-500/[0.06] dark:bg-indigo-500/[0.1]"
                       : isAgentActive
@@ -785,18 +870,135 @@ export function TaskQueueView({
                     }`}
                   />
 
+                  {/* Mobile (< md) 3-layer card layout */}
+                  <div className="md:hidden space-y-1.5 min-w-0">
+                    {/* Layer 1: Code + Priority | Status + Time */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[11.5px] font-mono tabular-nums font-medium text-[var(--text-muted)] shrink-0">
+                          {taskCode(task.number)}
+                        </span>
+                        <PriorityBadge priority={task.priority} />
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <StatusBadge status={task.status} compact />
+                        <time
+                          className="text-[11px] font-mono tabular-nums text-[var(--text-muted)]"
+                          title={task.updated_at}
+                        >
+                          {formatRelativeTime(task.updated_at)}
+                        </time>
+                      </div>
+                    </div>
+
+                    {/* Layer 2: Full Title (up to 2 lines) + clean 1-line summary */}
+                    <div className="min-w-0">
+                      <div
+                        className={`text-[14px] font-medium leading-snug line-clamp-2 break-words ${
+                          task.status === "done"
+                            ? "text-[var(--text-muted)] line-through decoration-[var(--border-strong)]"
+                            : "text-[var(--text-primary)]"
+                        }`}
+                      >
+                        {task.title}
+                      </div>
+                      {previewText && (
+                        <p className="text-[12px] text-[var(--text-muted)] truncate mt-0.5">
+                          {previewText}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Layer 3: Wrapped metadata badges (only when present) */}
+                    {hasMobileMeta && (
+                      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                        {task.owner !== "none" && (
+                          <OwnerChip owner={task.owner} lastSeen={task.last_seen} />
+                        )}
+                        {task.resolution && (
+                          <ResolutionBadge
+                            resolution={task.resolution}
+                            triagedBy={task.triaged_by}
+                            compact
+                          />
+                        )}
+                        {deliveryChip &&
+                          (deliveryChip.href ? (
+                            <a
+                              href={deliveryChip.href}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              title={`交付记录：${task.delivery_ref}`}
+                              className={`inline-flex items-center gap-1 text-[10.5px] font-mono px-1.5 py-0.5 rounded border max-w-[160px] truncate transition-colors ${
+                                deliveryChip.isPr
+                                  ? "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/20"
+                                  : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20"
+                              }`}
+                            >
+                              <Icon name={deliveryChip.icon} size={11} className="shrink-0" />
+                              <span className="truncate">{deliveryChip.label}</span>
+                            </a>
+                          ) : (
+                            <span
+                              title={`交付记录：${task.delivery_ref}`}
+                              className={`inline-flex items-center gap-1 text-[10.5px] font-mono px-1.5 py-0.5 rounded border max-w-[160px] truncate ${
+                                deliveryChip.isPr
+                                  ? "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/20"
+                                  : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20"
+                              }`}
+                            >
+                              <Icon name={deliveryChip.icon} size={11} className="shrink-0" />
+                              <span className="truncate">{deliveryChip.label}</span>
+                            </span>
+                          ))}
+                        {task.attempts > 0 && task.status !== "done" && (
+                          <span
+                            className={`inline-flex items-center gap-0.5 text-[10.5px] font-mono tabular-nums px-1.5 py-0.5 rounded border ${
+                              task.attempts >= 3
+                                ? "bg-rose-500/12 text-rose-600 dark:text-rose-400 border-rose-500/25 font-medium"
+                                : "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20"
+                            }`}
+                          >
+                            <Icon name="alert-triangle" size={10.5} />
+                            重试 {task.attempts}/3
+                          </span>
+                        )}
+                        {task.requirements && (
+                          <span className="inline-flex items-center gap-0.5 text-[10.5px] px-1.5 py-0.5 rounded bg-[var(--surface-subtle)] text-[var(--text-muted)]">
+                            <Icon name="file-text" size={11} />
+                            要求
+                          </span>
+                        )}
+                        {(task.merged_count ?? 0) > 0 && (
+                          <span className="inline-flex items-center gap-0.5 text-[10.5px] font-mono px-1.5 py-0.5 rounded bg-[var(--surface-subtle)] text-[var(--text-muted)]">
+                            <Icon name="git-merge" size={11} />
+                            {task.merged_count}
+                          </span>
+                        )}
+                        {(task.message_count ?? 0) > 0 && (
+                          <span className="inline-flex items-center gap-0.5 text-[10.5px] font-mono text-[var(--text-muted)]">
+                            <Icon name="message-square" size={11} />
+                            {task.message_count}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Desktop (>= md) compact single-line layout */}
                   {/* Priority */}
-                  <div className="shrink-0 w-[56px] flex items-center">
+                  <div className="hidden md:flex shrink-0 w-[56px] items-center">
                     <PriorityBadge priority={task.priority} />
                   </div>
 
                   {/* Code */}
-                  <span className="shrink-0 w-[64px] text-[12px] font-mono tabular-nums text-[var(--text-muted)]">
+                  <span className="hidden md:inline shrink-0 w-[64px] text-[12px] font-mono tabular-nums text-[var(--text-muted)]">
                     {taskCode(task.number)}
                   </span>
 
                   {/* Main title + high-signal metadata */}
-                  <div className="flex-1 min-w-0">
+                  <div className="hidden md:block flex-1 min-w-0">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <span
                         className={`text-[13.5px] font-medium truncate transition-colors duration-150 ${
@@ -934,12 +1136,12 @@ export function TaskQueueView({
                   </div>
 
                   {/* Status + Owner + Source + Updated */}
-                  <div className="shrink-0 flex items-center gap-2.5">
+                  <div className="hidden md:flex shrink-0 items-center gap-2.5">
                     <StatusBadge status={task.status} />
-                    <div className="hidden md:block">
+                    <div>
                       <OwnerChip owner={task.owner} lastSeen={task.last_seen} />
                     </div>
-                    <div className="hidden sm:block">
+                    <div>
                       <SourceBadge source={task.source} />
                     </div>
                     <time

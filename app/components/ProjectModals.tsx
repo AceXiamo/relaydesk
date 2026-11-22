@@ -274,7 +274,7 @@ export function CreateFeedbackModal({
           <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
             优先级
           </span>
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {PRIORITY_ORDER.map((p) => {
               const active = priority === p;
               return (
@@ -282,7 +282,7 @@ export function CreateFeedbackModal({
                   key={p}
                   type="button"
                   onClick={() => setPriority(p)}
-                  className={`flex items-center justify-center gap-1.5 py-2 px-2 rounded-lg border text-[12.5px] font-medium transition cursor-pointer ${
+                  className={`flex items-center justify-center gap-1.5 py-2.5 sm:py-2 px-2 rounded-lg border text-[12.5px] font-medium transition cursor-pointer ${
                     active
                       ? "border-indigo-500 bg-indigo-500/10 text-[var(--text-primary)]"
                       : "border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--text-secondary)] hover:border-[var(--border-strong)]"
@@ -297,10 +297,10 @@ export function CreateFeedbackModal({
         </div>
 
         <div className="flex items-center justify-between pt-2">
-          <span className="text-[11.5px] text-[var(--text-muted)]">
+          <span className="hidden sm:inline-flex items-center gap-1 text-[11.5px] text-[var(--text-muted)]">
             <Kbd>⌘</Kbd> + <Kbd>Enter</Kbd> 快速提交
           </span>
-          <div className="flex gap-2">
+          <div className="flex gap-2 ml-auto">
             <Button type="button" variant="ghost" size="sm" onClick={onClose}>
               取消
             </Button>

@@ -183,7 +183,7 @@ function CodeBlockCard({
   return (
     <div
       className={cn(
-        "rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/70 dark:bg-[#0d0f13] overflow-hidden rd-hairline-glow",
+        "max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/70 dark:bg-[#0d0f13] overflow-hidden rd-hairline-glow",
         compact ? "my-1.5 first:mt-0 last:mb-0" : "my-2.5 first:mt-0 last:mb-0",
       )}
     >
@@ -425,7 +425,7 @@ export function MarkdownContent({
       table: ({ children }) => (
         <div
           className={cn(
-            "first:mt-0 last:mb-0 overflow-x-auto rd-scroll rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)]",
+            "max-w-full first:mt-0 last:mb-0 overflow-x-auto rd-scroll rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)]",
             compact ? "my-1.5" : "my-2.5",
           )}
         >

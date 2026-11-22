@@ -56,6 +56,18 @@ const VALID_VIEWS = new Set<WorkspaceView>([
   "settings",
 ]);
 
+const MOBILE_VIEW_LABELS: Record<WorkspaceView, string> = {
+  queue: "全部任务",
+  triage: "待整理",
+  mine: "我的任务",
+  agents: "Agent 执行",
+  review: "待验收",
+  workspace: "项目空间",
+  chat: "Codex 对话",
+  sources: "收集入口",
+  settings: "设置",
+};
+
 function readInitialView(): WorkspaceView {
   if (typeof window === "undefined") return "queue";
   const hash = window.location.hash.replace(/^#/, "") as WorkspaceView;
@@ -570,7 +582,7 @@ function ConsoleWorkspace() {
 
   if (booting) {
     return (
-      <div className="h-screen flex items-center justify-center bg-[var(--surface-canvas)] text-[var(--text-muted)]">
+      <div className="h-dvh flex items-center justify-center bg-[var(--surface-canvas)] text-[var(--text-muted)]">
         <div className="flex items-center gap-2.5 text-sm">
           <Icon name="loader-2" size={16} className="animate-spin text-indigo-500" />
           正在载入 Relaydesk 工作台…
@@ -581,7 +593,7 @@ function ConsoleWorkspace() {
 
   if (bootError) {
     return (
-      <div className="h-screen flex items-center justify-center p-6 bg-[var(--surface-canvas)]">
+      <div className="h-dvh flex items-center justify-center p-6 bg-[var(--surface-canvas)]">
         <div className="max-w-md w-full rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-6 text-center space-y-4">
           <div className="w-11 h-11 rounded-xl bg-rose-500/12 text-rose-500 flex items-center justify-center mx-auto">
             <Icon name="wifi-off" size={20} />
@@ -601,7 +613,7 @@ function ConsoleWorkspace() {
   }
 
   return (
-    <div className="h-screen flex overflow-hidden bg-[var(--surface-canvas)] text-[var(--text-primary)]">
+    <div className="h-dvh flex overflow-hidden bg-[var(--surface-canvas)] text-[var(--text-primary)]">
       <Sidebar
         projects={projects}
         currentProject={currentProject}
@@ -676,30 +688,57 @@ function ConsoleWorkspace() {
         )}
 
         {/* Mobile Top Bar */}
-        <div className="lg:hidden shrink-0 flex items-center justify-between px-4 h-12 border-b border-[var(--border-subtle)] bg-[var(--surface-sidebar)]">
-          <button
-            type="button"
-            onClick={() => setMobileNavOpen(true)}
-            className="inline-flex items-center gap-2 text-sm font-medium text-[var(--text-primary)] cursor-pointer"
-          >
-            <Icon name="menu" size={18} />
-            <span>{currentProject?.name ?? "Relaydesk"}</span>
-          </button>
-          <div className="flex items-center gap-1">
+        <div className="lg:hidden shrink-0 rd-safe-pt border-b border-[var(--border-subtle)] bg-[var(--surface-sidebar)]">
+          <div className="flex items-center justify-between gap-2 px-2 h-13">
             <button
               type="button"
-              onClick={() => setCommandOpen(true)}
-              className="p-2 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+              onClick={() => setMobileNavOpen(true)}
+              aria-label="打开导航菜单"
+              className="inline-flex items-center gap-2 min-w-0 flex-1 h-10 px-2 rounded-lg text-left text-[var(--text-primary)] active:bg-[var(--surface-hover)] transition cursor-pointer"
             >
-              <Icon name="search" size={16} />
+              <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-card)] border border-[var(--border-subtle)] shrink-0">
+                <Icon name="menu" size={17} />
+              </span>
+              <span className="min-w-0 flex flex-col">
+                <span className="text-[13.5px] font-semibold leading-tight truncate">
+                  {currentProject?.name ?? "Relaydesk"}
+                </span>
+                <span className="text-[11px] text-[var(--text-muted)] leading-tight truncate">
+                  {MOBILE_VIEW_LABELS[view]}
+                </span>
+              </span>
             </button>
-            <button
-              type="button"
-              onClick={toggleTheme}
-              className="p-2 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-            >
-              <Icon name={dark ? "sun" : "moon"} size={16} />
-            </button>
+            <div className="flex items-center gap-0.5 shrink-0">
+              <button
+                type="button"
+                onClick={() =>
+                  currentProject ? setFeedbackModalOpen(true) : setProjectModalOpen(true)
+                }
+                aria-label={currentProject ? "新建反馈" : "新建项目"}
+                title={currentProject ? "新建反馈" : "新建项目"}
+                className="inline-flex items-center justify-center w-10 h-10 rounded-lg text-indigo-600 dark:text-indigo-400 hover:bg-[var(--surface-hover)] active:bg-[var(--surface-hover)] transition cursor-pointer"
+              >
+                <Icon name="plus" size={19} />
+              </button>
+              <button
+                type="button"
+                onClick={() => setCommandOpen(true)}
+                aria-label="搜索与快速命令"
+                title="搜索与快速命令"
+                className="inline-flex items-center justify-center w-10 h-10 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] active:bg-[var(--surface-hover)] transition cursor-pointer"
+              >
+                <Icon name="search" size={17} />
+              </button>
+              <button
+                type="button"
+                onClick={toggleTheme}
+                aria-label={dark ? "切换浅色主题" : "切换深色主题"}
+                title={dark ? "切换浅色主题" : "切换深色主题"}
+                className="inline-flex items-center justify-center w-10 h-10 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] active:bg-[var(--surface-hover)] transition cursor-pointer"
+              >
+                <Icon name={dark ? "sun" : "moon"} size={17} />
+              </button>
+            </div>
           </div>
         </div>
 

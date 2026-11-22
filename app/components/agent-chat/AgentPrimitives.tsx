@@ -407,7 +407,7 @@ export function ToolChipsGroup({
                     {meta.target && (
                       <span
                         className={cn(
-                          "px-1.5 py-0.5 rounded-[6px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[var(--text-primary)] truncate max-w-[440px]",
+                          "px-1.5 py-0.5 rounded-[6px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[var(--text-primary)] truncate min-w-0 max-w-full sm:max-w-[440px]",
                           meta.mono ? "font-mono text-[11px]" : "text-[11.5px]",
                         )}
                         title={meta.target}
@@ -956,7 +956,7 @@ function ModelControls({
       >
         <LivePulseDot tone={ready ? "emerald" : "zinc"} active={!!ready} />
         <span className="shrink-0">{runtime === "codex" ? "Codex" : "Claude"}</span>
-        <span className="max-w-[120px] sm:max-w-[200px] truncate font-mono text-[11px] text-[var(--text-muted)]">
+        <span className="max-w-[88px] sm:max-w-[200px] truncate font-mono text-[11px] text-[var(--text-muted)]">
           {current?.label || model || "默认模型"}
         </span>
         <Icon name="chevron-down" size={11} className="shrink-0" />
@@ -965,7 +965,7 @@ function ModelControls({
         <div
           role="dialog"
           aria-label="选择运行工具与模型"
-          className="absolute left-0 bottom-full mb-2 z-30 w-full max-w-[360px] rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up"
+          className="absolute left-0 right-0 sm:right-auto sm:w-[360px] bottom-full mb-2 z-30 max-h-[55dvh] sm:max-h-none flex flex-col rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up"
         >
           <div className="flex gap-1 p-1.5 border-b border-[var(--border-subtle)]">
             {(["claude", "codex"] as const).map((rt) => (
@@ -1050,13 +1050,13 @@ function ModelControls({
                 }
               }}
             />
-            <kbd className="font-mono text-[10px]">↑↓ ↵</kbd>
+            <kbd className="hidden sm:inline font-mono text-[10px]">↑↓ ↵</kbd>
           </label>
           <div
             role="listbox"
             id={listId}
             aria-label="可选模型"
-            className="max-h-[min(38vh,16rem)] overflow-y-auto rd-scroll px-1.5 pb-1.5"
+            className="max-h-[min(30dvh,16rem)] sm:max-h-[min(38vh,16rem)] overflow-y-auto rd-scroll px-1.5 pb-1.5"
           >
             {activeLocalAgent && strictTargetCatalog.length === 0 && !search && (
               <p className="px-2.5 py-1.5 text-[11px] text-[var(--text-muted)]">
@@ -1461,9 +1461,9 @@ export function PromptBar({
               placeholder="筛选文件、数据库或工单…"
               className="flex-1 bg-transparent text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
             />
-            <span className="text-[10.5px] font-mono text-[var(--text-muted)]">↑↓ ↵</span>
+            <span className="hidden sm:inline text-[10.5px] font-mono text-[var(--text-muted)]">↑↓ ↵</span>
           </div>
-          <div className="flex border-b border-[var(--border-subtle)] text-[11.5px] px-1.5 pt-1 gap-0.5">
+          <div className="flex border-b border-[var(--border-subtle)] text-[11.5px] px-1.5 pt-1 gap-0.5 overflow-x-auto no-scrollbar whitespace-nowrap">
             {(
               [
                 { id: "all", label: `全部 (${allMentions.length})` },
@@ -1480,7 +1480,7 @@ export function PromptBar({
                   setActiveIndex(0);
                 }}
                 className={cn(
-                  "px-2 py-1.5 rounded-t-md font-medium transition cursor-pointer",
+                  "px-2 py-1.5 rounded-t-md font-medium transition cursor-pointer shrink-0",
                   mentionTab === t.id
                     ? "text-[var(--text-primary)] border-b-2 border-indigo-500"
                     : "text-[var(--text-muted)] hover:text-[var(--text-primary)]",
@@ -1490,7 +1490,7 @@ export function PromptBar({
               </button>
             ))}
           </div>
-          <div className="max-h-56 overflow-y-auto rd-scroll p-1.5 space-y-0.5">
+          <div className="max-h-[45dvh] sm:max-h-56 overflow-y-auto rd-scroll p-1.5 space-y-0.5">
             {filteredMentions.length === 0 ? (
               <div className="py-6 text-center text-[12px] text-[var(--text-muted)]">
                 未找到匹配的上下文资源
@@ -1551,9 +1551,9 @@ export function PromptBar({
         <div className="absolute left-0 right-0 sm:right-auto sm:w-[360px] bottom-full mb-2 z-30 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up">
           <div className="px-3 py-1.5 border-b border-[var(--border-subtle)] flex items-center justify-between text-[11px] text-[var(--text-muted)] bg-[var(--surface-subtle)]/50">
             <span>快捷指令</span>
-            <span className="font-mono">↑↓ ↵</span>
+            <span className="hidden sm:inline font-mono">↑↓ ↵</span>
           </div>
-          <div className="max-h-60 overflow-y-auto rd-scroll p-1.5 space-y-0.5">
+          <div className="max-h-[45dvh] sm:max-h-60 overflow-y-auto rd-scroll p-1.5 space-y-0.5">
             {filteredSlash.length === 0 ? (
               <div className="py-5 text-center text-[12px] text-[var(--text-muted)]">
                 无匹配指令
@@ -1765,8 +1765,8 @@ export function PromptBar({
         />
 
         {/* Inner Bottom Action Pill Bar */}
-        <div className="px-2.5 pb-2 pt-0.5 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1 min-w-0 flex-1">
+        <div className="px-2 sm:px-2.5 pb-2 pt-0.5 flex items-center justify-between gap-1.5 sm:gap-2">
+          <div className="flex items-center gap-0.5 sm:gap-1 min-w-0 flex-1">
             {onUploadImages && (
               <>
                 <input
@@ -1788,7 +1788,7 @@ export function PromptBar({
                   title="上传图片（也支持粘贴或拖入）"
                   aria-label="上传图片"
                   className={cn(
-                    "inline-flex items-center gap-1 h-7 px-2 rounded-lg text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
+                    "inline-flex items-center justify-center gap-1 h-8 w-8 sm:w-auto sm:h-7 sm:px-2 rounded-lg text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
                     hasImageAttachment
                       ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                       : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
@@ -1796,7 +1796,7 @@ export function PromptBar({
                 >
                   <Icon
                     name={uploadingImages ? "loader-2" : "image"}
-                    size={13}
+                    size={14}
                     className={uploadingImages ? "animate-spin" : ""}
                   />
                   <span className="hidden sm:inline">{uploadingImages ? "上传中" : "图片"}</span>
@@ -1812,13 +1812,13 @@ export function PromptBar({
               }}
               title="引用项目空间文件、数据库或工单 (@)"
               className={cn(
-                "inline-flex items-center gap-1 h-7 px-2 rounded-lg text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
+                "inline-flex items-center justify-center gap-1 h-8 px-2 sm:h-7 rounded-lg text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
                 popover === "mention" || attachments.length > 0
                   ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
               )}
             >
-              <Icon name="at-sign" size={13} />
+              <Icon name="at-sign" size={14} />
               <span className="hidden sm:inline">引用</span>
               {attachments.length > 0 && (
                 <span className="font-mono text-[10.5px] px-1 rounded bg-indigo-500/15">
@@ -1837,7 +1837,7 @@ export function PromptBar({
               }}
               title="快捷指令 (/)"
               className={cn(
-                "inline-flex items-center justify-center h-7 w-7 rounded-lg text-[12px] font-mono font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
+                "inline-flex items-center justify-center h-8 w-8 sm:h-7 sm:w-7 rounded-lg text-[12px] font-mono font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
                 popover === "slash"
                   ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",

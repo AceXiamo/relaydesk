@@ -732,13 +732,13 @@ export function SettingsView({
       : "";
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="max-w-3xl mx-auto px-5 lg:px-8 py-6 space-y-6">
+    <div className="flex-1 overflow-y-auto rd-scroll">
+      <div className="max-w-3xl mx-auto px-3.5 sm:px-5 lg:px-8 py-4 sm:py-6 pb-[max(2rem,env(safe-area-inset-bottom))] space-y-5 sm:space-y-6">
         {/* Header */}
         <header className="pb-4 border-b border-[var(--border-subtle)] space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h1 className="text-[19px] font-semibold tracking-tight text-[var(--text-primary)]">
+              <h1 className="text-[18px] sm:text-[19px] font-semibold tracking-tight text-[var(--text-primary)]">
                 {mode === "settings" ? "设置" : "收集入口"}
               </h1>
               <p className="text-[13px] text-[var(--text-muted)] mt-1">
@@ -757,7 +757,7 @@ export function SettingsView({
             <div
               role="tablist"
               aria-label="设置作用域"
-              className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-1"
+              className="grid grid-cols-2 w-full sm:w-auto sm:inline-flex items-center gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-1"
             >
               <button
                 type="button"
@@ -766,7 +766,7 @@ export function SettingsView({
                 aria-selected={currentTab === "project"}
                 aria-controls="settings-panel-project"
                 onClick={() => setTab("project")}
-                className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-[12.5px] font-medium transition cursor-pointer ${
+                className={`inline-flex items-center justify-center gap-1.5 sm:gap-2 rounded-lg px-2.5 sm:px-3.5 py-2 text-[12.5px] font-medium transition cursor-pointer ${
                   currentTab === "project"
                     ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-2xs ring-1 ring-[var(--border-subtle)]"
                     : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
@@ -784,7 +784,7 @@ export function SettingsView({
                 <span>项目设置</span>
                 {project && (
                   <span
-                    className={`max-w-[160px] truncate rounded-md px-1.5 py-0.5 text-[11px] font-normal ${
+                    className={`hidden sm:inline-block max-w-[160px] truncate rounded-md px-1.5 py-0.5 text-[11px] font-normal ${
                       currentTab === "project"
                         ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300"
                         : "bg-[var(--surface-card)]/70 text-[var(--text-muted)]"
@@ -802,7 +802,7 @@ export function SettingsView({
                 aria-selected={currentTab === "global"}
                 aria-controls="settings-panel-global"
                 onClick={() => setTab("global")}
-                className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-[12.5px] font-medium transition cursor-pointer ${
+                className={`inline-flex items-center justify-center gap-1.5 sm:gap-2 rounded-lg px-2.5 sm:px-3.5 py-2 text-[12.5px] font-medium transition cursor-pointer ${
                   currentTab === "global"
                     ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-2xs ring-1 ring-[var(--border-subtle)]"
                     : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
@@ -819,7 +819,7 @@ export function SettingsView({
                 />
                 <span>全局设置</span>
                 <span
-                  className={`rounded-md px-1.5 py-0.5 text-[11px] font-normal ${
+                  className={`hidden sm:inline-block rounded-md px-1.5 py-0.5 text-[11px] font-normal ${
                     currentTab === "global"
                       ? "bg-teal-500/12 text-teal-700 dark:text-teal-300"
                       : "bg-[var(--surface-card)]/70 text-[var(--text-muted)]"
@@ -1794,14 +1794,14 @@ export function SettingsView({
                         size="xs"
                       />
                     </div>
-                    <p className="text-[12px] leading-relaxed text-[var(--text-muted)] pl-7">
+                    <p className="text-[12px] leading-relaxed text-[var(--text-muted)] sm:pl-7">
                       本仓库内置 Skill 位于{" "}
                       <code className="font-mono text-[var(--text-secondary)]">
                         skills/relaydesk/
                       </code>
                       。将下方路径替换为本机 Relaydesk 目录后执行一次，即可同时接入 Claude Code 与 Codex。
                     </p>
-                    <pre className="ml-7 p-3.5 rounded-xl bg-zinc-950 text-zinc-100 text-[12px] font-mono leading-relaxed overflow-x-auto border border-zinc-800">
+                    <pre className="sm:ml-7 max-w-full p-3.5 rounded-xl bg-zinc-950 text-zinc-100 text-[12px] font-mono leading-relaxed overflow-x-auto rd-scroll border border-zinc-800">
                       {SKILL_INSTALL_COMMAND}
                     </pre>
                   </div>

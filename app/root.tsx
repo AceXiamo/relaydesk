@@ -49,7 +49,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
     <html lang="zh-CN" suppressHydrationWarning>
       <head>
         <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1, viewport-fit=cover"
+        />
         <meta name="theme-color" content="#0b0c0e" />
         <Meta />
         <Links />
@@ -80,7 +83,7 @@ export function ErrorBoundary({ error }: { error: unknown }) {
   }
 
   return (
-    <main className="min-h-screen flex items-center justify-center p-6 bg-zinc-50 dark:bg-[#0b0c0e] text-zinc-900 dark:text-zinc-100">
+    <main className="min-h-dvh flex items-center justify-center p-6 bg-zinc-50 dark:bg-[#0b0c0e] text-zinc-900 dark:text-zinc-100">
       <div className="max-w-md w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#111215] p-6 shadow-sm">
         <p className="text-xs font-mono uppercase tracking-wider text-zinc-500 mb-2">
           Relaydesk
