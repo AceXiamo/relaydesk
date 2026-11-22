@@ -620,6 +620,31 @@ export class ApiRouter {
           );
           return;
         }
+        if (parts.length === 5 && parts[4] === "reverify" && method === "POST") {
+          const hasBody =
+            Number(req.headers["content-length"]) > 0 ||
+            req.headers["transfer-encoding"] !== undefined;
+          const body = hasBody ? await this.readJson(req, 32 * 1024) : {};
+          const selection = chatModelSelection(body);
+          const prompt =
+            typeof body.prompt === "string" ? body.prompt.trim().slice(0, 8000) : undefined;
+          const result = this.releaseDispatcher.reverifyRelease(projectId, parts[3], {
+            prompt,
+            ...selection,
+          });
+          this.sendJson(
+            req,
+            res,
+            200,
+            {
+              release: result.release,
+              session: result.session,
+              run_id: result.runId,
+            },
+            meta,
+          );
+          return;
+        }
         if (parts.length === 4 && method === "GET") {
           const release = this.store.getRelease(projectId, parts[3]);
           let session = release.session_id

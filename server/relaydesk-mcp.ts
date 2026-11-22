@@ -15,6 +15,7 @@ export type RelaydeskTaskAction =
   | "transition_task"
   | "create_task"
   | "list_releases"
+  | "checkpoint_release"
   | "finish_release";
 
 export interface RelaydeskMcpTaskClient {
@@ -881,7 +882,7 @@ function buildToolDefinitions(hasTasks: boolean) {
             properties: {
               status: {
                 type: "string",
-                enum: ["running", "succeeded", "failed", "blocked"],
+                enum: ["running", "verifying", "succeeded", "failed", "blocked"],
                 description: "Optional release status filter",
               },
               limit: {
@@ -894,9 +895,58 @@ function buildToolDefinitions(hasTasks: boolean) {
           },
         },
         {
+          name: "checkpoint_release",
+          description:
+            "Persist the target SHA and verification metadata (Pier server/project, health URL, deploy log, checks) on a release (REL-xxx) BEFORE executing a cutover/restart so post-restart verification has full context.",
+          annotations: taskWriteAnnotations,
+          inputSchema: {
+            type: "object",
+            required: ["release_id"],
+            properties: {
+              release_id: {
+                type: ["string", "integer"],
+                description: "Release ID, number (e.g. 3), or code (e.g. REL-3)",
+              },
+              target_sha: {
+                type: "string",
+                description: "Target git commit SHA being deployed",
+              },
+              deploy_ref: {
+                type: "string",
+                description: "Optional deploy reference (e.g. main@<sha> or image tag)",
+              },
+              pier_server: {
+                type: "string",
+                description: "Target Pier server name (e.g. tw-1)",
+              },
+              pier_project: {
+                type: "string",
+                description: "Target Pier project name (e.g. relaydesk)",
+              },
+              health_url: {
+                type: "string",
+                description: "Public or internal health check URL to verify after cutover",
+              },
+              deploy_log: {
+                type: "string",
+                description: "Remote deploy log path for post-cutover verification",
+              },
+              checks: {
+                type: "array",
+                items: { type: "string" },
+                description: "List of verification checks to confirm after cutover",
+              },
+              notes: {
+                type: "string",
+                description: "Additional verification notes or rollback baseline (e.g. previous SHA)",
+              },
+            },
+          },
+        },
+        {
           name: "finish_release",
           description:
-            "Complete the active Release session (REL-xxx), recording its final status (succeeded, failed, or blocked), summary, and optional deploy_ref / deployed_task_ids.",
+            "Record the outcome of a Release session (REL-xxx) or re-verification run: succeeded (syncs release and linked tasks, correcting prior false failures while preserving original failure reasons), failed, blocked, or verifying (keep awaiting verification when evidence is still insufficient).",
           annotations: taskWriteAnnotations,
           inputSchema: {
             type: "object",
@@ -908,16 +958,20 @@ function buildToolDefinitions(hasTasks: boolean) {
               },
               status: {
                 type: "string",
-                enum: ["succeeded", "failed", "blocked"],
-                description: "Final release outcome",
+                enum: ["succeeded", "failed", "blocked", "verifying"],
+                description: "Release outcome (use verifying when evidence is insufficient)",
               },
               summary: {
                 type: "string",
-                description: "Concise Markdown summary of deployment steps, verification results, or failure/block reasons",
+                description: "Concise Markdown summary of deployment steps, verification evidence, or failure/block reasons",
               },
               deploy_ref: {
                 type: "string",
                 description: "Optional deployed commit SHA, image tag, or release identifier",
+              },
+              target_sha: {
+                type: "string",
+                description: "Optional verified target commit SHA",
               },
               deployed_task_ids: {
                 type: "array",
@@ -1357,6 +1411,7 @@ export async function startRelaydeskMcpServer(options: RelaydeskMcpOptions): Pro
       name === "transition_task" ||
       name === "create_task" ||
       name === "list_releases" ||
+      name === "checkpoint_release" ||
       name === "finish_release"
     ) {
       if (!options.taskClient) {

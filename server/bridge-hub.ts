@@ -99,6 +99,7 @@ const taskRpcSchema = z.object({
     "transition_task",
     "create_task",
     "list_releases",
+    "checkpoint_release",
     "finish_release",
   ]),
   params: z.record(z.string(), z.unknown()).default({}),
@@ -108,6 +109,7 @@ const MUTATING_TASK_ACTIONS = new Set([
   "update_task",
   "transition_task",
   "create_task",
+  "checkpoint_release",
   "finish_release",
 ]);
 function redact<T>(object: T, secrets: string[]): T {

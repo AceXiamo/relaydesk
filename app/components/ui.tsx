@@ -609,6 +609,10 @@ export function ReleaseStatusBadge({
       icon: "loader-2",
       spin: true,
     },
+    verifying: {
+      pill: "bg-sky-500/10 text-sky-700 dark:text-sky-300 border-sky-500/25",
+      icon: "shield-check",
+    },
     succeeded: {
       pill: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25",
       icon: "check-circle-2",

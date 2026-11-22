@@ -490,6 +490,22 @@ export const api = {
       "POST",
       payload ?? {},
     ),
+  reverifyProjectRelease: (
+    projectId: string,
+    releaseId: string,
+    payload?: {
+      prompt?: string;
+      runtime?: ChatRuntime;
+      model?: string;
+      reasoning_effort?: ChatReasoningEffort;
+      execution_target?: string;
+    },
+  ) =>
+    request<{ release: ReleaseRecord; session: ChatSessionRecord; run_id: string }>(
+      `/api/projects/${encodeURIComponent(projectId)}/releases/${encodeURIComponent(releaseId)}/reverify`,
+      "POST",
+      payload ?? {},
+    ),
   listWorkspaceDatabases: (projectId: string, refreshClients = false) =>
     request<{ databases: WorkspaceDatabaseEntry[]; clients: WorkspaceDbClientInfo[] }>(
       `/api/projects/${encodeURIComponent(projectId)}/workspace/databases${refreshClients ? "?refresh_clients=1" : ""}`,

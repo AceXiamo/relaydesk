@@ -35,6 +35,7 @@ export const TASK_DEPLOY_STATUS_LABELS: Record<TaskDeployStatus, string> = {
 
 export const RELEASE_STATUS_LABELS: Record<ReleaseStatus, string> = {
   running: "发布中",
+  verifying: "待验收",
   succeeded: "发布成功",
   failed: "发布失败",
   blocked: "已阻塞",

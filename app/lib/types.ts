@@ -37,7 +37,25 @@ export type TaskDeployStatus =
 
 export type ReleaseTrigger = "immediate" | "scheduled" | "manual" | "urgent";
 
-export type ReleaseStatus = "running" | "succeeded" | "failed" | "blocked";
+export type ReleaseStatus = "running" | "verifying" | "succeeded" | "failed" | "blocked";
+
+export interface ReleaseVerificationContext {
+  target_sha?: string;
+  pier_server?: string;
+  pier_project?: string;
+  health_url?: string;
+  deploy_doc_path?: string;
+  deploy_log?: string;
+  checks?: string[];
+  notes?: string;
+  checkpoint_at?: string;
+  previous_failure_summary?: string;
+  previous_failed_at?: string;
+  correction_basis?: string;
+  corrected_at?: string;
+  reverify_count?: number;
+  last_reverify_at?: string;
+}
 
 export interface ReleaseTaskSnapshot {
   id: string;
@@ -57,8 +75,10 @@ export interface ReleaseRecord {
   session_id: string | null;
   task_ids: string[];
   task_snapshot: ReleaseTaskSnapshot[];
+  target_sha: string;
   deploy_ref: string;
   summary: string;
+  verification_context: ReleaseVerificationContext;
   created_at: string;
   updated_at: string;
   finished_at: string | null;

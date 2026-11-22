@@ -529,6 +529,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
                 | "transition_task"
                 | "create_task"
                 | "list_releases"
+                | "checkpoint_release"
                 | "finish_release",
               params: Record<string, unknown>,
             ) {

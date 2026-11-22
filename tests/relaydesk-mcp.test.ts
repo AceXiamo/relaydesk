@@ -392,6 +392,65 @@ if (isClaude) {
     });
     expect(codexFacts.dbText).toContain("4200");
   });
+
+  it("exposes and executes list_releases, checkpoint_release, and finish_release tools via MCP HTTP server", async () => {
+    const calls: Array<{ action: string; params: Record<string, unknown> }> = [];
+    const mcp = await startRelaydeskMcpServer({
+      projectId: "proj-rel",
+      spaceDir: f.root,
+      databases: [],
+      allowDatasourceSecrets: false,
+      taskClient: {
+        async call(action, params) {
+          calls.push({ action, params });
+          return { ok: true, action, params };
+        },
+      },
+    });
+    try {
+      const rpc = async (id: number, method: string, params?: unknown) => {
+        const res = await fetch(mcp.url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${mcp.token}`,
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        });
+        expect(res.status).toBe(200);
+        return (await res.json()) as any;
+      };
+
+      const listed = await rpc(1, "tools/list");
+      const names = (listed.result.tools as Array<{ name: string }>).map((t) => t.name);
+      expect(names).toContain("list_releases");
+      expect(names).toContain("checkpoint_release");
+      expect(names).toContain("finish_release");
+
+      const cpRes = await rpc(2, "tools/call", {
+        name: "checkpoint_release",
+        arguments: {
+          release_id: "REL-2",
+          target_sha: "fd99c350dfbc9f6485d4c97f649b9f350fd28e67",
+          pier_server: "tw-1",
+        },
+      });
+      expect(cpRes.result.isError).toBe(false);
+
+      const finishRes = await rpc(3, "tools/call", {
+        name: "finish_release",
+        arguments: {
+          release_id: "REL-2",
+          status: "succeeded",
+          summary: "Verified running SHA and HTTP 200",
+        },
+      });
+      expect(finishRes.result.isError).toBe(false);
+      expect(calls.map((c) => c.action)).toEqual(["checkpoint_release", "finish_release"]);
+    } finally {
+      await mcp.close();
+    }
+  });
 });
 
 describe("ProjectChatStreams task_updated callback", () => {

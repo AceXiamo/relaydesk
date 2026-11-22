@@ -105,7 +105,7 @@ export function buildReleaseSystemContext(
   return [
     `## Autonomous Production Release Workflow (${relCode})`,
     `You are executing Relaydesk production release **${relCode}** for project "${project.name}" (trigger: \`${release.trigger}\`).`,
-    `Do NOT load or run any external \`relaydesk\` CLI skill or \`relaydesk.mjs\`; use the connected \`relaydesk\` MCP server directly (\`list_tasks\`, \`get_task\`, \`list_releases\`, \`finish_release\`, plus read-only DB tools).`,
+    `Do NOT load or run any external \`relaydesk\` CLI skill or \`relaydesk.mjs\`; use the connected \`relaydesk\` MCP server directly (\`list_tasks\`, \`get_task\`, \`list_releases\`, \`checkpoint_release\`, \`finish_release\`, plus read-only DB tools).`,
     "",
     "### Deployment Documentation Lookup Order",
     ...docOrder,
@@ -113,15 +113,118 @@ export function buildReleaseSystemContext(
     "### Strict Rules & Safety",
     `1. **Read the deployment runbook first.** Follow the documented build, deploy, and verification steps faithfully.`,
     `2. **Block when docs are missing or high-risk:** If NO clear deployment procedure is documented in the sources above, OR if this release involves unconfirmed destructive database migrations, production secret rotations, or irreversible infrastructure changes, do **NOT** guess or improvise—call \`finish_release(release_id: "${relCode}", status: "blocked", summary: "<exact missing info or risk>")\` and stop.`,
-    `3. **Verify code & health:** Confirm the local/remote branch matches the commits for the included tasks, execute the deployment steps, and verify production health/smoke checks before declaring success.`,
-    `4. **Self-restart resilience:** If deploying this project restarts the Relaydesk server itself, wait until the restarted service passes its health check before calling \`finish_release\`. If an MCP call momentarily fails while the server is restarting, pause briefly and retry once the service is healthy.`,
-    `5. **Never expose credentials:** Never print raw passwords, API keys, SSH private keys, or database connection strings in output or release summaries.`,
-    `6. **Mandatory completion call:** Always end this session by calling MCP \`finish_release\` with:`,
+    `3. **Persist pre-cutover checkpoint:** Before executing any deployment cutover or container rebuild (especially if deploying this project may restart Relaydesk itself or drop the bridge connection), call MCP \`checkpoint_release(release_id: "${relCode}", target_sha: "<full-40-char-sha>", deploy_ref: "<branch@sha>", pier_server: "<server>", pier_project: "<project>", health_url: "<url>", deploy_log: "<remote-log-path>", checks: [...], notes: "<rollback baseline / extra info>")\` so post-restart verification has full context.`,
+    `4. **Verify code & health:** Confirm the local/remote branch matches the commits for the included tasks, execute the deployment steps, and verify production health/smoke checks before declaring success.`,
+    `5. **Self-restart resilience:** If deploying this project restarts the Relaydesk server itself, persist \`checkpoint_release\` first, then trigger the detached cutover as the final step. Once reconnected, verification can resume on this same release without re-deploying.`,
+    `6. **Never expose credentials:** Never print raw passwords, API keys, SSH private keys, or database connection strings in output or release summaries.`,
+    `7. **Mandatory completion call:** Always end this session by calling MCP \`finish_release\` with:`,
     `   - \`release_id\`: \`"${relCode}"\``,
-    `   - \`status\`: \`"succeeded"\`, \`"failed"\`, or \`"blocked"\``,
+    `   - \`status\`: \`"succeeded"\`, \`"failed"\`, \`"blocked"\`, or \`"verifying"\` (use \`"verifying"\` if cutover is still in progress or verification evidence is insufficient)`,
     `   - \`deploy_ref\`: deployed commit SHA / image tag / release reference (if applicable)`,
+    `   - \`target_sha\`: verified target commit SHA (if applicable)`,
     `   - \`summary\`: concise Markdown summary of what was deployed, health-check results, or exact failure/block reasons.`,
   ].join("\n");
+}
+
+export function buildReleaseVerifySystemContext(
+  project: AgentProjectInfo,
+  release: ReleaseRecord,
+  options: { deployDocExists?: boolean } = {},
+): string {
+  const relCode = `REL-${release.number}`;
+  const policy = project.deploy_policy;
+  const docOrder: string[] = [];
+  if (policy.doc_path.trim()) {
+    docOrder.push(`1. Configured deploy doc path: \`${policy.doc_path.trim()}\` (check inside \`./\` or \`$RELAYDESK_SPACE_DIR/${policy.doc_path.trim()}\`).`);
+  }
+  docOrder.push(
+    `${docOrder.length + 1}. Project Space deploy runbook: \`$RELAYDESK_SPACE_DIR/DEPLOY.md\`${options.deployDocExists ? " (present)" : " (check if present)"}.`,
+  );
+  docOrder.push(
+    `${docOrder.length + 1}. Project Handbook deployment section: \`$RELAYDESK_SPACE_DIR/HANDBOOK.md\`.`,
+  );
+
+  return [
+    `## Production Release Re-Verification Workflow (${relCode} · VERIFY-ONLY)`,
+    `You are performing **read-only post-deploy verification** on existing Relaydesk release **${relCode}** (ID: \`${release.id}\`) for project "${project.name}".`,
+    `Do NOT load or run any external \`relaydesk\` CLI skill or \`relaydesk.mjs\`; use the connected \`relaydesk\` MCP server directly (\`list_tasks\`, \`get_task\`, \`list_releases\`, \`checkpoint_release\`, \`finish_release\`, plus read-only DB tools).`,
+    "",
+    "### Deployment Documentation Reference (for verification checks only)",
+    ...docOrder,
+    "",
+    "### Strict VERIFY-ONLY Rules",
+    `1. **NEVER re-deploy or mutate production:** Do NOT run \`pier deploy\`, \`docker compose up\`, rebuild images, restart containers, push git commits, or trigger any deployment action. Perform **read-only verification checks only**.`,
+    `2. **Three mandatory evidence pillars:** Judge the actual state of \`${relCode}\` strictly from real evidence:`,
+    `   - **Pier deployment record** matching this release / target SHA (e.g. via Pier MCP or remote Pier logs).`,
+    `   - **Actual running target SHA** on the target server/containers (e.g. \`.env\` / \`IMAGE_TAG\` / container image digest/tag) matching the expected target SHA.`,
+    `   - **Container & public health checks** (containers healthy/running and public health endpoint returning HTTP 200).`,
+    `3. **Exact outcome mapping via \`finish_release\`:**`,
+    `   - **All evidence present & healthy** → call \`finish_release(release_id: "${relCode}", status: "succeeded", target_sha: "<verified-sha>", deploy_ref: "<verified-ref>", summary: "<concise evidence: Pier record, running SHA, container & HTTP health>")\`. This syncs the release and linked tasks idempotently (and corrects any prior false failure while preserving the original failure reason).`,
+    `   - **Confirmed failure or rollback** (e.g. Pier recorded deploy failure, service rolled back to previous SHA, or containers unhealthy/crashing) → call \`finish_release(release_id: "${relCode}", status: "failed", summary: "<exact verified failure or rollback evidence>")\`.`,
+    `   - **Insufficient evidence** (e.g. remote deploy is still in progress, server unreachable, or running SHA/Pier record cannot yet be confirmed) → call \`finish_release(release_id: "${relCode}", status: "verifying", summary: "<what was checked and what evidence is still missing>")\`.`,
+    `4. **Never expose credentials:** Never print raw passwords, API keys, SSH private keys, or database connection strings.`,
+    `5. **Mandatory completion call:** Always end by calling MCP \`finish_release\` for \`${relCode}\`.`,
+  ].join("\n");
+}
+
+export function buildReleaseVerifyPrompt(
+  project: AgentProjectInfo,
+  release: ReleaseRecord,
+  extraPrompt?: string,
+): string {
+  const relCode = `REL-${release.number}`;
+  const ctx = release.verification_context;
+  const lines: string[] = [
+    `# 重新验收生产发布 ${relCode}（仅检查，严禁重新部署）`,
+    `- **发布 ID**：\`${release.id}\`（编号：\`${relCode}\`）`,
+    `- **项目**：${project.name}（\`${project.repo}\`）`,
+    `- **目标 SHA**：${release.target_sha ? `\`${release.target_sha}\`` : "（未显式记录，请结合关联任务的 delivery_ref 核对）"}`,
+  ];
+  if (release.deploy_ref) {
+    lines.push(`- **Deploy Ref**：\`${release.deploy_ref}\``);
+  }
+  if (ctx.pier_server || ctx.pier_project) {
+    lines.push(
+      `- **Pier 目标**：server=\`${ctx.pier_server || "未指定"}\` · project=\`${ctx.pier_project || "未指定"}\``,
+    );
+  }
+  if (ctx.health_url) {
+    lines.push(`- **健康检查地址**：\`${ctx.health_url}\``);
+  }
+  if (ctx.deploy_log) {
+    lines.push(`- **远端部署日志**：\`${ctx.deploy_log}\``);
+  }
+  if (ctx.checks && ctx.checks.length > 0) {
+    lines.push("", "## 持久化检查项");
+    for (const check of ctx.checks) {
+      lines.push(`- ${check}`);
+    }
+  }
+  if (ctx.notes) {
+    lines.push("", "## 切换前持久化备注", ctx.notes);
+  }
+  if (ctx.previous_failure_summary) {
+    lines.push(
+      "",
+      "## 原失败记录（如验收确认已成功上线，将修正该误报并自动保留原失败原因）",
+      ctx.previous_failure_summary,
+    );
+  }
+  if (release.task_snapshot.length > 0) {
+    lines.push("", `## 归属本发布单的任务（共 ${release.task_snapshot.length} 项）`);
+    for (const item of release.task_snapshot) {
+      const refPart = item.delivery_ref ? ` · \`${item.delivery_ref}\`` : "";
+      lines.push(`- **RD-${item.number}** [${item.priority}]${refPart}：${item.title}`);
+    }
+  }
+  if (extraPrompt?.trim()) {
+    lines.push("", "## 操作者附加验收说明", extraPrompt.trim());
+  }
+  lines.push(
+    "",
+    `请严格仅执行只读验收检查（核对对应 Pier 部署记录、实际运行的目标 SHA、容器状态与公网健康检查），不要触发任何部署或重启操作；核验完毕后调用 \`finish_release\` 更新 \`${relCode}\` 状态。`,
+  );
+  return lines.join("\n");
 }
 
 export function buildReleaseBriefPrompt(
@@ -174,6 +277,7 @@ export class ReleaseDispatcher {
   private readonly nowFn: () => Date;
   private readonly pendingProjects = new Set<string>();
   private readonly inflightProjects = new Set<string>();
+  private readonly autoVerifyAttempts = new Map<string, number>();
   private flushTimer: NodeJS.Timeout | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private unsubscribers: Array<() => void> = [];
@@ -248,7 +352,12 @@ export class ReleaseDispatcher {
   }
 
   scheduleAll(): void {
-    let projects: Array<{ id: string; automation_paused: boolean; deploy_policy: ProjectDeployPolicy }>;
+    let projects: Array<{
+      id: string;
+      automation_paused: boolean;
+      deploy_policy: ProjectDeployPolicy;
+      active_release_id?: string | null;
+    }>;
     try {
       projects = this.store.listProjects();
     } catch {
@@ -257,7 +366,9 @@ export class ReleaseDispatcher {
     for (const project of projects) {
       if (
         !project.automation_paused &&
-        (project.deploy_policy.mode === "immediate" || project.deploy_policy.mode === "scheduled")
+        (project.deploy_policy.mode === "immediate" ||
+          project.deploy_policy.mode === "scheduled" ||
+          Boolean(project.active_release_id))
       ) {
         this.pendingProjects.add(project.id);
       }
@@ -297,7 +408,11 @@ export class ReleaseDispatcher {
     if (policy.mode === "none" || policy.mode === "manual") {
       return { eligible: false, reason: `policy_${policy.mode}` };
     }
-    if (this.store.hasActiveAgentTask(projectId) || this.chatRuns.hasActiveRunForProject(projectId)) {
+    if (
+      this.store.hasActiveRelease(projectId) ||
+      this.store.hasActiveAgentTask(projectId) ||
+      this.chatRuns.hasActiveRunForProject(projectId)
+    ) {
       return { eligible: false, reason: "project_busy" };
     }
     // Wait until the ready queue is idle so consecutive tasks are batched into one release.
@@ -378,6 +493,56 @@ export class ReleaseDispatcher {
     }
     this.inflightProjects.add(projectId);
     try {
+      // Priority 1: if a previous release was interrupted (e.g. self-restart / disconnect)
+      // and is awaiting verification, resume read-only verification on the SAME release
+      // once a local agent reconnects, without triggering a new deployment.
+      const verifyingRelease = this.store.getVerifyingRelease(projectId);
+      if (verifyingRelease) {
+        const projectRow = this.store.getProjectRow(projectId);
+        if (projectRow.automation_paused) {
+          return { dispatched: false, reason: "automation_paused" };
+        }
+        if (
+          this.store.hasActiveAgentTask(projectId) ||
+          this.chatRuns.hasActiveRunForProject(projectId)
+        ) {
+          return { dispatched: false, reason: "project_busy" };
+        }
+        const nowMs = this.nowFn().getTime();
+        const lastAttempt = this.autoVerifyAttempts.get(verifyingRelease.id) ?? 0;
+        if (lastAttempt > 0 && nowMs - lastAttempt < this.cooldownMs) {
+          return { dispatched: false, reason: "reverify_cooldown" };
+        }
+        const projectInfo = toAgentProject(projectRow);
+        const selection = this.releaseSelection(projectInfo);
+        const resolution = resolveLocalTaskExecutionTarget({
+          store: this.store,
+          bridgeHub: this.bridgeHub,
+          projectId,
+          runtime: selection.runtime,
+        });
+        if (!resolution.target) {
+          return { dispatched: false, reason: resolution.reasons.join("；") || "no_local_agent" };
+        }
+        this.autoVerifyAttempts.set(verifyingRelease.id, nowMs);
+        const started = this.launchReverifySession({
+          projectInfo,
+          releaseRef: verifyingRelease.id,
+          ...selection,
+          resolvedTarget: {
+            targetKey: resolution.target.targetKey,
+            localAgentId: resolution.target.agent.id,
+            localBinding: resolution.target.binding,
+            agentName: resolution.target.agent.name,
+          },
+        });
+        return {
+          dispatched: true,
+          releaseId: started.release.id,
+          sessionId: started.session.id,
+        };
+      }
+
       const check = this.evaluateProject(projectId);
       if (!check.eligible || !check.trigger || !check.tasks) {
         return { dispatched: false, reason: check.reason };
@@ -467,6 +632,98 @@ export class ReleaseDispatcher {
       resolvedTarget,
       extraPrompt: options.prompt,
     });
+  }
+
+  reverifyRelease(
+    projectId: string,
+    releaseRef: string | number,
+    options: Omit<ManualReleaseOptions, "force"> = {},
+  ): { release: ReleaseRecord; session: ChatSessionRecord; runId: string } {
+    const projectInfo = toAgentProject(this.store.getProjectRow(projectId));
+    if (this.store.hasActiveAgentTask(projectId) || this.chatRuns.hasActiveRunForProject(projectId)) {
+      throw new ApiError(409, "当前项目已有正在执行的任务或发布会话，请等待完成后再发起重新验收");
+    }
+
+    const existing = this.store.getRelease(projectId, releaseRef);
+    if (existing.status === "succeeded") {
+      throw new ApiError(409, `发布单 REL-${existing.number} 已验收成功，无需重新验收`);
+    }
+    if (existing.status === "running") {
+      throw new ApiError(409, `发布单 REL-${existing.number} 正在执行中`);
+    }
+
+    const selection = this.releaseSelection(projectInfo, options);
+    const resolution = resolveLocalTaskExecutionTarget({
+      store: this.store,
+      bridgeHub: this.bridgeHub,
+      projectId,
+      runtime: selection.runtime,
+      executionTarget: options.execution_target,
+    });
+    if (!resolution.target) {
+      throw new ApiError(
+        409,
+        `没有可用的在线本机 Agent 节点执行验收：${resolution.reasons.join("；") || "无可用节点"}`,
+      );
+    }
+
+    const resolvedTarget: ResolvedChatExecutionTarget = {
+      targetKey: resolution.target.targetKey,
+      localAgentId: resolution.target.agent.id,
+      localBinding: resolution.target.binding,
+      agentName: resolution.target.agent.name,
+    };
+
+    // Reset auto-verify cooldown so manual reverify records fresh timestamp.
+    this.autoVerifyAttempts.set(existing.id, this.nowFn().getTime());
+
+    return this.launchReverifySession({
+      projectInfo,
+      releaseRef: existing.id,
+      ...selection,
+      resolvedTarget,
+      extraPrompt: options.prompt,
+    });
+  }
+
+  private launchReverifySession(params: {
+    projectInfo: AgentProjectInfo;
+    releaseRef: string | number;
+    runtime: ChatRuntime;
+    model: string;
+    reasoningEffort: ChatReasoningEffort;
+    networkAccess: boolean;
+    resolvedTarget: ResolvedChatExecutionTarget;
+    extraPrompt?: string;
+  }): { release: ReleaseRecord; session: ChatSessionRecord; runId: string } {
+    const { release, session } = this.store.prepareReleaseReverify(
+      params.projectInfo.id,
+      params.releaseRef,
+      {
+        runtime: params.runtime,
+        model: params.model,
+        reasoning_effort: params.reasoningEffort,
+        execution_target: params.resolvedTarget.targetKey,
+        network_access: params.networkAccess,
+      },
+    );
+
+    const deployDoc = readWorkspaceDeployDoc(this.store.dbPath, params.projectInfo.id);
+    const systemContext = buildReleaseVerifySystemContext(params.projectInfo, release, {
+      deployDocExists: deployDoc.exists,
+    });
+    const prompt = buildReleaseVerifyPrompt(params.projectInfo, release, params.extraPrompt);
+
+    const started = this.chatRuns.startTurn({
+      projectInfo: params.projectInfo,
+      sessionId: session.id,
+      content: prompt,
+      extraSystemContext: systemContext,
+      skipAutoTitle: true,
+      forceFreshThread: true,
+      resolvedTargetOverride: params.resolvedTarget,
+    });
+    return { release, session: started.session, runId: started.runId };
   }
 
   private launchReleaseSession(params: {

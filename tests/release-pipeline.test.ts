@@ -266,11 +266,15 @@ describe("RD-6 SQLite migration & store invariants", () => {
       });
 
       const relAfter = store.getRelease(p.id, rel.id);
-      expect(relAfter.status).toBe("failed");
-      expect(relAfter.summary).toContain("restarted");
-      expect(store.getTaskView(t.id).deploy_status).toBe("failed");
+      expect(relAfter.status).toBe("verifying");
+      expect(relAfter.finished_at).toBeNull();
+      expect(relAfter.summary).toContain("待验收");
+      const taskAfter = store.getTaskView(t.id);
+      expect(taskAfter.deploy_status).toBe("deploying");
+      expect(taskAfter.release_id).toBe(rel.id);
       expect(store.getChatSession(p.id, sess.id).status).toBe("idle");
       expect(store.hasActiveAgentTask(p.id)).toBe(false);
+      expect(store.hasActiveRelease(p.id)).toBe(true);
     } finally {
       store.close();
     }
@@ -735,5 +739,340 @@ describe("RD-6 end-to-end API, Bridge Release Agent, Concurrency Lock, Abnormal 
 
     const relDetail = await f.ok(`/projects/${projectId}/releases/${triggered.release.id}`);
     expect(relDetail.release.summary).toContain("finish_release");
+  });
+});
+
+describe("RD-9 self-restart verification recovery, MCP tools & reverify", () => {
+  let f: Fixture;
+
+  beforeEach(async () => {
+    f = await fixture();
+  });
+
+  afterEach(async () => {
+    await f.close();
+  });
+
+  it("migrates legacy releases table without verifying status or verification columns", () => {
+    const dir = mkdtempSync(join(tmpdir(), "relaydesk-rd9-mig-"));
+    try {
+      const dbPath = join(dir, "legacy-releases.sqlite");
+      const raw = new DatabaseSync(dbPath);
+      raw.exec(`
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          repo TEXT NOT NULL,
+          repos TEXT NOT NULL DEFAULT '[]',
+          intake_key TEXT NOT NULL,
+          bot_key TEXT NOT NULL,
+          agent_key TEXT NOT NULL,
+          allowed_origins TEXT NOT NULL DEFAULT '[]',
+          created_at TEXT NOT NULL,
+          agent_instructions TEXT NOT NULL DEFAULT '',
+          automation_paused INTEGER NOT NULL DEFAULT 0,
+          delivery_mode TEXT NOT NULL DEFAULT 'direct_push',
+          deploy_policy_json TEXT NOT NULL DEFAULT '{}',
+          widget_code_context INTEGER NOT NULL DEFAULT 1,
+          execution_routing_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE releases (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          number INTEGER NOT NULL,
+          trigger TEXT NOT NULL CHECK(trigger IN ('immediate','scheduled','urgent','manual')),
+          status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','succeeded','failed','blocked')),
+          session_id TEXT,
+          task_ids_json TEXT NOT NULL DEFAULT '[]',
+          task_snapshot_json TEXT NOT NULL DEFAULT '[]',
+          deploy_ref TEXT NOT NULL DEFAULT '',
+          summary TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          finished_at TEXT,
+          UNIQUE(project_id, number)
+        );
+      `);
+      const now = "2026-11-22T22:00:00.000Z";
+      raw.prepare(
+        `INSERT INTO projects (id, name, repo, intake_key, bot_key, agent_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run("proj_rd9", "RelayDesk", "AceXiamo/relaydesk", "ik_1", "bk_1", "ak_1", now);
+      raw.prepare(
+        `INSERT INTO releases (id, project_id, number, trigger, status, summary, created_at, updated_at, finished_at)
+         VALUES (?, ?, 2, 'immediate', 'failed', 'Server restarted while release session was running.', ?, ?, ?)`,
+      ).run("rel_2", "proj_rd9", now, now, now);
+      raw.close();
+
+      const store = new Store(dbPath);
+      try {
+        const rel = store.getRelease("proj_rd9", "REL-2");
+        expect(rel.status).toBe("failed");
+        expect(rel.target_sha).toBe("");
+        expect(rel.verification_context).toEqual({});
+
+        // Verify new 'verifying' status is permitted by migrated CHECK constraint
+        const updated = store.finishRelease("proj_rd9", "REL-2", {
+          status: "verifying",
+          target_sha: "fd99c350dfbc9f6485d4c97f649b9f350fd28e67",
+          summary: "Awaiting health check evidence",
+        });
+        expect(updated.release.status).toBe("verifying");
+        expect(updated.release.target_sha).toBe("fd99c350dfbc9f6485d4c97f649b9f350fd28e67");
+        expect(updated.release.verification_context.previous_failure_summary).toContain(
+          "Server restarted while release session was running.",
+        );
+      } finally {
+        store.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists checkpoint before cutover, moves to verifying on disconnect, and auto-resumes verify-only on reconnect", async () => {
+    const projectId = await f.project("RelayDesk Self");
+    const { token } = await f.register("mac-self-deploy");
+    const conn1 = await f.connect(token);
+    await conn1.hello([{ project_id: projectId, workdir: "/repo/relaydesk", path_ok: true }]);
+
+    await f.ok(`/projects/${projectId}/deploy-policy`, "PUT", { mode: "manual" });
+
+    const created = await f.ok(`/projects/${projectId}/tasks`, "POST", {
+      title: "RD-7 mobile stats",
+      body: "Compact mobile stats",
+    });
+    f.srv.store.chatAgentTaskOp(projectId, "transition_task", {
+      task: created.task.id,
+      status: "done",
+      resolution: "shipped",
+      delivery_ref: "main@fd99c350dfbc9f6485d4c97f649b9f350fd28e67",
+    });
+
+    const triggered = await f.ok(`/projects/${projectId}/releases/trigger`, "POST", {});
+    expect(triggered.release.number).toBe(1);
+    expect(triggered.release.target_sha).toBe("fd99c350dfbc9f6485d4c97f649b9f350fd28e67");
+
+    const startFrame = await conn1.next("chat.start");
+    const runId1 = String(startFrame.payload.run_id);
+    const sessionId = String(startFrame.payload.session_id);
+
+    // Persist pre-cutover checkpoint via task.rpc (same path as MCP checkpoint_release)
+    conn1.send(
+      "task.rpc",
+      {
+        run_id: runId1,
+        project_id: projectId,
+        action: "checkpoint_release",
+        params: {
+          release_id: "REL-1",
+          target_sha: "fd99c350dfbc9f6485d4c97f649b9f350fd28e67",
+          pier_server: "tw-1",
+          pier_project: "relaydesk",
+          health_url: "https://relaydesk.acexiamo.com/api/auth/status",
+          deploy_log: "/tmp/relaydesk-deploy-fd99c350.log",
+          checks: ["web healthy", "runner running", "HTTP 200 /api/auth/status"],
+        },
+      },
+      "rpc-checkpoint-1",
+    );
+    const cpReply = await conn1.next("task.rpc.result");
+    expect(cpReply.payload.ok).toBe(true);
+
+    // Simulate self-restart / WebSocket disconnect mid-deploy
+    conn1.ws.close();
+
+    // Release should transition to `verifying` (NOT `failed`), and task keeps `deploying` ownership
+    await expect
+      .poll(async () => (await f.ok(`/projects/${projectId}/releases/${triggered.release.id}`)).release.status, {
+        timeout: 4000,
+        interval: 25,
+      })
+      .toBe("verifying");
+
+    const midRel = (await f.ok(`/projects/${projectId}/releases/${triggered.release.id}`)).release;
+    expect(midRel.finished_at).toBeNull();
+    expect(midRel.verification_context.pier_server).toBe("tw-1");
+    expect(midRel.verification_context.health_url).toBe("https://relaydesk.acexiamo.com/api/auth/status");
+    const midTask = (await f.ok(`/tasks/${created.task.id}`)).task;
+    expect(midTask.deploy_status).toBe("deploying");
+    expect(midTask.release_id).toBe(triggered.release.id);
+
+    // Bridge reconnects -> ReleaseDispatcher automatically resumes read-only verification on the SAME release & session
+    const conn2 = await f.connect(token);
+    await conn2.hello([{ project_id: projectId, workdir: "/repo/relaydesk", path_ok: true }]);
+
+    const verifyStart = await conn2.next("chat.start");
+    expect(verifyStart.payload.session_id).toBe(sessionId);
+    expect(verifyStart.payload.resume_session_id).toBe("");
+    expect(String(verifyStart.payload.system_context)).toContain("VERIFY-ONLY");
+    expect(String(verifyStart.payload.prompt)).toContain("fd99c350dfbc9f6485d4c97f649b9f350fd28e67");
+    expect(String(verifyStart.payload.prompt)).toContain("tw-1");
+
+    // Still only 1 release exists (no duplicate release created)
+    const listDuringVerify = await f.ok(`/projects/${projectId}/releases`);
+    expect(listDuringVerify.releases).toHaveLength(1);
+
+    // First report insufficient evidence -> keeps `verifying` and task stays `deploying`
+    conn2.send(
+      "task.rpc",
+      {
+        run_id: String(verifyStart.payload.run_id),
+        project_id: projectId,
+        action: "finish_release",
+        params: {
+          release_id: "REL-1",
+          status: "verifying",
+          summary: "Pier deploy still in progress; waiting for web healthy.",
+        },
+      },
+      "rpc-finish-verifying",
+    );
+    const verReply = await conn2.next("task.rpc.result");
+    expect(verReply.payload.ok).toBe(true);
+    expect((verReply.payload.data as any).release.status).toBe("verifying");
+
+    // Then report full evidence -> syncs release & task to succeeded/deployed
+    conn2.send(
+      "task.rpc",
+      {
+        run_id: String(verifyStart.payload.run_id),
+        project_id: projectId,
+        action: "finish_release",
+        params: {
+          release_id: "REL-1",
+          status: "succeeded",
+          target_sha: "fd99c350dfbc9f6485d4c97f649b9f350fd28e67",
+          deploy_ref: "main@fd99c350dfbc9f6485d4c97f649b9f350fd28e67",
+          summary: "Pier record confirmed, web healthy, runner running, /api/auth/status HTTP 200.",
+        },
+      },
+      "rpc-finish-ok",
+    );
+    const okReply = await conn2.next("task.rpc.result");
+    expect(okReply.payload.ok).toBe(true);
+
+    conn2.send("chat.event", {
+      run_id: verifyStart.payload.run_id,
+      session_id: verifyStart.payload.session_id,
+      event: { type: "done" },
+      result: { content: "Verified REL-1", events: [], status: "done", externalSessionId: "" },
+    });
+
+    await expect
+      .poll(async () => (await f.ok(`/projects/${projectId}/releases/${triggered.release.id}`)).release.status)
+      .toBe("succeeded");
+
+    const finalTask = (await f.ok(`/tasks/${created.task.id}`)).task;
+    expect(finalTask.deploy_status).toBe("deployed");
+    expect(finalTask.release_id).toBe(triggered.release.id);
+
+    // Repeating reverify on an already succeeded release is rejected (idempotent protection)
+    const dupReverify = await f.api(
+      `/projects/${projectId}/releases/${triggered.release.id}/reverify`,
+      "POST",
+      {},
+    );
+    expect(dupReverify.status).toBe(409);
+  });
+
+  it("allows console reverify on an existing failed release (REL-2 style) to correct false failure while preserving original reason", async () => {
+    const projectId = await f.project("RelayDesk REL-2");
+    const { token } = await f.register("mac-reverify");
+    const conn = await f.connect(token);
+    await conn.hello([{ project_id: projectId, workdir: "/repo/relaydesk", path_ok: true }]);
+
+    await f.ok(`/projects/${projectId}/deploy-policy`, "PUT", { mode: "manual" });
+
+    const t7 = await f.ok(`/projects/${projectId}/tasks`, "POST", { title: "RD-7", body: "b" });
+    const t8 = await f.ok(`/projects/${projectId}/tasks`, "POST", { title: "RD-8", body: "b" });
+    f.srv.store.chatAgentTaskOp(projectId, "transition_task", {
+      task: t7.task.id,
+      status: "done",
+      delivery_ref: "main@0ed3048",
+    });
+    f.srv.store.chatAgentTaskOp(projectId, "transition_task", {
+      task: t8.task.id,
+      status: "done",
+      delivery_ref: "main@fd99c350dfbc9f6485d4c97f649b9f350fd28e67",
+    });
+
+    // Simulate a legacy failed release record caused by server restart
+    const { release: rel } = f.srv.store.createRelease(projectId, {
+      trigger: "immediate",
+      taskIds: [t7.task.id, t8.task.id],
+    });
+    f.srv.store.finishRelease(projectId, rel.id, {
+      status: "failed",
+      summary: "Server restarted while release session was running.",
+      author: "system",
+    });
+    expect(f.srv.store.getRelease(projectId, rel.id).status).toBe("failed");
+    expect(f.srv.store.getTaskView(t7.task.id).deploy_status).toBe("failed");
+    expect(f.srv.store.getTaskView(t8.task.id).deploy_status).toBe("failed");
+
+    // Trigger console reverify on the existing failed release
+    const rev = await f.ok(`/projects/${projectId}/releases/${rel.id}/reverify`, "POST", {
+      prompt: "核对 tw-1 Web/Runner 镜像 SHA 与 /api/auth/status",
+    });
+    expect(rev.release.id).toBe(rel.id);
+    expect(rev.release.number).toBe(rel.number);
+    expect(rev.release.status).toBe("verifying");
+
+    // Duplicate concurrent reverify is rejected with 409
+    const dupConcurrent = await f.api(`/projects/${projectId}/releases/${rel.id}/reverify`, "POST", {});
+    expect(dupConcurrent.status).toBe(409);
+
+    const startFrame = await conn.next("chat.start");
+    expect(String(startFrame.payload.system_context)).toContain("VERIFY-ONLY");
+    expect(String(startFrame.payload.prompt)).toContain("Server restarted while release session was running.");
+
+    // Agent verifies evidence and calls finish_release(status: "succeeded")
+    conn.send(
+      "task.rpc",
+      {
+        run_id: String(startFrame.payload.run_id),
+        project_id: projectId,
+        action: "finish_release",
+        params: {
+          release_id: `REL-${rel.number}`,
+          status: "succeeded",
+          target_sha: "fd99c350dfbc9f6485d4c97f649b9f350fd28e67",
+          deploy_ref: "main@fd99c350dfbc9f6485d4c97f649b9f350fd28e67",
+          summary: "tw-1 Web healthy & Runner running fd99c350dfbc9f6485d4c97f649b9f350fd28e67; /api/auth/status HTTP 200; Pier deploy record verified.",
+        },
+      },
+      "rpc-reverify-fix",
+    );
+    const rpcRes = await conn.next("task.rpc.result");
+    expect(rpcRes.payload.ok).toBe(true);
+
+    conn.send("chat.event", {
+      run_id: startFrame.payload.run_id,
+      session_id: startFrame.payload.session_id,
+      event: { type: "done" },
+      result: { content: "Re-verified and corrected", events: [], status: "done", externalSessionId: "" },
+    });
+
+    await expect
+      .poll(() => f.srv.store.getChatSession(projectId, String(startFrame.payload.session_id)).status)
+      .toBe("idle");
+
+    // Check release corrected while preserving original failure reason and correction basis
+    const corrected = f.srv.store.getRelease(projectId, rel.id);
+    expect(corrected.status).toBe("succeeded");
+    expect(corrected.target_sha).toBe("fd99c350dfbc9f6485d4c97f649b9f350fd28e67");
+    expect(corrected.summary).toContain("Server restarted while release session was running.");
+    expect(corrected.summary).toContain("/api/auth/status HTTP 200");
+    expect(corrected.verification_context.previous_failure_summary).toContain(
+      "Server restarted while release session was running.",
+    );
+    expect(corrected.verification_context.correction_basis).toContain("/api/auth/status HTTP 200");
+    expect(corrected.verification_context.corrected_at).toBeTruthy();
+
+    // Both tasks synced to deployed without creating a second release
+    expect(f.srv.store.listReleases(projectId)).toHaveLength(1);
+    expect(f.srv.store.getTaskView(t7.task.id).deploy_status).toBe("deployed");
+    expect(f.srv.store.getTaskView(t8.task.id).deploy_status).toBe("deployed");
   });
 });

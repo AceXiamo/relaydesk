@@ -57,6 +57,7 @@ export function ReleasesView({
   );
   const [deployDocExists, setDeployDocExists] = useState<boolean>(false);
   const [triggering, setTriggering] = useState(false);
+  const [reverifyingId, setReverifyingId] = useState<string | null>(null);
   const [showAdvancedTrigger, setShowAdvancedTrigger] = useState(false);
   const [triggerPrompt, setTriggerPrompt] = useState("");
   const [forceEmpty, setForceEmpty] = useState(false);
@@ -153,6 +154,27 @@ export function ReleasesView({
     }
   };
 
+  const handleReverify = async (rel: ReleaseRecord) => {
+    setReverifyingId(rel.id);
+    try {
+      const res = await api.reverifyProjectRelease(project.id, rel.id);
+      toast.success(`已对 ${releaseCode(res.release.number)} 发起重新验收（仅检查，不重新部署）`);
+      onMutated?.();
+      await load(true);
+      if (res.session?.id) {
+        onOpenReleaseSession(res.session.id);
+      }
+    } catch (err) {
+      toast.error(
+        err instanceof ClientApiError
+          ? err.message
+          : "无法发起重新验收，请检查在线本机节点与项目状态",
+      );
+    } finally {
+      setReverifyingId(null);
+    }
+  };
+
   return (
     <div className="flex-1 min-w-0 h-full overflow-y-auto bg-[var(--surface-canvas)]">
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-7 space-y-5">
@@ -199,7 +221,9 @@ export function ReleasesView({
               icon="rocket"
             >
               {activeRelease
-                ? `${releaseCode(activeRelease.number)} 发布中`
+                ? activeRelease.status === "verifying"
+                  ? `${releaseCode(activeRelease.number)} 待验收`
+                  : `${releaseCode(activeRelease.number)} 发布中`
                 : queuedCount > 0
                   ? `立即发布 (${queuedCount})`
                   : "立即发布"}
@@ -264,32 +288,68 @@ export function ReleasesView({
 
         {/* Active release live banner */}
         {activeRelease && (
-          <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/[0.06] px-4 py-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div
+            className={
+              activeRelease.status === "verifying"
+                ? "rounded-xl border border-sky-500/30 bg-sky-500/[0.06] px-4 py-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                : "rounded-xl border border-indigo-500/30 bg-indigo-500/[0.06] px-4 py-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+            }
+          >
             <div className="flex items-start sm:items-center gap-3 min-w-0">
-              <LivePulseDot tone="indigo" active />
+              <LivePulseDot
+                tone={activeRelease.status === "verifying" ? "emerald" : "indigo"}
+                active={activeRelease.status === "running"}
+              />
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-sm font-semibold text-[var(--text-primary)]">
-                    {releaseCode(activeRelease.number)} 正在部署生产环境
+                    {releaseCode(activeRelease.number)}{" "}
+                    {activeRelease.status === "verifying"
+                      ? "等待重新验收（部署可能已在远端完成）"
+                      : "正在部署生产环境"}
                   </span>
+                  <ReleaseStatusBadge status={activeRelease.status} compact />
                   <ReleaseTriggerBadge trigger={activeRelease.trigger} />
+                  {activeRelease.target_sha && (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-mono px-1.5 py-0.5 rounded bg-[var(--surface-hover)] text-[var(--text-secondary)]">
+                      <Icon name="git-commit-horizontal" size={11} />
+                      {activeRelease.target_sha.slice(0, 12)}
+                    </span>
+                  )}
                 </div>
                 <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
                   包含 {activeRelease.task_snapshot.length} 个任务 · 开始于{" "}
-                  {formatRelativeTime(activeRelease.created_at)}，期间已自动锁定本项目其他自动派发。
+                  {formatRelativeTime(activeRelease.created_at)}
+                  {activeRelease.status === "verifying"
+                    ? "，关联任务已保留归属；点击「重新验收」将沿用原发布单仅执行健康与版本核验，不会重复部署。"
+                    : "，期间已自动锁定本项目其他自动派发。"}
                 </p>
               </div>
             </div>
-            {activeRelease.session_id && (
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => onOpenReleaseSession(activeRelease.session_id!)}
-                icon="terminal"
-              >
-                查看实时发布会话
-              </Button>
-            )}
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {activeRelease.status === "verifying" && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={reverifyingId === activeRelease.id}
+                  disabled={Boolean(reverifyingId)}
+                  onClick={() => void handleReverify(activeRelease)}
+                  icon="shield-check"
+                >
+                  重新验收
+                </Button>
+              )}
+              {activeRelease.session_id && (
+                <Button
+                  variant={activeRelease.status === "verifying" ? "secondary" : "primary"}
+                  size="sm"
+                  onClick={() => onOpenReleaseSession(activeRelease.session_id!)}
+                  icon="terminal"
+                >
+                  {activeRelease.status === "verifying" ? "查看发布会话" : "查看实时发布会话"}
+                </Button>
+              )}
+            </div>
           </div>
         )}
 
@@ -471,10 +531,15 @@ export function ReleasesView({
                           </span>
                           <ReleaseStatusBadge status={rel.status} compact />
                           <ReleaseTriggerBadge trigger={rel.trigger} />
-                          {rel.deploy_ref && (
+                          {rel.verification_context?.corrected_at && (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20">
+                              已重新验收修正
+                            </span>
+                          )}
+                          {(rel.deploy_ref || rel.target_sha) && (
                             <span className="inline-flex items-center gap-1 text-[11px] font-mono px-1.5 py-0.5 rounded bg-[var(--surface-hover)] text-[var(--text-secondary)] max-w-[220px] truncate">
                               <Icon name="git-commit-horizontal" size={11} />
-                              {rel.deploy_ref}
+                              {rel.deploy_ref || rel.target_sha.slice(0, 12)}
                             </span>
                           )}
                         </div>
@@ -491,7 +556,23 @@ export function ReleasesView({
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        {(rel.status === "verifying" ||
+                          rel.status === "failed" ||
+                          rel.status === "blocked") && (
+                          <Button
+                            variant={rel.status === "verifying" ? "primary" : "secondary"}
+                            size="xs"
+                            loading={reverifyingId === rel.id}
+                            disabled={
+                              Boolean(reverifyingId) || activeRelease?.status === "running"
+                            }
+                            onClick={() => void handleReverify(rel)}
+                            icon="shield-check"
+                          >
+                            重新验收
+                          </Button>
+                        )}
                         {rel.summary && (
                           <Button
                             variant="ghost"

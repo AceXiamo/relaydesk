@@ -55,6 +55,8 @@ export interface StartChatTurnOptions {
   resolvedTargetOverride?: ResolvedChatExecutionTarget;
   /** When true, the caller already claimed the task lease in the database. */
   skipTaskAutoClaim?: boolean;
+  /** When true, start a fresh CLI thread while keeping messages in the same Relaydesk session. */
+  forceFreshThread?: boolean;
   initialSubscriber?: RunSubscriber;
 }
 
@@ -91,6 +93,7 @@ const MUTATING_TASK_ACTIONS = new Set([
   "update_task",
   "transition_task",
   "create_task",
+  "checkpoint_release",
   "finish_release",
 ]);
 
@@ -315,6 +318,7 @@ export class ChatRunManager {
       skipAutoTitle,
       resolvedTargetOverride,
       skipTaskAutoClaim,
+      forceFreshThread,
       initialSubscriber,
     } = options;
     const runId = options.runId ?? randomUUID();
@@ -439,6 +443,7 @@ export class ChatRunManager {
         (session.kind === "task" && taskNumber !== null
           ? buildTaskWorkflowSystemContext(projectInfo, taskNumber)
           : undefined),
+      forceFreshThread,
     });
 
     return {
@@ -465,6 +470,7 @@ export class ChatRunManager {
       provisionalTitle?: string;
       resolvedTarget: ResolvedChatExecutionTarget;
       extraSystemContext?: string;
+      forceFreshThread?: boolean;
     },
   ): Promise<void> {
     const {
@@ -475,6 +481,7 @@ export class ChatRunManager {
       provisionalTitle,
       resolvedTarget,
       extraSystemContext,
+      forceFreshThread,
     } = params;
     const { session, sessionId } = run;
     const { targetKey, localAgentId, localBinding } = resolvedTarget;
@@ -506,7 +513,7 @@ export class ChatRunManager {
           })
       : Promise.resolve();
 
-    const canResumePrior = canResumeExternalSession(session, targetKey);
+    const canResumePrior = !forceFreshThread && canResumeExternalSession(session, targetKey);
     const last = priorMessages.at(-1);
     const prompt =
       canResumePrior &&
