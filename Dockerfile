@@ -38,6 +38,7 @@ RUN pnpm install --prod --frozen-lockfile
 COPY --from=builder /app/build ./build
 COPY server.ts ./
 COPY server/ server/
+COPY agent/bridge/chat-timeouts.ts agent/bridge/chat-timeouts.ts
 COPY app/lib/ app/lib/
 COPY public/widget.js public/widget.js
 COPY public/widget-capture.js public/widget-capture.js
@@ -56,5 +57,10 @@ RUN codex --version \
     && git --version \
     && rg --version \
     && python3 --version
+# Boot the packaged application as the runtime user before publishing the image.
+RUN node --input-type=module -e 'import { startRelaydeskServer } from "./server.ts"; \
+    const app = await startRelaydeskServer({ port: 0, dbPath: ":memory:" }); \
+    try { const res = await fetch(app.url + "/api/auth/status"); if (res.status !== 200) throw Error("Health check: " + res.status); } \
+    finally { await app.close(); }'
 EXPOSE 8787
 CMD ["node", "server.ts", "--host", "0.0.0.0"]
