@@ -111,6 +111,7 @@ import {
   writeWorkspaceTextFile,
 } from "./workspace.ts";
 import {
+  RELAYDESK_MCP_INSTRUCTIONS,
   abortChatSessionRun,
   buildAttachmentContext,
   buildResumePrompt,
@@ -2073,7 +2074,12 @@ export class ApiRouter {
       const resolveTask = (taskId: string) => {
         try {
           const row = this.store.getTaskRow(taskId);
-          return row.project_id === projectInfo.id ? toTaskView(row) : null;
+          if (row.project_id !== projectInfo.id) return null;
+          return {
+            task: toTaskView(row),
+            messages: this.store.getTaskMessages(row.id),
+            merged: this.store.getMergedTasks(row.id),
+          };
         } catch {
           return null;
         }
@@ -2093,17 +2099,18 @@ export class ApiRouter {
           );
           const contextBlocks: string[] = [];
           if (!canResumePrior) {
+            contextBlocks.push(RELAYDESK_MCP_INSTRUCTIONS);
             if (projectInfo.agent_instructions.trim()) {
               contextBlocks.push(`## Project Instructions\n${projectInfo.agent_instructions.trim().slice(0, 4000)}`);
             }
             if (workspaceManifest.databases.length > 0) {
               const dbLines = workspaceManifest.databases.map((db) => {
                 if (db.source === "workspace_file") {
-                  return `- [SQLite] ${db.name}: path=$RELAYDESK_SPACE_DIR/files/${db.file_path} (${db.table_count ?? 0} tables)`;
+                  return `- [SQLite] ${db.name}: path=$RELAYDESK_SPACE_DIR/files/${db.file_path} (${db.table_count ?? 0} tables; queryable via relaydesk MCP tools)`;
                 }
                 const envPart =
                   localBinding?.allow_datasource_secrets && db.has_connection_url && db.env_var
-                    ? `env=$${db.env_var}`
+                    ? `env=$${db.env_var} (queryable via relaydesk MCP tools)`
                     : "credentials not exported to this device";
                 const accessPart = db.read_only ? "STRICT READ-ONLY" : "read-write";
                 const notePart = db.notes ? `\n  Notes: ${db.notes.slice(0, 1000)}` : "";
@@ -2148,6 +2155,7 @@ export class ApiRouter {
             datasourceRuntime.secrets,
           );
         } else {
+          const mutatingActions = new Set(["comment_task", "update_task", "transition_task", "create_task"]);
           result = await runWebCliChatTurn({
             dbPath: this.store.dbPath,
             project: projectInfo,
@@ -2157,6 +2165,18 @@ export class ApiRouter {
             priorMessages,
             signal: abortController.signal,
             resolveTask,
+            taskClient: {
+              call: async (action, params) => {
+                const { result: opResult, mutated } = this.store.transaction(
+                  mutatingActions.has(action),
+                  () => this.store.chatAgentTaskOp(projectInfo.id, action, params),
+                );
+                if (mutated) {
+                  writeEvent({ type: "task_updated", task_id: mutated.task_id, action: mutated.action });
+                }
+                return opResult;
+              },
+            },
             onEvent: writeEvent,
           });
         }

@@ -1,7 +1,15 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildCliInvocation, createCliStreamParser, redactSecrets, type StreamParseState } from "./cli-stream-parser.ts";
 import { readProjectCliSettings } from "./project-cli-config.ts";
+import {
+  startRelaydeskMcpServer,
+  type RelaydeskMcpHandle,
+  type RelaydeskMcpTaskClient,
+} from "./relaydesk-mcp.ts";
 import { builtinModels } from "../app/lib/model-catalog.ts";
 import {
   getWorkspaceDatasourceRuntimeEnv,
@@ -19,6 +27,7 @@ import type {
   ChatSessionRecord,
   ChatStreamEvent,
   ChatToolEvent,
+  TaskMessage,
   TaskRecord,
 } from "../app/lib/types.ts";
 
@@ -122,12 +131,28 @@ export function isChatSessionRunning(sessionId: string): boolean {
   return activeSessionProcesses.has(sessionId);
 }
 
+export interface ResolvedTaskAttachment {
+  task: TaskRecord;
+  messages?: TaskMessage[];
+  merged?: TaskRecord[];
+}
+
+export type TaskAttachmentResolver = (taskId: string) => TaskRecord | ResolvedTaskAttachment | null;
+
+export const RELAYDESK_MCP_INSTRUCTIONS = [
+  "## Relaydesk MCP Tools (`relaydesk`)",
+  "- Task tools: `list_tasks`, `get_task`, `comment_task`, `update_task`, `transition_task`, `create_task` (all scoped to this project).",
+  "- Database tools: `list_datasources`, `describe_datasource`, `query_datasource` (strictly read-only inspection/queries for project SQLite files and configured external databases; works even in read-only chat mode without Bash).",
+  "- Follow the operator's explicit intent: when asked to analyze or investigate a task, inspect code/data first and post findings via `comment_task` if asked or helpful; do NOT transition task status, close, merge, or create tasks unless the operator asks or clearly instructs you to.",
+  "- Never reveal or print raw database connection URLs, passwords, or tokens.",
+].join("\n");
+
 export function buildAttachmentContext(
   dbPath: string,
   project: AgentProjectInfo,
   attachments: ChatContextRef[],
   workspaceDatabases: ReturnType<typeof prepareProjectChatWorkspace>["databases"],
-  resolveTask?: (taskId: string) => TaskRecord | null,
+  resolveTask?: TaskAttachmentResolver,
 ): string {
   if (!attachments.length) return "";
   const blocks: string[] = [];
@@ -196,15 +221,37 @@ export function buildAttachmentContext(
         blocks.push(`### Referenced Database: ${att.label} (${att.ref})`);
       }
     } else if (att.kind === "task") {
-      const task = resolveTask?.(att.ref);
-      if (task) {
+      const resolved = resolveTask?.(att.ref);
+      const detail: ResolvedTaskAttachment | null = resolved
+        ? "task" in resolved
+          ? resolved
+          : { task: resolved }
+        : null;
+      if (detail) {
+        const { task, messages = [], merged = [] } = detail;
+        const threadLines = messages
+          .slice(-12)
+          .map((m) => {
+            const limit = m.kind === "comment" ? 800 : 200;
+            return `  - [${m.created_at}] (${m.author}/${m.kind}) ${m.body.slice(0, limit)}`;
+          });
+        const mergedLines = merged
+          .slice(0, 8)
+          .map((m) => `  - RD-${m.number}: ${m.title}`);
         blocks.push(
           [
             `### Referenced Task: RD-${task.number} — ${task.title}`,
-            `- Status: ${task.status} | Priority: ${task.priority} | Owner: ${task.owner}`,
+            `- Task ID: ${task.id} | Code: RD-${task.number}`,
+            `- Status: ${task.status} | Priority: ${task.priority} | Owner: ${task.owner} | Source: ${task.source}`,
+            task.resolution || task.triaged_by
+              ? `- Resolution: ${task.resolution ?? "none"} | Triaged by: ${task.triaged_by ?? "none"}`
+              : "",
             task.delivery_ref ? `- Delivery ref: ${task.delivery_ref}` : "",
+            task.source_url ? `- Source URL: ${task.source_url}` : "",
             task.body ? `- Description:\n${task.body.slice(0, 3000)}` : "",
             task.requirements ? `- Requirements:\n${task.requirements.slice(0, 2000)}` : "",
+            mergedLines.length > 0 ? `- Linked feedback:\n${mergedLines.join("\n")}` : "",
+            threadLines.length > 0 ? `- Recent comments & events (${messages.length} total):\n${threadLines.join("\n")}` : "",
           ]
             .filter(Boolean)
             .join("\n"),
@@ -312,9 +359,11 @@ function buildInitialPrompt(params: {
       );
     }
     lines.push(
-      `- Usage example: psql "$RELAYDESK_DB_..." -c "SELECT ..." (or mysql / redis-cli -u "$RELAYDESK_DB_..." / mongosh "$RELAYDESK_DB_..."). Never print the env var itself.`,
+      `- Usage example: prefer the \`relaydesk\` MCP tools (\`list_datasources\`, \`describe_datasource\`, \`query_datasource\`) for safe read-only inspection; in workspace-write mode you may also use psql/mysql/redis-cli/mongosh with "$RELAYDESK_DB_...". Never print the env var itself.`,
     );
   }
+
+  lines.push("", RELAYDESK_MCP_INSTRUCTIONS);
 
   if (priorMessages && priorMessages.length > 0) {
     lines.push("", "## Previous Conversation Summary");
@@ -345,7 +394,8 @@ export interface RunChatTurnOptions {
   attachments: ChatContextRef[];
   priorMessages: ChatMessageRecord[];
   signal: AbortSignal;
-  resolveTask?: (taskId: string) => TaskRecord | null;
+  resolveTask?: TaskAttachmentResolver;
+  taskClient?: RelaydeskMcpTaskClient;
   onEvent: (event: ChatStreamEvent) => void;
 }
 
@@ -477,7 +527,7 @@ function runSingleCliAttempt(params: {
 }
 
 export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<RunChatTurnResult> {
-  const { dbPath, project, session, prompt, attachments, priorMessages, signal, resolveTask, onEvent } =
+  const { dbPath, project, session, prompt, attachments, priorMessages, signal, resolveTask, taskClient, onEvent } =
     options;
   const clis = detectLocalClis();
   const bin = session.runtime === "codex" ? clis.codexBin : clis.claudeBin;
@@ -520,6 +570,41 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
   if (metadata.supports_effort === false || (reasoningEffort !== "default" && metadata.effort_levels && !metadata.effort_levels.includes(reasoningEffort))) {
     reasoningEffort = "default";
   }
+  let mcpHandle: RelaydeskMcpHandle | null = null;
+  let claudeMcpConfigPath: string | null = null;
+  try {
+    mcpHandle = await startRelaydeskMcpServer({
+      projectId: project.id,
+      spaceDir: workspace.workspaceDir,
+      databases: workspace.databases.map((db) => ({
+        id: db.id,
+        name: db.name,
+        kind: db.kind,
+        source: db.source,
+        file_path: db.file_path,
+        env_var: db.env_var,
+        host_preview: db.host_preview,
+        read_only: db.read_only,
+        notes: db.notes,
+        has_connection_url: db.has_connection_url,
+      })),
+      datasourceEnv: datasourceRuntime.env,
+      allowDatasourceSecrets: true,
+      secrets: datasourceRuntime.secrets,
+      taskClient,
+      signal,
+    });
+    if (session.runtime === "claude") {
+      claudeMcpConfigPath = join(tmpdir(), `relaydesk-mcp-${randomUUID()}.json`);
+      writeFileSync(claudeMcpConfigPath, JSON.stringify(mcpHandle.claudeConfigObject()), {
+        mode: 0o600,
+        flag: "wx",
+      });
+    }
+  } catch {
+    mcpHandle = null;
+  }
+
   const runWithResume = Boolean(session.external_session_id);
   const execute = async (resumeId: string) => {
     const stdinPrompt = resumeId
@@ -548,9 +633,21 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       resumeSessionId: resumeId,
       projectSettings,
       datasourceEnv: datasourceRuntime.env,
-      datasourceSecrets: datasourceRuntime.secrets,
+      datasourceSecrets: [...datasourceRuntime.secrets, ...(mcpHandle ? [mcpHandle.token] : [])],
       pgReadOnlyEnforced: datasourceRuntime.pgReadOnlyEnforced,
+      ...(mcpHandle
+        ? {
+            mcp: {
+              url: mcpHandle.url,
+              tokenEnvVar: "RELAYDESK_MCP_TOKEN",
+              ...(claudeMcpConfigPath ? { claudeConfigPath: claudeMcpConfigPath } : {}),
+            },
+          }
+        : {}),
     });
+    if (mcpHandle && session.runtime === "codex") {
+      invocation.env.RELAYDESK_MCP_TOKEN = mcpHandle.token;
+    }
     return runSingleCliAttempt({
       sessionId: session.id,
       runtime: session.runtime,
@@ -565,68 +662,81 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
     });
   };
 
-  onEvent({
-    type: "status",
-    message: runWithResume
-      ? `正在续接 ${session.runtime === "codex" ? "Codex" : "Claude"} 会话…`
-      : `正在启动 ${session.runtime === "codex" ? "Codex" : "Claude"}（工作区已挂载项目文件与手册）…`,
-  });
+  try {
+    onEvent({
+      type: "status",
+      message: runWithResume
+        ? `正在续接 ${session.runtime === "codex" ? "Codex" : "Claude"} 会话…`
+        : `正在启动 ${session.runtime === "codex" ? "Codex" : "Claude"}（工作区已挂载项目文件与手册）…`,
+    });
 
-  let attempt = await execute(session.external_session_id);
+    let attempt = await execute(session.external_session_id);
 
-  // If resuming a prior CLI thread failed before producing any output, transparently retry with a fresh thread seeded with conversation history.
-  if (
-    runWithResume &&
-    !attempt.aborted &&
-    !attempt.timedOut &&
-    attempt.exitCode !== 0 &&
-    !attempt.state.text
-  ) {
-    onEvent({ type: "status", message: "原 CLI 线程不可复用，正在携带上下文开启新线程…" });
-    attempt = await execute("");
-  }
+    // If resuming a prior CLI thread failed before producing any output, transparently retry with a fresh thread seeded with conversation history.
+    if (
+      runWithResume &&
+      !attempt.aborted &&
+      !attempt.timedOut &&
+      attempt.exitCode !== 0 &&
+      !attempt.state.text
+    ) {
+      onEvent({ type: "status", message: "原 CLI 线程不可复用，正在携带上下文开启新线程…" });
+      attempt = await execute("");
+    }
 
-  const finalSessionId = attempt.state.externalSessionId || session.external_session_id;
-  const events = Array.from(attempt.state.toolEvents.values());
+    const finalSessionId = attempt.state.externalSessionId || session.external_session_id;
+    const events = Array.from(attempt.state.toolEvents.values());
 
-  if (attempt.aborted) {
+    if (attempt.aborted) {
+      return {
+        content: attempt.state.text || "（已中止生成）",
+        events,
+        externalSessionId: finalSessionId,
+        status: "aborted",
+      };
+    }
+
+    if (attempt.timedOut) {
+      return {
+        content: attempt.state.text,
+        events,
+        externalSessionId: finalSessionId,
+        status: "error",
+        error: "本轮执行超时（超过 8 分钟）已自动停止。",
+      };
+    }
+
+    if (attempt.exitCode !== 0 || (attempt.state.errorMessage && !attempt.state.text)) {
+      const detail =
+        attempt.state.errorMessage ||
+        attempt.stderr.split(/\r?\n/).filter(Boolean).slice(-3).join(" / ") ||
+        `CLI 退出码 ${attempt.exitCode ?? "unknown"}`;
+      return {
+        content: attempt.state.text,
+        events,
+        externalSessionId: finalSessionId,
+        status: "error",
+        error: detail,
+      };
+    }
+
+    const finalContent = attempt.state.text.trim() || "（执行完成，无文本输出）";
     return {
-      content: attempt.state.text || "（已中止生成）",
+      content: finalContent,
       events,
       externalSessionId: finalSessionId,
-      status: "aborted",
+      status: "done",
     };
+  } finally {
+    if (claudeMcpConfigPath && existsSync(claudeMcpConfigPath)) {
+      try {
+        unlinkSync(claudeMcpConfigPath);
+      } catch {
+        // ignore
+      }
+    }
+    if (mcpHandle) {
+      await mcpHandle.close().catch(() => undefined);
+    }
   }
-
-  if (attempt.timedOut) {
-    return {
-      content: attempt.state.text,
-      events,
-      externalSessionId: finalSessionId,
-      status: "error",
-      error: "本轮执行超时（超过 8 分钟）已自动停止。",
-    };
-  }
-
-  if (attempt.exitCode !== 0 || (attempt.state.errorMessage && !attempt.state.text)) {
-    const detail =
-      attempt.state.errorMessage ||
-      attempt.stderr.split(/\r?\n/).filter(Boolean).slice(-3).join(" / ") ||
-      `CLI 退出码 ${attempt.exitCode ?? "unknown"}`;
-    return {
-      content: attempt.state.text,
-      events,
-      externalSessionId: finalSessionId,
-      status: "error",
-      error: detail,
-    };
-  }
-
-  const finalContent = attempt.state.text.trim() || "（执行完成，无文本输出）";
-  return {
-    content: finalContent,
-    events,
-    externalSessionId: finalSessionId,
-    status: "done",
-  };
 }

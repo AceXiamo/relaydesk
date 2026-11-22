@@ -31,6 +31,7 @@ import {
   taskCode,
 } from "~/lib/format.ts";
 import type {
+  ChatSandboxMode,
   CliRun,
   DiscussMode,
   ProjectDetail,
@@ -52,6 +53,10 @@ interface TaskDetailDrawerProps {
   onOpenRelated: (taskId: string) => void;
   onRefreshTask: (taskId: string) => Promise<void>;
   onOpenCliSettings: () => void;
+  onAssignToAgent?: (
+    task: TaskRecord,
+    opts?: { prompt?: string; sandboxMode?: ChatSandboxMode },
+  ) => void;
 }
 
 type TimelineSegment =
@@ -243,6 +248,7 @@ export function TaskDetailDrawer({
   onOpenRelated,
   onRefreshTask,
   onOpenCliSettings,
+  onAssignToAgent,
 }: TaskDetailDrawerProps) {
   const toast = useToast();
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -259,8 +265,21 @@ export function TaskDetailDrawer({
   const [mergeOpen, setMergeOpen] = useState(false);
   const [mergeTarget, setMergeTarget] = useState("");
   const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
+  const [assignMenuOpen, setAssignMenuOpen] = useState(false);
 
   const commentInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const assignMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!assignMenuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (assignMenuRef.current && !assignMenuRef.current.contains(e.target as Node)) {
+        setAssignMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [assignMenuOpen]);
 
   const task = detail?.task ?? null;
   const { runs, notice } = useCliRuns({
@@ -681,11 +700,11 @@ export function TaskDetailDrawer({
 
               {/* Workflow & Human-on-the-loop Properties Bar */}
               {!task.merged_into && (
-                <section className="relative overflow-hidden p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] rd-hairline-glow space-y-3">
+                <section className="relative p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] rd-hairline-glow space-y-3">
                   {isAgentWorking && (
                     <div
                       aria-hidden="true"
-                      className="pointer-events-none absolute inset-x-0 top-0 h-[2px] overflow-hidden bg-amber-500/15"
+                      className="pointer-events-none absolute inset-x-0 top-0 h-[2px] overflow-hidden rounded-t-xl bg-amber-500/15"
                     >
                       <div className="h-full w-1/2 bg-gradient-to-r from-transparent via-amber-500/80 to-transparent animate-rd-shimmer" />
                     </div>
@@ -716,6 +735,93 @@ export function TaskDetailDrawer({
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
+                    {/* Direct Assign to Agent Chat */}
+                    {onAssignToAgent && (
+                      <div ref={assignMenuRef} className="relative inline-flex items-center">
+                        <div className="inline-flex items-center rounded-lg border border-indigo-500/30 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 shadow-2xs">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAssignMenuOpen(false);
+                              onAssignToAgent(task);
+                            }}
+                            className="inline-flex items-center gap-1.5 h-8 px-2.5 text-[12px] font-medium hover:bg-indigo-500/15 rounded-l-[7px] transition cursor-pointer"
+                          >
+                            <Icon name="sparkles" size={13} />
+                            <span>派给 Agent</span>
+                          </button>
+                          <span className="h-4 w-px bg-indigo-500/25" />
+                          <button
+                            type="button"
+                            aria-label="选择 Agent 处理模板"
+                            aria-expanded={assignMenuOpen}
+                            onClick={() => setAssignMenuOpen((v) => !v)}
+                            className="inline-flex items-center justify-center h-8 w-6 hover:bg-indigo-500/15 rounded-r-[7px] transition cursor-pointer"
+                          >
+                            <Icon name="chevron-down" size={13} />
+                          </button>
+                        </div>
+                        {assignMenuOpen && (
+                          <div className="absolute left-0 top-full mt-1.5 z-30 w-64 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-1 shadow-xl">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAssignMenuOpen(false);
+                                onAssignToAgent(task, {
+                                  sandboxMode: "read-only",
+                                  prompt: `请先排查分析 ${taskCode(task.number)}（可结合代码和相关数据源），定位根因后把排查结论回复到该工单中，暂不修改本地代码。`,
+                                });
+                              }}
+                              className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-[var(--surface-hover)] transition cursor-pointer"
+                            >
+                              <div className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)]">
+                                <Icon name="search" size={13} className="text-indigo-500" />
+                                <span>只读排查并回复工单</span>
+                              </div>
+                              <p className="text-[11px] text-[var(--text-muted)] mt-0.5 pl-4.5">
+                                不改动代码，支持只读查库并写回分析评论
+                              </p>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAssignMenuOpen(false);
+                                onAssignToAgent(task, {
+                                  sandboxMode: "workspace-write",
+                                  prompt: `请处理工单 ${taskCode(task.number)}：先确认上下文与根因，完成代码修复与验证后，更新工单状态并回复修复说明。`,
+                                });
+                              }}
+                              className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-[var(--surface-hover)] transition cursor-pointer"
+                            >
+                              <div className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)]">
+                                <Icon name="wrench" size={13} className="text-amber-500" />
+                                <span>直接修复并推进工单</span>
+                              </div>
+                              <p className="text-[11px] text-[var(--text-muted)] mt-0.5 pl-4.5">
+                                切到可写空间，修改代码并推进状态
+                              </p>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAssignMenuOpen(false);
+                                onAssignToAgent(task);
+                              }}
+                              className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-[var(--surface-hover)] transition cursor-pointer"
+                            >
+                              <div className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)]">
+                                <Icon name="message-square" size={13} className="text-[var(--text-secondary)]" />
+                                <span>仅带入 @{taskCode(task.number)} 自由提问</span>
+                              </div>
+                              <p className="text-[11px] text-[var(--text-muted)] mt-0.5 pl-4.5">
+                                打开对话并预挂载工单，可继续 @数据库 或自定义指令
+                              </p>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {/* Optional Human Intervention CTA */}
                     {task.owner === "agent" ? (
                       task.status === "handoff" ? (

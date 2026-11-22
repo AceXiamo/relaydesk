@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "~/lib/api.ts";
+import { messagesWithTurn, type ProjectChatStreams, type TurnTrace } from "~/lib/chat-streams.ts";
 import { formatRelativeTime } from "~/lib/format.ts";
 import {
   resolveActiveLocalAgent,
@@ -34,17 +35,20 @@ import { MarkdownContent } from "./MarkdownContent.tsx";
 import { Button, EmptyState, LivePulseDot, useToast } from "./ui.tsx";
 
 interface CodexChatViewProps {
+  streams: ProjectChatStreams;
   project: ProjectDetail | null;
   tasks: TaskRecord[];
   pendingContext?: {
     ref?: ChatContextRef;
     prompt?: string;
     enableNetwork?: boolean;
+    sandboxMode?: ChatSandboxMode;
   } | null;
   onConsumePendingContext?: () => void;
   onNewProject: () => void;
   onOpenWorkspace: () => void;
   onOpenCliSettings: () => void;
+  onOpenRoutingSettings?: () => void;
   onTaskCreated: (task: TaskRecord) => void;
   mainSidebarCollapsed?: boolean;
   onExpandMainSidebar?: () => void;
@@ -117,12 +121,6 @@ function getTimeGroup(iso: string): TimeGroupKey {
   return "更早";
 }
 
-interface TurnTraceState {
-  startedAt: number;
-  durationMs?: number;
-  entries: TraceEntry[];
-}
-
 function splitInlineThinkContent(raw: string): {
   thinkingBlocks: string[];
   visibleContent: string;
@@ -153,6 +151,7 @@ function splitInlineThinkContent(raw: string): {
 }
 
 export function CodexChatView({
+  streams,
   project,
   tasks,
   pendingContext,
@@ -160,6 +159,7 @@ export function CodexChatView({
   onNewProject,
   onOpenWorkspace,
   onOpenCliSettings,
+  onOpenRoutingSettings,
   onTaskCreated,
   mainSidebarCollapsed = false,
   onExpandMainSidebar,
@@ -176,9 +176,14 @@ export function CodexChatView({
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionSearch, setSessionSearch] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [activeSession, setActiveSession] = useState<ChatSessionRecord | null>(null);
-  const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
+  const activeSessionId = useSyncExternalStore(streams.subscribe, streams.selection, streams.selection) ?? null;
+  const setActiveSessionId = streams.select;
+  const turns = useSyncExternalStore(streams.subscribe, streams.snapshot, streams.snapshot);
+  const turn = activeSessionId ? turns.get(activeSessionId) : undefined;
+  const [loadedSession, setActiveSession] = useState<ChatSessionRecord | null>(null);
+  const activeSession = turn?.session ?? (loadedSession?.id === activeSessionId ? loadedSession : null);
+  const [history, setMessages] = useState<ChatMessageRecord[]>([]);
+  const messages = messagesWithTurn(history[0]?.session_id === activeSessionId ? history : [], turn);
   const [messagesLoading, setMessagesLoading] = useState(false);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -198,9 +203,9 @@ export function CodexChatView({
   const [draftNetworkAccess, setDraftNetworkAccess] = useState(false);
 
   // Streaming & trace state
-  const [streaming, setStreaming] = useState(false);
-  const [statusLine, setStatusLine] = useState("");
-  const [turnTraces, setTurnTraces] = useState<Record<string, TurnTraceState>>({});
+  const streaming = turn ? turn.running : activeSession?.status === "running";
+  const statusLine = turn?.statusLine ?? (streaming ? "正在等待回复完成" : "");
+  const [turnTraces, setTurnTraces] = useState<Record<string, TurnTrace>>({});
   const [convertingMsgId, setConvertingMsgId] = useState<string | null>(null);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
 
@@ -209,11 +214,12 @@ export function CodexChatView({
   const isNearBottomRef = useRef(true);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
-  const abortCtrlRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<RichPromptEditorHandle | null>(null);
   const prevProjectIdRef = useRef<string | null>(projectId);
   const pendingEnableNetworkRef = useRef(false);
+  const pendingSandboxModeRef = useRef<ChatSandboxMode | null>(null);
+  const [grantingDbSecrets, setGrantingDbSecrets] = useState(false);
   const justCreatedId = useRef<string | null>(null);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
@@ -255,38 +261,22 @@ export function CodexChatView({
       const res = await api.listCodexChatSessions(projectId);
       if (prevProjectIdRef.current !== projectId) return;
       setSessions(res.sessions);
-      setActiveSessionId((curr) =>
-        curr && res.sessions.some((s) => s.id === curr) ? curr : (res.sessions[0]?.id ?? null),
-      );
+      const selected = streams.selection();
+      setActiveSessionId(selected === null || res.sessions.some(s => s.id === selected)
+        ? selected ?? null : res.sessions[0]?.id ?? null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "加载对话列表失败");
     } finally {
       if (prevProjectIdRef.current === projectId) setSessionsLoading(false);
     }
-  }, [projectId, toast]);
+  }, [projectId, streams, setActiveSessionId, toast]);
 
   useEffect(() => {
-    abortCtrlRef.current?.abort();
-    setStreaming(false);
-    setActiveSessionId(null);
-    setActiveSession(null);
-    setMessages([]);
-    setTurnTraces({});
-    setConfirmDeleteId(null);
-    if (prevProjectIdRef.current !== projectId) {
-      setAttachments([]);
-      setInput("");
-      setSessionSearch("");
-      setDraftRuntime(null);
-      setDraftModel("");
-      setDraftEffort("default");
-      setDraftTarget("auto");
-      setRuntimeInfo(null);
-      prevProjectIdRef.current = projectId;
-    }
     if (!projectId) return;
+    prevProjectIdRef.current = projectId;
     void loadContextCatalog();
     void loadSessions();
+    return () => { prevProjectIdRef.current = null; };
   }, [projectId, loadContextCatalog, loadSessions]);
 
   // Consume context handed over from Project Space
@@ -306,16 +296,29 @@ export function CodexChatView({
       setDraftNetworkAccess(true);
       pendingEnableNetworkRef.current = true;
     }
+    if (pendingContext.sandboxMode) {
+      setDraftSandboxMode(pendingContext.sandboxMode);
+      pendingSandboxModeRef.current = pendingContext.sandboxMode;
+    }
     onConsumePendingContext?.();
     window.setTimeout(() => composerRef.current?.focus(), 40);
   }, [pendingContext, onConsumePendingContext]);
 
   useEffect(() => {
-    if (!projectId || !activeSession || !pendingEnableNetworkRef.current) return;
-    pendingEnableNetworkRef.current = false;
-    if (activeSession.network_access) return;
+    if (!projectId || !activeSession) return;
+    const patch: Parameters<typeof api.updateCodexChatSession>[2] = {};
+    if (pendingEnableNetworkRef.current) {
+      pendingEnableNetworkRef.current = false;
+      if (!activeSession.network_access) patch.network_access = true;
+    }
+    if (pendingSandboxModeRef.current) {
+      const nextMode = pendingSandboxModeRef.current;
+      pendingSandboxModeRef.current = null;
+      if (activeSession.sandbox_mode !== nextMode) patch.sandbox_mode = nextMode;
+    }
+    if (Object.keys(patch).length === 0) return;
     void api
-      .updateCodexChatSession(projectId, activeSession.id, { network_access: true })
+      .updateCodexChatSession(projectId, activeSession.id, patch)
       .then((res) => {
         setActiveSession(res.session);
         setSessions((prev) =>
@@ -340,15 +343,26 @@ export function CodexChatView({
       setMessagesLoading(false);
       return;
     }
+    const requestedTurn = streams.snapshot().get(activeSessionId);
     let active = true;
     setMessagesLoading(true);
     setConfirmDeleteId(null);
-    api
+    let timer: ReturnType<typeof setTimeout>;
+    const readHistory = () => api
       .getCodexChatSession(projectId, activeSessionId)
       .then((res) => {
         if (!active) return;
         setActiveSession(res.session);
         setMessages(res.messages);
+        setSessions(prev => prev.map(s => s.id === res.session.id ? { ...s, ...res.session } : s));
+        if (requestedTurn && !requestedTurn.running && res.session.status !== "running") {
+          setTurnTraces(prev => ({ ...prev, [requestedTurn.assistant.id]: requestedTurn.trace }));
+          streams.retire(activeSessionId, requestedTurn);
+        }
+        // Another tab owns the SSE connection. Only the terminal result is persisted.
+        if (res.session.status === "running" && !streams.snapshot().has(activeSessionId)) {
+          timer = setTimeout(readHistory, 1500);
+        }
         setTitleDraft(res.session.title);
         isNearBottomRef.current = true;
         window.setTimeout(() => scrollToBottom("auto"), 30);
@@ -361,10 +375,21 @@ export function CodexChatView({
       .finally(() => {
         if (active) setMessagesLoading(false);
       });
+    void readHistory();
     return () => {
+      clearTimeout(timer);
       active = false;
     };
-  }, [projectId, activeSessionId, toast, scrollToBottom]);
+  }, [projectId, activeSessionId, streams, setActiveSessionId, toast, scrollToBottom]);
+
+  useEffect(() => {
+    if (!turn || turn.running || messagesLoading || loadedSession?.id !== turn.session.id) return;
+    setActiveSession(turn.session);
+    setSessions(prev => prev.map(s => s.id === turn.session.id ? { ...s, ...turn.session } : s));
+    setMessages(prev => messagesWithTurn(prev, turn));
+    setTurnTraces(prev => ({ ...prev, [turn.assistant.id]: turn.trace }));
+    streams.retire(turn.session.id, turn);
+  }, [turn, loadedSession, messagesLoading, streams]);
 
   // Smooth smart auto-scroll during streaming or new messages
   const lastMsg = messages[messages.length - 1];
@@ -381,6 +406,49 @@ export function CodexChatView({
     () => resolveActiveLocalAgent(runtimeInfo, projectId ?? undefined, currentTarget, currentRuntime),
     [runtimeInfo, projectId, currentTarget, currentRuntime],
   );
+  const activeLocalBinding = useMemo(
+    () =>
+      activeLocalAgent && projectId
+        ? activeLocalAgent.bindings.find((b) => b.project_id === projectId) ?? null
+        : null,
+    [activeLocalAgent, projectId],
+  );
+  const attachedExternalDbs = useMemo(
+    () =>
+      attachments
+        .filter((att) => att.kind === "database")
+        .map((att) =>
+          workspaceDatabases.find(
+            (db) =>
+              db.source === "external" &&
+              (db.id === att.ref || db.env_var === att.ref || db.host_preview === att.ref || db.name === att.label),
+          ),
+        )
+        .filter((db): db is WorkspaceDatabaseEntry => Boolean(db)),
+    [attachments, workspaceDatabases],
+  );
+  const showDbSecretWarning =
+    attachedExternalDbs.length > 0 &&
+    Boolean(activeLocalAgent) &&
+    activeLocalBinding !== null &&
+    !activeLocalBinding.allow_datasource_secrets;
+
+  const handleGrantLocalDbSecrets = async () => {
+    if (!projectId || !activeLocalAgent || grantingDbSecrets) return;
+    setGrantingDbSecrets(true);
+    try {
+      await api.updateProjectAgentBinding(projectId, activeLocalAgent.id, {
+        allow_datasource_secrets: true,
+      });
+      await loadContextCatalog();
+      toast.success(`已为「${activeLocalAgent.name}」开启数据源凭证授权`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "开启数据源凭证授权失败");
+    } finally {
+      setGrantingDbSecrets(false);
+    }
+  };
+
   const currentModel = activeSession?.model ?? draftModel;
   const currentEffort = activeSession ? activeSession.reasoning_effort ?? "default" : draftEffort;
   const targetDefaultModel = resolveDefaultModelForTarget(
@@ -391,10 +459,14 @@ export function CodexChatView({
   const activeConfiguredModel = currentModel || targetDefaultModel;
   const currentSandboxMode = activeSession?.sandbox_mode ?? draftSandboxMode;
   const currentNetworkAccess = activeSession?.network_access ?? draftNetworkAccess;
-  const settingsBusy = savingSettings || sessionsLoading || !!(activeSessionId && activeSession?.id !== activeSessionId);
+  const showReadOnlyDbReadyHint =
+    attachedExternalDbs.length > 0 &&
+    currentSandboxMode === "read-only" &&
+    (!activeLocalAgent || Boolean(activeLocalBinding?.allow_datasource_secrets));
+  const settingsBusy = savingSettings || sessionsLoading || messagesLoading || !!(activeSessionId && activeSession?.id !== activeSessionId);
 
   const startDraft = () => {
-    if (streaming || settingsBusy) return;
+    if (settingsBusy) return;
     setDraftRuntime(currentRuntime);
     setDraftModel(currentModel);
     setDraftEffort(currentEffort);
@@ -420,7 +492,10 @@ export function CodexChatView({
         sandbox_mode: currentSandboxMode,
         network_access: currentNetworkAccess,
       });
-      if (prevProjectIdRef.current !== projectId) return null;
+      if (prevProjectIdRef.current !== projectId) {
+        if (streams.selection() == null) streams.select(res.session.id);
+        return res.session;
+      }
       justCreatedId.current = res.session.id;
       setSessions((prev) => [res.session, ...prev]);
       setActiveSessionId(res.session.id);
@@ -442,13 +517,9 @@ export function CodexChatView({
     try {
       await api.deleteCodexChatSession(projectId, sessionId);
       setConfirmDeleteId(null);
-      setSessions((prev) => {
-        const next = prev.filter((s) => s.id !== sessionId);
-        if (activeSessionId === sessionId) {
-          setActiveSessionId(next[0]?.id ?? null);
-        }
-        return next;
-      });
+      streams.retire(sessionId, streams.snapshot().get(sessionId));
+      setSessions(prev => prev.filter(s => s.id !== sessionId));
+      if (streams.selection() === sessionId) setActiveSessionId(sessions.find(s => s.id !== sessionId)?.id ?? null);
       toast.success("已删除会话");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "删除会话失败");
@@ -486,233 +557,26 @@ export function CodexChatView({
       setAttachments([]);
     }
     isNearBottomRef.current = true;
-    setStreaming(true);
-    setStatusLine("正在连接项目空间与 CLI");
-
-    const startedAt = Date.now();
-    const tempUserId = `tmp-u-${startedAt}`;
-    const tempAssistantId = `tmp-a-${startedAt}`;
-    const now = new Date().toISOString();
-
-    setTurnTraces((prev) => ({
-      ...prev,
-      [tempAssistantId]: { startedAt, entries: [] },
-    }));
-
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: tempUserId,
-        session_id: session!.id,
-        role: "user",
-        content: text,
-        events: [],
-        attachments: currentAttachments,
-        status: "done",
-        created_at: now,
-      },
-      {
-        id: tempAssistantId,
-        session_id: session!.id,
-        role: "assistant",
-        content: "",
-        events: [],
-        attachments: [],
-        status: "streaming",
-        created_at: now,
-      },
-    ]);
-
-    let realAssistantId = tempAssistantId;
-    let traceSeq = 0;
-    const controller = new AbortController();
-    abortCtrlRef.current = controller;
-
-    const appendTrace = (msgId: string, kind: "status" | "reasoning", entryText: string) => {
-      if (kind === "status") {
-        const clean = entryText.trim();
-        if (!clean) return;
-        traceSeq += 1;
-        const entryId = `tr-${startedAt}-${traceSeq}`;
-        setTurnTraces((prev) => {
-          const curr = prev[msgId] ?? { startedAt, entries: [] };
-          const last = curr.entries[curr.entries.length - 1];
-          if (last && last.kind === "status" && last.text === clean) return prev;
-          return {
-            ...prev,
-            [msgId]: { ...curr, entries: [...curr.entries, { id: entryId, kind, text: clean }] },
-          };
-        });
-        return;
-      }
-
-      if (!entryText) return;
-      traceSeq += 1;
-      const entryId = `tr-${startedAt}-${traceSeq}`;
-      setTurnTraces((prev) => {
-        const curr = prev[msgId] ?? { startedAt, entries: [] };
-        const last = curr.entries[curr.entries.length - 1];
-        // Merge consecutive reasoning deltas smoothly into the active reasoning block
-        if (last && last.kind === "reasoning") {
-          const updatedLast = { ...last, text: `${last.text}${entryText}` };
-          return {
-            ...prev,
-            [msgId]: { ...curr, entries: [...curr.entries.slice(0, -1), updatedLast] },
-          };
-        }
-        return {
-          ...prev,
-          [msgId]: { ...curr, entries: [...curr.entries, { id: entryId, kind, text: entryText.trimStart() }] },
-        };
-      });
-    };
-
+    if (turn) setTurnTraces(prev => ({ ...prev, [turn.assistant.id]: turn.trace }));
+    setMessages(messages);
     try {
-      await api.streamCodexChatMessage(
-        projectId,
-        session.id,
-        { content: text, attachments: currentAttachments },
-        (ev) => {
-          if (ev.type === "session") {
-            const oldId = realAssistantId;
-            realAssistantId = ev.assistant_message_id;
-            setActiveSession(ev.session);
-            setTitleDraft(ev.session.title);
-            setSessions((prev) =>
-              prev.map((s) => (s.id === ev.session.id ? { ...s, ...ev.session } : s)),
-            );
-            setTurnTraces((prev) => {
-              const carried = prev[oldId] ?? { startedAt, entries: [] };
-              const next = { ...prev, [realAssistantId]: carried };
-              if (oldId !== realAssistantId) delete next[oldId];
-              return next;
-            });
-            setMessages((prev) =>
-              prev.map((m) => {
-                if (m.id === tempUserId) return ev.user_message;
-                if (m.id === tempAssistantId) return { ...m, id: realAssistantId };
-                return m;
-              }),
-            );
-          } else if (ev.type === "session_updated") {
-            setActiveSession((curr) => (curr?.id === ev.session.id ? { ...curr, ...ev.session } : curr));
-            setTitleDraft((curr) => (activeSession?.id === ev.session.id || !curr ? ev.session.title : curr));
-            setSessions((prev) =>
-              prev.map((s) => (s.id === ev.session.id ? { ...s, ...ev.session } : s)),
-            );
-          } else if (ev.type === "status") {
-            setStatusLine(ev.message);
-            appendTrace(realAssistantId, "status", ev.message);
-          } else if (ev.type === "reasoning") {
-            setStatusLine("正在深度推理");
-            appendTrace(realAssistantId, "reasoning", ev.text);
-          } else if (ev.type === "tool") {
-            setStatusLine(`执行工具 · ${ev.event.tool}`);
-            setMessages((prev) =>
-              prev.map((m) => {
-                if (m.id !== realAssistantId) return m;
-                const exists = m.events.some((e) => e.id === ev.event.id);
-                const nextEvents = exists
-                  ? m.events.map((e) => (e.id === ev.event.id ? ev.event : e))
-                  : [...m.events, ev.event];
-                return { ...m, events: nextEvents };
-              }),
-            );
-          } else if (ev.type === "text_delta") {
-            setStatusLine("正在生成回复");
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === realAssistantId ? { ...m, content: m.content + ev.delta } : m,
-              ),
-            );
-          } else if (ev.type === "text_replace") {
-            setMessages((prev) =>
-              prev.map((m) => (m.id === realAssistantId ? { ...m, content: ev.text } : m)),
-            );
-          } else if (ev.type === "done") {
-            setTurnTraces((prev) => {
-              const curr = prev[realAssistantId];
-              if (!curr) return prev;
-              return {
-                ...prev,
-                [realAssistantId]: { ...curr, durationMs: Date.now() - curr.startedAt },
-              };
-            });
-            setActiveSession(ev.session);
-            setSessions((prev) =>
-              prev.map((s) =>
-                s.id === ev.session.id
-                  ? {
-                      ...s,
-                      ...ev.session,
-                      last_message_preview: ev.message.content.slice(0, 120),
-                    }
-                  : s,
-              ),
-            );
-            setMessages((prev) =>
-              prev.map((m) => (m.id === realAssistantId ? ev.message : m)),
-            );
-          } else if (ev.type === "error") {
-            toast.error(ev.error);
-            setTurnTraces((prev) => {
-              const curr = prev[realAssistantId];
-              if (!curr) return prev;
-              return {
-                ...prev,
-                [realAssistantId]: { ...curr, durationMs: Date.now() - curr.startedAt },
-              };
-            });
-            if (ev.message) {
-              setMessages((prev) =>
-                prev.map((m) => (m.id === realAssistantId ? ev.message! : m)),
-              );
-            } else {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === realAssistantId
-                    ? { ...m, status: "error", content: m.content || `执行失败：${ev.error}` }
-                    : m,
-                ),
-              );
-            }
-          }
-        },
-        controller.signal,
-      );
-      if (session.sandbox_mode === "workspace-write") {
-        void loadContextCatalog();
-      }
+      await streams.send(session, text, currentAttachments);
+      if (session.sandbox_mode === "workspace-write") void loadContextCatalog();
     } catch (err) {
-      if ((err as Error)?.name !== "AbortError") {
-        const msg = err instanceof Error ? err.message : "发送失败";
-        toast.error(msg);
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === realAssistantId
-              ? { ...m, status: "error", content: m.content || `请求失败：${msg}` }
-              : m,
-          ),
-        );
-      }
-    } finally {
-      abortCtrlRef.current = null;
-      setStreaming(false);
-      setStatusLine("");
+      toast.error(err instanceof Error ? err.message : "发送失败");
     }
   };
 
   const handleAbort = async () => {
-    abortCtrlRef.current?.abort();
-    if (projectId && activeSession) {
+    if (!projectId || !activeSessionId) return;
+    if (turn?.running) streams.abort(activeSessionId);
+    else {
       try {
-        await api.abortCodexChatSession(projectId, activeSession.id);
-      } catch {
-        // ignore
+        await api.abortCodexChatSession(projectId, activeSessionId);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "停止回复失败");
       }
     }
-    setStreaming(false);
-    setStatusLine("");
   };
 
   const handleRegenerateTitle = async (sessionId: string) => {
@@ -783,13 +647,16 @@ export function CodexChatView({
   // Filter & group sessions by time for Sidebar Nav
   const groupedSessions = useMemo(() => {
     const q = sessionSearch.trim().toLowerCase();
+    const records = new Map(sessions.map(s => [s.id, s]));
+    for (const [id, turn] of turns) records.set(id, { ...records.get(id), ...turn.session });
+    const rows = Array.from(records.values());
     const filtered = q
-      ? sessions.filter(
+      ? rows.filter(
           (s) =>
             s.title.toLowerCase().includes(q) ||
             (s.last_message_preview?.toLowerCase().includes(q) ?? false),
         )
-      : sessions;
+      : rows;
 
     const groups: Array<{ label: TimeGroupKey; items: ChatSessionRecord[] }> = [];
     const map = new Map<TimeGroupKey, ChatSessionRecord[]>();
@@ -808,7 +675,7 @@ export function CodexChatView({
       }
     }
     return groups;
-  }, [sessions, sessionSearch]);
+  }, [sessions, sessionSearch, turns]);
 
   if (!project) {
     return (
@@ -882,7 +749,7 @@ export function CodexChatView({
             )}
             <button
               type="button"
-              disabled={streaming || settingsBusy}
+              disabled={settingsBusy}
               onClick={startDraft}
               className="flex-1 h-8 px-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] hover:bg-[var(--surface-hover)] hover:border-[var(--border-strong)] text-[12.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 shadow-[var(--rd-shadow-sm)] transition-colors cursor-pointer"
             >
@@ -928,7 +795,7 @@ export function CodexChatView({
           <div className="flex-1 overflow-y-auto rd-scroll px-2 pb-2 space-y-3">
             {sessionsLoading ? (
               <div className="py-8 text-center text-[12px] text-[var(--text-muted)]">加载会话…</div>
-            ) : sessions.length === 0 ? (
+            ) : sessions.length === 0 && turns.size === 0 ? (
               <div className="px-3 py-8 text-center text-[12px] text-[var(--text-muted)] leading-relaxed">
                 暂无历史对话，点击上方「新建对话」或在右侧直接输入即可开始。
               </div>
@@ -943,13 +810,17 @@ export function CodexChatView({
                     {group.label}
                   </div>
                   {group.items.map((s) => {
+                    const rowTurn = turns.get(s.id);
                     const active = s.id === activeSessionId;
                     const confirming = confirmDeleteId === s.id;
                     return (
                       <div
                         key={s.id}
                         onClick={() => {
-                          if (!streaming && !savingSettings && !confirming) setActiveSessionId(s.id);
+                          if (!savingSettings && !confirming) {
+                            setEditingTitle(false);
+                            setActiveSessionId(s.id);
+                          }
                         }}
                         className={`group rounded-lg px-2 py-1.5 transition-colors cursor-pointer ${
                           active
@@ -1014,6 +885,7 @@ export function CodexChatView({
                                 type="button"
                                 title="删除会话"
                                 aria-label="删除会话"
+                                disabled={rowTurn?.running}
                                 onClick={() => setConfirmDeleteId(s.id)}
                                 className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-[var(--text-muted)] hover:text-rose-500 transition-opacity cursor-pointer shrink-0"
                               >
@@ -1027,7 +899,7 @@ export function CodexChatView({
                             {s.runtime}
                             {s.runtime === "codex" && s.network_access ? " · 联网" : ""}
                           </span>
-                          <span>{formatRelativeTime(s.updated_at)}</span>
+                          <span>{rowTurn?.running || (active && streaming) ? "回复中" : formatRelativeTime(s.updated_at)}</span>
                         </div>
                       </div>
                     );
@@ -1075,7 +947,7 @@ export function CodexChatView({
       {/* Main Agent Column */}
       <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
         {/* Clean Minimal Top Header */}
-        <header className="shrink-0 h-12 px-4 border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)]/90 backdrop-blur-sm flex items-center justify-between gap-3">
+        <header className="shrink-0 h-13 px-4 border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)]/90 backdrop-blur-sm flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 min-w-0">
             {!sidebarOpen && (
               <div className="flex items-center gap-1 shrink-0">
@@ -1103,7 +975,7 @@ export function CodexChatView({
                   type="button"
                   title="新建对话"
                   aria-label="新建对话"
-                  disabled={streaming || settingsBusy}
+                  disabled={settingsBusy}
                   onClick={startDraft}
                   className="h-7 w-7 rounded-lg inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                 >
@@ -1319,7 +1191,7 @@ export function CodexChatView({
                   const isUser = msg.role === "user";
                   const isLastMessage = idx === messages.length - 1;
                   const isStreamingMsg = msg.status === "streaming";
-                  const trace = turnTraces[msg.id];
+                  const trace = turn?.assistant.id === msg.id ? turn.trace : turnTraces[msg.id];
                   const prevUserMsg =
                     !isUser && idx > 0 && messages[idx - 1]?.role === "user"
                       ? messages[idx - 1]
@@ -1542,7 +1414,43 @@ export function CodexChatView({
 
         {/* Bottom Floating Prompt Bar */}
         <div className="shrink-0 px-4 pt-2 pb-4 bg-gradient-to-t from-[var(--surface-canvas)] via-[var(--surface-canvas)]/95 to-transparent">
-          <div className="max-w-[740px] mx-auto">
+          <div className="max-w-[740px] mx-auto space-y-2">
+            {showDbSecretWarning && activeLocalAgent && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/8 px-3 py-2 text-[12px] text-amber-800 dark:text-amber-200">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Icon name="shield-alert" size={14} className="shrink-0 text-amber-500" />
+                  <span className="leading-snug">
+                    本机节点「{activeLocalAgent.name}」尚未开启「允许数据源凭证」，只读查库工具暂无法连接
+                    {attachedExternalDbs.map((d) => `「${d.name}」`).join("、")}。
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <Button
+                    size="xs"
+                    variant="secondary"
+                    icon="key-round"
+                    loading={grantingDbSecrets}
+                    onClick={() => void handleGrantLocalDbSecrets()}
+                  >
+                    一键开启授权
+                  </Button>
+                  {onOpenRoutingSettings && (
+                    <Button size="xs" variant="ghost" onClick={onOpenRoutingSettings}>
+                      节点设置
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
+            {showReadOnlyDbReadyHint && (
+              <div className="flex items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-1.5 text-[11.5px] text-emerald-700 dark:text-emerald-300">
+                <Icon name="shield-check" size={13} className="shrink-0 text-emerald-500" />
+                <span>
+                  只读排查已就绪：将通过 Relaydesk MCP 安全只读查询
+                  {attachedExternalDbs.map((d) => `「${d.name}」`).join("、")}，不会修改本地代码或写入数据库。
+                </span>
+              </div>
+            )}
             <PromptBar
               projectId={project.id}
               input={input}

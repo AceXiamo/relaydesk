@@ -586,6 +586,7 @@ export interface UtilityAiTestResult {
 export type ChatStreamEvent =
   | { type: "session"; session: ChatSessionRecord; user_message: ChatMessageRecord; assistant_message_id: string }
   | { type: "session_updated"; session: ChatSessionRecord }
+  | { type: "task_updated"; task_id?: string; action: string }
   | { type: "status"; message: string; external_session_id?: string }
   | { type: "reasoning"; text: string }
   | { type: "tool"; event: ChatToolEvent }

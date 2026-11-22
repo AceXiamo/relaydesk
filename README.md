@@ -37,8 +37,9 @@ pnpm start
 4. 在开发机运行 `agent/relay.py` 领取任务并在独立 Git worktree 中执行。
 5. Agent 执行期间可随时「请求接手」或「强制接手」；完成后进入「待验收」供本地检查验收。
 
-| 接入 | 配置 |
+| 接入 / 运维 | 文档 |
 | --- | --- |
+| Pier 生产部署、CI 镜像构建与全自动自我迭代 SOP | [Pier 部署与迭代指南](docs/deployment.md) |
 | 应用反馈组件、Telegram 群机器人 | [收集端接入说明](integrations/README.md) |
 | 本机 coding agent、工作树、交接与恢复 | [执行器说明](agent/README.md) |
 | 本机 Local Bridge 节点、模型目录与执行优先级路由 | [架构与运维指南](docs/local-bridge-and-model-routing.md) |

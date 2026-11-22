@@ -88,6 +88,11 @@ export function buildCliInvocation(params: {
   datasourceEnv?: Record<string, string>;
   datasourceSecrets?: string[];
   pgReadOnlyEnforced?: boolean;
+  mcp?: {
+    url: string;
+    tokenEnvVar: string;
+    claudeConfigPath?: string;
+  };
 }): { args: string[]; env: NodeJS.ProcessEnv; secrets: string[] } {
   const {
     dbPath,
@@ -179,6 +184,14 @@ export function buildCliInvocation(params: {
     if (effort !== "default") {
       overrides.push("-c", `model_reasoning_effort=${JSON.stringify(codexEffort[effort])}`);
     }
+    if (params.mcp?.url) {
+      overrides.push(
+        "-c",
+        `mcp_servers.relaydesk.url=${JSON.stringify(params.mcp.url)}`,
+        "-c",
+        `mcp_servers.relaydesk.bearer_token_env_var=${JSON.stringify(params.mcp.tokenEnvVar)}`,
+      );
+    }
 
     // Codex only honors sandbox_workspace_write.network_access under workspace-write sandbox.
     const effectiveCodexSandbox: ChatSandboxMode = networkAccess ? "workspace-write" : sandboxMode;
@@ -241,6 +254,7 @@ export function buildCliInvocation(params: {
     sandboxMode === "workspace-write"
       ? "Read,Grep,Glob,Bash,Edit,Write"
       : "Read,Grep,Glob,Bash";
+  const allowedTools = params.mcp?.claudeConfigPath ? `${tools},mcp__relaydesk__*` : tools;
   const args = [
     "-p",
     "--output-format",
@@ -252,7 +266,8 @@ export function buildCliInvocation(params: {
     "--tools",
     tools,
     "--allowedTools",
-    tools,
+    allowedTools,
+    ...(params.mcp?.claudeConfigPath ? ["--mcp-config", params.mcp.claudeConfigPath] : []),
     ...addDirArgs,
     ...(effectiveModel ? ["--model", effectiveModel] : []),
     ...effortArgs,
@@ -403,14 +418,46 @@ export function handleCodexJsonLine(
     }
 
     if (itemType === "mcp_tool_call" || itemType === "tool_call") {
+      const serverName = typeof item.server === "string" && item.server ? `${item.server}.` : "";
       const toolName = String(item.tool ?? item.name ?? "tool");
+      const rawArgs = item.arguments && typeof item.arguments === "object"
+        ? (item.arguments as Record<string, unknown>)
+        : undefined;
+      const argHint = rawArgs
+        ? typeof rawArgs.query === "string"
+          ? rawArgs.query
+          : typeof rawArgs.task === "string" || typeof rawArgs.task === "number"
+            ? String(rawArgs.task)
+            : typeof rawArgs.datasource === "string"
+              ? rawArgs.datasource
+              : typeof rawArgs.title === "string"
+                ? rawArgs.title
+                : ""
+        : "";
+      const summary = argHint
+        ? `${serverName}${toolName}: ${redactSecrets(argHint, secrets).slice(0, 220)}`
+        : `${serverName}${toolName}`;
+      const resultObj = item.result && typeof item.result === "object"
+        ? (item.result as Record<string, unknown>)
+        : undefined;
+      const rawOut =
+        typeof item.error === "string"
+          ? item.error
+          : item.error && typeof item.error === "object" && typeof (item.error as Record<string, unknown>).message === "string"
+            ? String((item.error as Record<string, unknown>).message)
+            : resultObj && Array.isArray(resultObj.content)
+              ? extractTextFromContentArray(resultObj.content)
+              : typeof item.output === "string"
+                ? item.output
+                : undefined;
       upsertToolEvent(
         state,
         {
           id: itemId,
-          tool: toolName,
-          summary: `${toolName}`,
+          tool: `${serverName}${toolName}`,
+          summary,
           status: type === "item.completed" ? (item.error ? "error" : "done") : "running",
+          output: rawOut !== undefined ? redactSecrets(rawOut, secrets).slice(0, MAX_TOOL_OUTPUT_CHARS) : undefined,
         },
         emit,
       );
@@ -519,13 +566,21 @@ export function handleClaudeJsonLine(
           const detail =
             typeof input.command === "string"
               ? input.command
-              : typeof input.file_path === "string"
-                ? basename(input.file_path)
-                : typeof input.path === "string"
-                  ? input.path
-                  : typeof input.pattern === "string"
-                    ? input.pattern
-                    : name;
+              : typeof input.query === "string"
+                ? input.query
+                : typeof input.task === "string" || typeof input.task === "number"
+                  ? String(input.task)
+                  : typeof input.datasource === "string"
+                    ? input.datasource
+                    : typeof input.title === "string"
+                      ? input.title
+                      : typeof input.file_path === "string"
+                        ? basename(input.file_path)
+                        : typeof input.path === "string"
+                          ? input.path
+                          : typeof input.pattern === "string"
+                            ? input.pattern
+                            : name;
           upsertToolEvent(
             state,
             { id, tool: name, summary: `${name}: ${redactSecrets(detail, secrets).slice(0, 220)}`, status: "running" },

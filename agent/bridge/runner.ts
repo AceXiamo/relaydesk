@@ -1,9 +1,17 @@
 import { spawn } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { accessSync, constants, existsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { buildCliInvocation, createCliStreamParser, redactSecrets } from "../../server/cli-stream-parser.ts";
 import type { RunChatTurnResult } from "../../server/codex-chat.ts";
-import type { ChatReasoningEffort, ChatRuntime, ChatSandboxMode, ChatStreamEvent } from "../../app/lib/types.ts";
+import {
+  startRelaydeskMcpServer,
+  type RelaydeskMcpDatasourceMeta,
+  type RelaydeskMcpHandle,
+  type RelaydeskMcpTaskClient,
+} from "../../server/relaydesk-mcp.ts";
+import type { ChatReasoningEffort, ChatRuntime, ChatSandboxMode, ChatStreamEvent, WorkspaceDatabaseKind } from "../../app/lib/types.ts";
 import type { BridgeCatalog, BridgeCatalogConfig } from "./catalog.ts";
 import type { SpaceManifest } from "./space-sync.ts";
 
@@ -62,6 +70,36 @@ export function checkChat(p: ChatStart) {
   if (p.reasoning_effort && !["default", "off", "low", "medium", "high", "max"].includes(p.reasoning_effort))
     throw new Error("Invalid reasoning effort");
 }
+const VALID_DB_KINDS = new Set<WorkspaceDatabaseKind>(["sqlite", "postgres", "mysql", "redis", "mongodb", "other"]);
+
+function normalizeManifestDatabases(rows: unknown): RelaydeskMcpDatasourceMeta[] {
+  if (!Array.isArray(rows)) return [];
+  const out: RelaydeskMcpDatasourceMeta[] = [];
+  for (const row of rows.slice(0, 100)) {
+    if (!row || typeof row !== "object") continue;
+    const obj = row as Record<string, unknown>;
+    const name = typeof obj.name === "string" ? obj.name.trim() : "";
+    const kind = typeof obj.kind === "string" && VALID_DB_KINDS.has(obj.kind as WorkspaceDatabaseKind)
+      ? (obj.kind as WorkspaceDatabaseKind)
+      : "other";
+    const source = obj.source === "workspace_file" || obj.source === "external" ? obj.source : null;
+    if (!name || !source) continue;
+    out.push({
+      id: typeof obj.id === "string" ? obj.id : undefined,
+      name,
+      kind,
+      source,
+      file_path: typeof obj.file_path === "string" ? obj.file_path : undefined,
+      env_var: typeof obj.env_var === "string" ? obj.env_var : undefined,
+      host_preview: typeof obj.host_preview === "string" ? obj.host_preview : undefined,
+      read_only: typeof obj.read_only === "boolean" ? obj.read_only : true,
+      notes: typeof obj.notes === "string" ? obj.notes : undefined,
+      has_connection_url: typeof obj.has_connection_url === "boolean" ? obj.has_connection_url : undefined,
+    });
+  }
+  return out;
+}
+
 interface RunnerOptions {
   config: BridgeCatalogConfig;
   catalog: BridgeCatalog;
@@ -70,6 +108,8 @@ interface RunnerOptions {
   homeDir: string;
   spaceDir: string;
   allowSecrets: boolean;
+  enableMcp?: boolean;
+  taskClient?: RelaydeskMcpTaskClient;
   signal: AbortSignal;
   prompt: string;
   onEvent(event: ChatStreamEvent): void;
@@ -111,6 +151,29 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   const datasource = datasourceValues(p.datasource_env);
   const secrets = [...datasource.secrets, String(o.config.agent_token || "")].filter(Boolean);
   const write = p.sandbox_mode === "workspace-write";
+  let mcpHandle: RelaydeskMcpHandle | null = null;
+  let claudeMcpConfigPath: string | null = null;
+  if (o.enableMcp) {
+    mcpHandle = await startRelaydeskMcpServer({
+      projectId: p.project_id,
+      spaceDir: o.spaceDir,
+      databases: normalizeManifestDatabases(p.workspace_manifest?.databases),
+      datasourceEnv: o.allowSecrets ? datasource.env : {},
+      allowDatasourceSecrets: o.allowSecrets,
+      secrets,
+      taskClient: o.taskClient,
+      signal: o.signal,
+    });
+    secrets.push(mcpHandle.token);
+    if (runtime === "claude") {
+      claudeMcpConfigPath = join(tmpdir(), `relaydesk-mcp-${randomUUID()}.json`);
+      writeFileSync(claudeMcpConfigPath, JSON.stringify(mcpHandle.claudeConfigObject()), {
+        mode: 0o600,
+        flag: "wx",
+      });
+    }
+  }
+  try {
   const { args, env } = buildCliInvocation({
     dbPath: ":memory:",
     runtime,
@@ -125,12 +188,24 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     extraAddDirs: [o.spaceDir],
     resumeSessionId: p.resume_session_id || "",
     projectSettings: null,
+    ...(mcpHandle
+      ? {
+          mcp: {
+            url: mcpHandle.url,
+            tokenEnvVar: "RELAYDESK_MCP_TOKEN",
+            ...(claudeMcpConfigPath ? { claudeConfigPath: claudeMcpConfigPath } : {}),
+          },
+        }
+      : {}),
   });
   if (p.resume_session_id && write && runtime === "codex")
     args.splice(-2, 0, "-c", `sandbox_workspace_write.writable_roots=${JSON.stringify([o.spaceDir])}`);
   if (!write && runtime === "claude") {
     // Bash is an arbitrary writer even if Edit and Write are absent.
-    for (const flag of ["--tools", "--allowedTools"]) args[args.indexOf(flag) + 1] = "Read,Grep,Glob";
+    args[args.indexOf("--tools") + 1] = "Read,Grep,Glob";
+    args[args.indexOf("--allowedTools") + 1] = claudeMcpConfigPath
+      ? "Read,Grep,Glob,mcp__relaydesk__*"
+      : "Read,Grep,Glob";
   }
   env.HOME = o.homeDir;
   if (runtime === "codex" && !process.env.CODEX_HOME) env.CODEX_HOME = join(o.homeDir, ".codex");
@@ -142,6 +217,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   if (o.allowSecrets) Object.assign(env, datasource.env);
   if (o.allowSecrets && p.pg_read_only_enforced === true)
     env.PGOPTIONS = `${env.PGOPTIONS ?? ""} -c default_transaction_read_only=on`.trim();
+  if (mcpHandle && runtime === "codex") env.RELAYDESK_MCP_TOKEN = mcpHandle.token;
   env.RELAYDESK_SPACE_DIR = o.spaceDir;
   const protectedValues = [...new Set(secrets)].filter(Boolean).sort((a, b) => b.length - a.length);
   const clean = (value: string) => {
@@ -265,5 +341,17 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   } finally {
     await stopGroup();
     o.signal.removeEventListener("abort", abort);
+  }
+  } finally {
+    if (claudeMcpConfigPath && existsSync(claudeMcpConfigPath)) {
+      try {
+        unlinkSync(claudeMcpConfigPath);
+      } catch {
+        // ignore cleanup error
+      }
+    }
+    if (mcpHandle) {
+      await mcpHandle.close().catch(() => undefined);
+    }
   }
 }

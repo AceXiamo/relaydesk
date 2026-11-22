@@ -83,6 +83,13 @@ const cliRunEventSchema = z.object({
   body: text(24_000).default(""),
   sha: text(64).optional(),
 });
+const taskRpcSchema = z.object({
+  run_id: text(160).min(1),
+  project_id: text(64).min(1),
+  action: z.enum(["list_tasks", "get_task", "comment_task", "update_task", "transition_task", "create_task"]),
+  params: z.record(z.string(), z.unknown()).default({}),
+});
+const MUTATING_TASK_ACTIONS = new Set(["comment_task", "update_task", "transition_task", "create_task"]);
 function redact<T>(object: T, secrets: string[]): T {
   return JSON.parse(JSON.stringify(object, (key, value) => typeof value === "string" && key !== "type" && key !== "status"
     ? redactSecrets(value, secrets).replace(/rdbr_[a-f0-9]{48}/gi, "[redacted]") : value));
@@ -114,7 +121,9 @@ function streamOutput(onEvent: (event: ChatStreamEvent) => void, secrets: string
 }
 interface Run {
   id: string; project: string; session: string; write: boolean; owner: Connection; workdir: string;
-  onEvent: ReturnType<typeof streamOutput>; secrets: string[];
+  onEvent: ReturnType<typeof streamOutput>;
+  emitTaskUpdated: (mutated: { task_id?: string; action: string }) => void;
+  secrets: string[];
   finish: (result: RunChatTurnResult) => void; stop: (reason: string, aborted?: boolean) => void;
 }
 interface CliRunHandle {
@@ -306,6 +315,37 @@ export class BridgeHub {
       } catch (err) {
         this.send(conn, type + ".result", { ok: false, error: err instanceof ApiError ? err.message : "文件请求无效", status: err instanceof ApiError ? err.status : 400 }, id);
       }
+    } else if (type === "task.rpc") {
+      if (!id) throw new Error();
+      try {
+        const req = taskRpcSchema.parse(p);
+        const run = this.runs.get(req.run_id);
+        if (!run || run.owner !== conn || run.project !== req.project_id) {
+          throw new ApiError(403, "没有有效的对话执行上下文");
+        }
+        if (this.assertWorkspaceAccess(conn.id, req.project_id).workdir !== run.workdir) {
+          throw new ApiError(403, "项目目录绑定已失效");
+        }
+        const mutating = MUTATING_TASK_ACTIONS.has(req.action);
+        const { result, mutated } = this.store.transaction(mutating, () =>
+          this.store.chatAgentTaskOp(req.project_id, req.action, req.params),
+        );
+        if (mutated) {
+          run.emitTaskUpdated(mutated);
+        }
+        this.send(conn, "task.rpc.result", { ok: true, data: result }, id);
+      } catch (err) {
+        this.send(
+          conn,
+          "task.rpc.result",
+          {
+            ok: false,
+            error: err instanceof ApiError ? err.message : "工单操作请求无效",
+            status: err instanceof ApiError ? err.status : 400,
+          },
+          id,
+        );
+      }
     } else if (type === "project.bind.result") {
       const pending = id && conn.binds.get(id);
       if (!pending || p.project_id !== pending.project) return;
@@ -421,7 +461,9 @@ export class BridgeHub {
       const abort = () => stop("对话已中止", true);
       const timer = setTimeout(() => stop("本机节点执行超时"), RUN_TIMEOUT_MS).unref();
       this.runs.set(id, { id, session: payload.session_id, project: payload.project_id, workdir: binding.workdir,
-        owner: conn, write: payload.sandbox_mode === "workspace-write", onEvent: streamOutput(onEvent, secrets), secrets, finish, stop });
+        owner: conn, write: payload.sandbox_mode === "workspace-write", onEvent: streamOutput(onEvent, secrets),
+        emitTaskUpdated: (mutated) => onEvent({ type: "task_updated", task_id: mutated.task_id, action: mutated.action }),
+        secrets, finish, stop });
       if (signal.aborted) { abort(); return; }
       signal.addEventListener("abort", abort, { once: true });
       try { this.send(conn, "chat.start", { ...start, prompt: redactSecrets(start.prompt, secrets),

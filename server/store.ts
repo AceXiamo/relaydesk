@@ -1394,7 +1394,325 @@ export class Store {
       return toTaskView(this.getTaskRow(task.id));
     }
 
-    return toTaskView(task);
+    return toTaskView(this.getTaskRow(task.id));
+  }
+
+  findProjectTask(projectId: string, ref: unknown): RawTaskRow {
+    if (typeof ref === "number" && Number.isInteger(ref) && ref > 0) {
+      const row = this.db
+        .prepare("SELECT * FROM tasks WHERE project_id = ? AND number = ? LIMIT 1")
+        .get(projectId, ref) as unknown as RawTaskRow | undefined;
+      if (!row) throw new ApiError(404, `Task RD-${ref} not found`);
+      return row;
+    }
+    const raw = typeof ref === "string" ? ref.trim() : "";
+    if (!raw || raw.length > 128) {
+      throw new ApiError(400, "Invalid task reference");
+    }
+    const codeMatch = /^(?:rd-|#)?(\d+)$/i.exec(raw);
+    if (codeMatch) {
+      const num = Number(codeMatch[1]);
+      if (Number.isInteger(num) && num > 0) {
+        const byNum = this.db
+          .prepare("SELECT * FROM tasks WHERE project_id = ? AND number = ? LIMIT 1")
+          .get(projectId, num) as unknown as RawTaskRow | undefined;
+        if (byNum) return byNum;
+      }
+    }
+    const byId = this.db
+      .prepare("SELECT * FROM tasks WHERE project_id = ? AND id = ? LIMIT 1")
+      .get(projectId, raw) as unknown as RawTaskRow | undefined;
+    if (!byId) throw new ApiError(404, `Task ${raw} not found`);
+    return byId;
+  }
+
+  chatAgentTaskOp(
+    projectId: string,
+    action: string,
+    params: Record<string, unknown>,
+  ): { result: unknown; mutated?: { task_id?: string; action: string } } {
+    this.getProjectRow(projectId);
+
+    if (action === "list_tasks") {
+      const statusFilter =
+        typeof params.status === "string" && params.status.trim()
+          ? params.status.trim()
+          : "";
+      if (statusFilter && !STATUSES.has(statusFilter as TaskStatus)) {
+        throw new ApiError(400, "Invalid status filter");
+      }
+      const priorityFilter =
+        typeof params.priority === "string" && params.priority.trim()
+          ? params.priority.trim()
+          : "";
+      if (priorityFilter && !PRIORITIES.has(priorityFilter as TaskPriority)) {
+        throw new ApiError(400, "Invalid priority filter");
+      }
+      const search =
+        typeof params.search === "string" ? params.search.trim().toLowerCase() : "";
+      const includeDone = params.include_done !== false;
+      const includeMerged = params.include_merged === true;
+      const limit = Math.max(
+        1,
+        Math.min(100, Math.floor(Number(params.limit) || 30)),
+      );
+
+      let tasks = this.listTasks(projectId);
+      if (!includeMerged) tasks = tasks.filter((t) => !t.merged_into);
+      if (!includeDone && !statusFilter) tasks = tasks.filter((t) => t.status !== "done");
+      if (statusFilter) tasks = tasks.filter((t) => t.status === statusFilter);
+      if (priorityFilter) tasks = tasks.filter((t) => t.priority === priorityFilter);
+      if (search) {
+        tasks = tasks.filter(
+          (t) =>
+            `rd-${t.number}`.includes(search) ||
+            t.title.toLowerCase().includes(search) ||
+            t.body.toLowerCase().includes(search),
+        );
+      }
+
+      const items = tasks.slice(0, limit).map((t) => ({
+        id: t.id,
+        code: `RD-${t.number}`,
+        number: t.number,
+        title: t.title,
+        status: t.status,
+        priority: t.priority,
+        owner: t.owner,
+        source: t.source,
+        resolution: t.resolution,
+        triaged_by: t.triaged_by,
+        delivery_ref: t.delivery_ref,
+        attempts: t.attempts,
+        message_count: t.message_count ?? 0,
+        merged_count: t.merged_count ?? 0,
+        updated_at: t.updated_at,
+        created_at: t.created_at,
+        body_preview: t.body.slice(0, 300),
+      }));
+      return { result: { total: tasks.length, tasks: items } };
+    }
+
+    if (action === "get_task") {
+      const row = this.findProjectTask(projectId, params.task ?? params.task_id ?? params.number);
+      const task = toTaskView(row);
+      const messages = this.getTaskMessages(row.id);
+      const merged = this.getMergedTasks(row.id);
+      return {
+        result: {
+          code: `RD-${task.number}`,
+          task,
+          messages,
+          merged,
+        },
+      };
+    }
+
+    if (action === "comment_task") {
+      const row = this.findProjectTask(projectId, params.task ?? params.task_id ?? params.number);
+      const body = field(params, "body", 24000);
+      const message = this.addMessage(row.id, "comment", "agent", body);
+      let reopened = false;
+      if (
+        params.reopen === true &&
+        !row.merged_into &&
+        row.owner === "none" &&
+        (row.status === "waiting" || row.status === "review" || row.status === "done")
+      ) {
+        this.updateTaskFields(row, {
+          status: "ready",
+          resolution: null,
+          attempts: 0,
+        });
+        this.addMessage(row.id, "event", "agent", "Agent reopened task via comment");
+        reopened = true;
+      }
+      const updated = toTaskView(this.getTaskRow(row.id));
+      return {
+        result: { code: `RD-${updated.number}`, message, task: updated, reopened },
+        mutated: { task_id: row.id, action: "comment_task" },
+      };
+    }
+
+    if (action === "update_task") {
+      const row = this.findProjectTask(projectId, params.task ?? params.task_id ?? params.number);
+      if (row.merged_into) {
+        throw new ApiError(409, "Open the primary task to continue");
+      }
+      const changes: Record<string, string | number | null> = {};
+      const updatedFields: string[] = [];
+      if ("title" in params && params.title !== undefined) {
+        const nextTitle = field(params, "title", 180);
+        changes.title = nextTitle;
+        updatedFields.push("title");
+      }
+      if ("body" in params && params.body !== undefined) {
+        changes.body = field(params, "body", 24000, false);
+        updatedFields.push("body");
+      }
+      if ("requirements" in params && params.requirements !== undefined) {
+        changes.requirements = field(params, "requirements", 24000, false);
+        updatedFields.push("requirements");
+      }
+      if ("priority" in params && params.priority !== undefined) {
+        const nextPriority = field(params, "priority", 10) as TaskPriority;
+        if (!PRIORITIES.has(nextPriority)) {
+          throw new ApiError(400, "Unknown priority");
+        }
+        changes.priority = nextPriority;
+        updatedFields.push(`priority → ${nextPriority}`);
+      }
+      if ("delivery_ref" in params && params.delivery_ref !== undefined) {
+        changes.delivery_ref = field(params, "delivery_ref", 500, false);
+        updatedFields.push("delivery_ref");
+      }
+      if (updatedFields.length === 0) {
+        throw new ApiError(400, "No fields specified to update");
+      }
+      this.updateTaskFields(row, changes);
+      this.addMessage(row.id, "event", "agent", `Agent updated ${updatedFields.join(", ")}`);
+      const updated = toTaskView(this.getTaskRow(row.id));
+      return {
+        result: { code: `RD-${updated.number}`, task: updated },
+        mutated: { task_id: row.id, action: "update_task" },
+      };
+    }
+
+    if (action === "transition_task") {
+      const row = this.findProjectTask(projectId, params.task ?? params.task_id ?? params.number);
+      if (row.merged_into) {
+        throw new ApiError(409, "Open the primary task to continue");
+      }
+      if (row.owner === "agent" && row.lease) {
+        throw new ApiError(
+          409,
+          "Another autonomous agent worker currently holds an active lease on this task",
+        );
+      }
+      const comment =
+        "comment" in params && params.comment !== undefined
+          ? field(params, "comment", 24000, false)
+          : "";
+      const mergeIntoRef = params.merge_into;
+      if (mergeIntoRef !== undefined && mergeIntoRef !== null && String(mergeIntoRef).trim() !== "") {
+        const target = this.findProjectTask(projectId, mergeIntoRef);
+        if (target.id === row.id || target.merged_into || target.status === "done") {
+          throw new ApiError(409, "Select an open, unmerged target task in this project");
+        }
+        this.db
+          .prepare("UPDATE tasks SET merged_into = ? WHERE merged_into = ?")
+          .run(target.id, row.id);
+        this.updateTaskFields(row, {
+          merged_into: target.id,
+          status: "done",
+          owner: "none",
+          lease: null,
+          resolution: "merged",
+        });
+        if (comment) {
+          this.addMessage(row.id, "comment", "agent", comment);
+        }
+        this.addMessage(row.id, "event", "agent", `Agent merged into RD-${target.number}`);
+        this.updateTaskFields(target, {});
+        this.addMessage(
+          target.id,
+          "event",
+          "agent",
+          `Linked feedback RD-${row.number}: ${row.title}`,
+        );
+        const updated = toTaskView(this.getTaskRow(row.id));
+        return {
+          result: { code: `RD-${updated.number}`, task: updated, merged_into: `RD-${target.number}` },
+          mutated: { task_id: row.id, action: "transition_task" },
+        };
+      }
+
+      const nextStatus = field(params, "status", 16) as TaskStatus;
+      if (!STATUSES.has(nextStatus) || nextStatus === "handoff") {
+        throw new ApiError(400, "Invalid target status (allowed: triage, ready, working, waiting, review, done)");
+      }
+      const changes: Record<string, string | number | null> = { status: nextStatus };
+      if (nextStatus === "working") {
+        changes.owner = "agent";
+        changes.lease = null;
+        changes.last_seen = nowIso();
+        changes.resolution = null;
+      } else if (nextStatus === "done") {
+        const rawRes =
+          "resolution" in params && params.resolution !== undefined && params.resolution !== null
+            ? field(params, "resolution", 16, false)
+            : "";
+        if (rawRes && rawRes !== "shipped" && rawRes !== "dismissed" && rawRes !== "wontfix") {
+          throw new ApiError(400, "Invalid resolution (allowed: shipped, dismissed, wontfix)");
+        }
+        changes.owner = "none";
+        changes.lease = null;
+        changes.resolution = (rawRes || "shipped") as TaskResolution;
+      } else {
+        changes.owner = "none";
+        changes.lease = null;
+        changes.resolution = null;
+      }
+      if ("delivery_ref" in params && params.delivery_ref !== undefined) {
+        changes.delivery_ref = field(params, "delivery_ref", 500, false);
+      }
+      this.updateTaskFields(row, changes);
+      if (comment) {
+        this.addMessage(row.id, "comment", "agent", comment);
+      }
+      this.addMessage(
+        row.id,
+        "event",
+        "agent",
+        `Agent transitioned status: ${row.status} → ${nextStatus}`,
+      );
+      const updated = toTaskView(this.getTaskRow(row.id));
+      return {
+        result: { code: `RD-${updated.number}`, task: updated },
+        mutated: { task_id: row.id, action: "transition_task" },
+      };
+    }
+
+    if (action === "create_task") {
+      const title = field(params, "title", 180);
+      const body =
+        "body" in params && params.body !== undefined
+          ? field(params, "body", 24000, false) || title
+          : title;
+      const priority =
+        "priority" in params && params.priority !== undefined
+          ? (field(params, "priority", 10) as TaskPriority)
+          : "normal";
+      if (!PRIORITIES.has(priority)) {
+        throw new ApiError(400, "Unknown priority");
+      }
+      const status =
+        "status" in params && params.status !== undefined
+          ? (field(params, "status", 16) as TaskStatus)
+          : "triage";
+      if (status !== "triage" && status !== "ready") {
+        throw new ApiError(400, "New tasks can only start in triage or ready");
+      }
+      const requirements =
+        "requirements" in params && params.requirements !== undefined
+          ? field(params, "requirements", 24000, false)
+          : "";
+      const created = this.createTask(projectId, { title, body, priority }, "console");
+      const extra: Record<string, string | number | null> = {};
+      if (requirements) extra.requirements = requirements;
+      if (status === "ready") extra.status = "ready";
+      if (Object.keys(extra).length > 0) {
+        this.updateTaskFields(created, extra);
+      }
+      this.addMessage(created.id, "event", "agent", "Agent created task from chat");
+      const view = toTaskView(this.getTaskRow(created.id));
+      return {
+        result: { code: `RD-${view.number}`, task: view },
+        mutated: { task_id: created.id, action: "create_task" },
+      };
+    }
+
+    throw new ApiError(400, `Unknown task action: ${action}`);
   }
 
   reclaimStaleAgentLeases(projectId: string, staleMs = STALE_LEASE_MS): number {

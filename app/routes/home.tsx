@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MetaFunction } from "react-router";
+import { ProjectChatStreams } from "~/lib/chat-streams.ts";
 import { CodexChatView } from "~/components/CodexChatView.tsx";
 import { Icon } from "~/components/Icon.tsx";
 import {
@@ -22,6 +23,7 @@ import { api } from "~/lib/api.ts";
 import type {
   AuthStatusPayload,
   ChatContextRef,
+  ChatSandboxMode,
   GithubConnectionSummary,
   ProjectDetail,
   ProjectSummary,
@@ -62,6 +64,16 @@ function ConsoleWorkspace() {
   const toast = useToast();
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [currentProject, setCurrentProject] = useState<ProjectDetail | null>(null);
+  const [chatProjects] = useState(() => new Map<string, ProjectChatStreams>());
+  const chatStreams = useMemo(() => {
+    const id = currentProject?.id ?? "";
+    let streams = chatProjects.get(id);
+    if (!streams) {
+      streams = new ProjectChatStreams(api);
+      chatProjects.set(id, streams);
+    }
+    return streams;
+  }, [chatProjects, currentProject?.id]);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [view, setView] = useState<WorkspaceView>("queue");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("project");
@@ -97,6 +109,7 @@ function ConsoleWorkspace() {
     ref?: ChatContextRef;
     prompt?: string;
     enableNetwork?: boolean;
+    sandboxMode?: ChatSandboxMode;
   } | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -160,6 +173,18 @@ function ConsoleWorkspace() {
       window.setTimeout(() => {
         document
           .getElementById("relaydesk-project-cli")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 60);
+    }
+  }, [changeView]);
+
+  const openRoutingSettings = useCallback(() => {
+    setSettingsTab("project");
+    changeView("settings");
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => {
+        document
+          .getElementById("relaydesk-project-routing")
           ?.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 60);
     }
@@ -317,6 +342,24 @@ function ConsoleWorkspace() {
     },
     [refreshTasks],
   );
+
+  const detailTaskIdRef = useRef<string | null>(null);
+  detailTaskIdRef.current = detail?.task.id ?? null;
+
+  useEffect(() => {
+    chatStreams.setTaskUpdatedHandler(({ task_id }) => {
+      void refreshTasks();
+      if (task_id && detailTaskIdRef.current === task_id) {
+        void api
+          .getTaskDetail(task_id)
+          .then((payload) => {
+            setDetail((curr) => (curr?.task.id === task_id ? payload : curr));
+          })
+          .catch(() => undefined);
+      }
+    });
+    return () => chatStreams.setTaskUpdatedHandler(undefined);
+  }, [chatStreams, refreshTasks]);
 
   const handleQuickAction = useCallback(
     async (task: TaskRecord, action: "claim" | "ready" | "done") => {
@@ -653,6 +696,8 @@ function ConsoleWorkspace() {
           />
         ) : view === "chat" ? (
           <CodexChatView
+            key={currentProject?.id}
+            streams={chatStreams}
             project={currentProject}
             tasks={tasks}
             pendingContext={pendingChatContext}
@@ -660,6 +705,7 @@ function ConsoleWorkspace() {
             onNewProject={() => setProjectModalOpen(true)}
             onOpenWorkspace={() => changeView("workspace")}
             onOpenCliSettings={openCliSettings}
+            onOpenRoutingSettings={openRoutingSettings}
             mainSidebarCollapsed={sidebarCollapsed}
             onExpandMainSidebar={toggleSidebarCollapsed}
             onTaskCreated={(task) => {
@@ -757,6 +803,20 @@ function ConsoleWorkspace() {
           setDetail(null);
           setDetailStack([]);
           openCliSettings();
+        }}
+        onAssignToAgent={(task, opts) => {
+          setPendingChatContext({
+            ref: {
+              kind: "task",
+              label: `RD-${task.number} · ${task.title.slice(0, 48)}`,
+              ref: task.id,
+            },
+            ...(opts?.prompt ? { prompt: opts.prompt } : {}),
+            ...(opts?.sandboxMode ? { sandboxMode: opts.sandboxMode } : {}),
+          });
+          setDetail(null);
+          setDetailStack([]);
+          changeView("chat");
         }}
       />
 

@@ -359,10 +359,14 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       send(socket, "hello", report(config, catalog));
     });
     const pending = new Map<string, { type: string; finish(payload?: Record<string, unknown>): void }>();
-    const rpc: WorkspaceRpc = (type, payload, signal) =>
+    const bridgeRpc = (
+      type: "workspace.fetch" | "workspace.push" | "task.rpc",
+      payload: Record<string, unknown>,
+      signal: AbortSignal,
+    ): Promise<Record<string, unknown>> =>
       new Promise((resolve, reject) => {
         if (signal.aborted || socket.readyState !== WebSocket.OPEN) {
-          reject(new Error("Workspace RPC cancelled"));
+          reject(new Error("Bridge RPC cancelled"));
           return;
         }
         const id = randomUUID();
@@ -373,17 +377,21 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
           signal.removeEventListener("abort", abort);
           pending.delete(id);
           if (reply?.ok === true) resolve(reply);
-          else
+          else {
+            const detail = typeof reply?.error === "string" && reply.error.trim() ? reply.error.trim() : "";
             reject(
               new Error(
-                reply ? `Workspace RPC rejected (${Number(reply.status) || 400})` : "Workspace RPC interrupted",
+                detail ||
+                  (reply ? `Bridge RPC rejected (${Number(reply.status) || 400})` : "Bridge RPC interrupted"),
               ),
             );
+          }
         };
         pending.set(id, { type: `${type}.result`, finish });
         signal.addEventListener("abort", abort, { once: true });
         send(socket, type, payload, id);
       });
+    const rpc: WorkspaceRpc = (type, payload, signal) => bridgeRpc(type, payload, signal);
     function bind(f: Frame) {
       const id = f.payload.project_id,
         input = f.payload.workdir;
@@ -478,8 +486,8 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
           const prompt = [
             "./ is the bound local project workdir. $RELAYDESK_SPACE_DIR/HANDBOOK.md is the project handbook; $RELAYDESK_SPACE_DIR/files/ contains cloud workspace files and SQLite databases. Never disclose credentials or database connection strings.",
             p.sandbox_mode === "read-only"
-              ? "This is a read-only turn. Do not modify either workspace."
-              : "Only changes under the shadow files/ directory can be synchronized to the cloud. Treat HANDBOOK.md as read-only.",
+              ? "This is a read-only turn for local code and workspace files. Do not modify either workspace. You still have access to the `relaydesk` MCP server for project tasks (list_tasks, get_task, comment_task, update_task, transition_task, create_task) and strictly read-only database inspection/queries (list_datasources, describe_datasource, query_datasource)."
+              : "Only changes under the shadow files/ directory can be synchronized to the cloud. Treat HANDBOOK.md as read-only. You also have access to the `relaydesk` MCP server for project tasks (list_tasks, get_task, comment_task, update_task, transition_task, create_task) and read-only database inspection/queries (list_datasources, describe_datasource, query_datasource).",
             mirror.handbook,
             databaseContext(p.workspace_manifest.databases),
             mirror.skipped.length ? `Large files not mirrored: ${mirror.skipped.join(", ")}` : "",
@@ -488,6 +496,19 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
           ]
             .filter(Boolean)
             .join("\n\n");
+          const taskClient = {
+            async call(
+              action: "list_tasks" | "get_task" | "comment_task" | "update_task" | "transition_task" | "create_task",
+              params: Record<string, unknown>,
+            ) {
+              const res = await bridgeRpc(
+                "task.rpc",
+                { run_id: p.run_id, project_id: p.project_id, action, params },
+                abort.signal,
+              );
+              return res.data;
+            },
+          };
           result = await runLocalChat({
             config: c,
             catalog: cat,
@@ -496,6 +517,8 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
             homeDir: home,
             spaceDir: mirror.root,
             allowSecrets: project.allow_datasource_secrets !== false,
+            enableMcp: true,
+            taskClient,
             signal: abort.signal,
             prompt,
             onEvent,
