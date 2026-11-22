@@ -26,10 +26,23 @@ function safeAvatar(value: string): string | null {
   return null;
 }
 
+function normalizePlan(provider: AccountProvider, plan: string | null): string | null {
+  if (!plan) return null;
+  const key = plan.toLowerCase();
+  if (provider === "codex" && key === "prolite") return "Pro 5x";
+  if (provider === "gemini" && key === "pro") return "Ultra";
+  return plan;
+}
+
 // Use the same allowlist before transmission and again at the server trust boundary.
 export function sanitizeSidebarAccount(provider: AccountProvider, value: unknown) {
   const parsed = account.safeParse(value);
   if (!parsed.success) return null;
   const row = parsed.data;
-  return { ...row, service: provider === "codex" ? "Codex" : "Gemini", windows: row.status === "ready" ? row.windows : [] };
+  return {
+    ...row,
+    plan: normalizePlan(provider, row.plan),
+    service: provider === "codex" ? "Codex" : "Gemini",
+    windows: row.status === "ready" ? row.windows : [],
+  };
 }
