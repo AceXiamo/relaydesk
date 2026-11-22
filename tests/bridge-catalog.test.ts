@@ -7,6 +7,8 @@ import {
   resolveActiveLocalAgent,
   resolveCatalogForTarget,
   resolveDefaultModelForTarget,
+  resolveLocalTaskAgent,
+  resolveLocalTaskModelCatalog,
   sanitizeBridgeModels,
 } from "../app/lib/model-catalog.ts";
 import type { BridgeAgentSummary, ChatRuntimeInfo } from "../app/lib/types.ts";
@@ -220,5 +222,41 @@ describe("target-scoped model catalog resolution", () => {
       },
     };
     expect(resolveActiveLocalAgent(strictCloudFirst, "proj-1", "auto", "claude")).toBeNull();
+  });
+
+  it("resolves Local Agent task target skipping cloud and isolates its model catalog", () => {
+    const resolved = resolveLocalTaskAgent({
+      agents: [macAgent],
+      effectivePriority: ["cloud", "local:agent-mac"],
+      projectId: "proj-1",
+      executionTarget: "auto",
+      runtime: "claude",
+    });
+    expect(resolved.ready).toBe(true);
+    expect(resolved.agent?.id).toBe("agent-mac");
+
+    const catalog = resolveLocalTaskModelCatalog({
+      runtime: "claude",
+      agent: resolved.agent,
+      includeSelectedFallback: false,
+    });
+    expect(catalog.map((m) => m.id)).toEqual(["codex/gpt-6.2-astra", "codex/gpt-6.2-sol"]);
+
+    // When no local agent is registered yet, falls back to built-in suggestions for the chosen harness.
+    const noAgent = resolveLocalTaskAgent({
+      agents: [],
+      effectivePriority: ["cloud"],
+      projectId: "proj-1",
+      executionTarget: "auto",
+      runtime: "codex",
+    });
+    expect(noAgent.ready).toBe(false);
+    expect(noAgent.agent).toBeNull();
+    const fallbackCatalog = resolveLocalTaskModelCatalog({
+      runtime: "codex",
+      agent: noAgent.agent,
+      includeSelectedFallback: false,
+    });
+    expect(fallbackCatalog.map((m) => m.id)).toEqual(["gpt-5.4"]);
   });
 });

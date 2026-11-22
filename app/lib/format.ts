@@ -139,11 +139,30 @@ const EVENT_TRANSLATIONS: Record<string, string> = {
   "Reopened for automation": "已重新放回自动执行队列",
   "Agent triaged task": "Agent 已整理任务要求与优先级",
   "Agent needs assistance": "Agent 需要补充信息",
+  "Human followed up in agent session": "你在执行会话中追加了指令",
+  "Agent finished reply without changing task status; moved to waiting":
+    "Agent 已回复但未变更任务状态，已转为待补充",
+  "Agent execution stopped by operator; moved to waiting":
+    "已手动停止 Agent 执行，已转为待补充",
+  "Server restarted while agent session was running; moved to waiting":
+    "服务重启导致执行中断，已转为待补充",
   "Task created": "任务已创建",
 };
 
 export function formatEventBody(body: string): string {
   if (EVENT_TRANSLATIONS[body]) return EVENT_TRANSLATIONS[body];
+  if (body.startsWith("Auto-dispatched to local agent")) {
+    return body.replace("Auto-dispatched to local agent", "已自动分配给 Local Agent");
+  }
+  if (body.startsWith("Dispatched to local agent")) {
+    return body.replace("Dispatched to local agent", "已分配给 Local Agent");
+  }
+  if (body.startsWith("Agent execution interrupted or failed")) {
+    const cleaned = body
+      .replace(/^Agent execution interrupted or failed/, "Agent 执行异常中断")
+      .replace(/;\s*moved to waiting$/, "，已转为待补充");
+    return cleaned;
+  }
   if (body.startsWith("Updated requirements\n")) {
     return body.replace("Updated requirements", "执行要求已更新");
   }

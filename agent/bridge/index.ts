@@ -496,19 +496,29 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
           onEvent({ type: "status", message: "正在同步本机项目空间…" });
           const mirror = await syncSpace(opts, p.workspace_manifest);
           const before = p.sandbox_mode === "workspace-write" ? snapshotShadowFiles(mirror) : null;
-          const promptFor = (resumeId: string) => [
-            "./ is the bound local project workdir. $RELAYDESK_SPACE_DIR/HANDBOOK.md is the project handbook; $RELAYDESK_SPACE_DIR/files/ contains cloud workspace files and SQLite databases. Never disclose credentials or database connection strings.",
-            p.sandbox_mode === "read-only"
-              ? "This is a read-only turn for local code and workspace files. Do not modify either workspace. You still have access to the `relaydesk` MCP server for project tasks (list_tasks, get_task, comment_task, update_task, transition_task, create_task) and strictly read-only database inspection/queries (list_datasources, describe_datasource, query_datasource)."
-              : "Only changes under the shadow files/ directory can be synchronized to the cloud. Treat HANDBOOK.md as read-only. To show generated images or screenshots in chat, save them under $RELAYDESK_SPACE_DIR/files/ and embed them in Markdown as ![description](files/...). You also have access to the `relaydesk` MCP server for project tasks (list_tasks, get_task, comment_task, update_task, transition_task, create_task) and read-only database inspection/queries (list_datasources, describe_datasource, query_datasource).",
-            mirror.handbook,
-            databaseContext(p.workspace_manifest.databases),
-            mirror.skipped.length ? `Large files not mirrored: ${mirror.skipped.join(", ")}` : "",
-            resumeId ? "" : p.system_context,
-            p.prompt,
-          ]
-            .filter(Boolean)
-            .join("\n\n");
+          const promptFor = (resumeId: string) => {
+            if (resumeId) return p.prompt;
+            const hasDbContext = Boolean(p.system_context?.includes("## Project Databases"));
+            const hasMcpContext = Boolean(p.system_context?.includes("relaydesk"));
+            const modeNote =
+              p.sandbox_mode === "read-only"
+                ? "Read-only turn for local code and workspace files; do not modify either workspace."
+                : "Only changes under $RELAYDESK_SPACE_DIR/files/ sync back to the cloud; treat HANDBOOK.md as read-only. Embed generated images in Markdown as ![description](files/...).";
+            const mcpFallbackNote = hasMcpContext
+              ? ""
+              : "You have access to the `relaydesk` MCP server for project tasks and read-only database inspection/queries.";
+            return [
+              "./ is the bound local project workdir. $RELAYDESK_SPACE_DIR/HANDBOOK.md is the project handbook; $RELAYDESK_SPACE_DIR/files/ contains cloud workspace files and SQLite databases. Never disclose credentials or database connection strings.",
+              [modeNote, mcpFallbackNote].filter(Boolean).join(" "),
+              mirror.handbook,
+              hasDbContext ? "" : databaseContext(p.workspace_manifest.databases),
+              mirror.skipped.length ? `Large files not mirrored: ${mirror.skipped.join(", ")}` : "",
+              p.system_context,
+              p.prompt,
+            ]
+              .filter(Boolean)
+              .join("\n\n");
+          };
           const taskClient = {
             async call(
               action: "list_tasks" | "get_task" | "comment_task" | "update_task" | "transition_task" | "create_task",

@@ -168,6 +168,8 @@ interface TextSegmentProps {
   disabled: boolean;
   showPlaceholder: boolean;
   placeholder: string;
+  ariaLabel: string;
+  submitMode: "enter" | "mod-enter";
   isFirst: boolean;
   isLast: boolean;
   hasCodeBlocks: boolean;
@@ -188,6 +190,8 @@ function TextSegment({
   disabled,
   showPlaceholder,
   placeholder,
+  ariaLabel,
+  submitMode,
   isFirst,
   isLast,
   hasCodeBlocks,
@@ -381,9 +385,11 @@ function TextSegment({
       }
     }
 
-    // 5. Shift+Enter inserts a clean newline; Enter submits
+    // 5. Submit / newline behavior based on submitMode
     if (e.key === "Enter") {
-      if (e.shiftKey) {
+      const shouldSubmit =
+        submitMode === "mod-enter" ? e.metaKey || e.ctrlKey : !e.shiftKey;
+      if (!shouldSubmit) {
         e.preventDefault();
         if (range) {
           range.deleteContents();
@@ -521,7 +527,7 @@ function TextSegment({
         ref={setRef}
         role="textbox"
         aria-multiline="true"
-        aria-label="对话输入框"
+        aria-label={ariaLabel}
         contentEditable={!disabled}
         suppressContentEditableWarning
         spellCheck={false}
@@ -706,6 +712,9 @@ interface RichPromptEditorProps {
   value: string;
   disabled?: boolean;
   placeholder: string;
+  ariaLabel?: string;
+  submitMode?: "enter" | "mod-enter";
+  className?: string;
   onChange: (nextMarkdown: string) => void;
   onSubmit: () => void;
   onInterceptKeyDown?: (e: React.KeyboardEvent<HTMLElement>) => boolean;
@@ -714,7 +723,18 @@ interface RichPromptEditorProps {
 
 export const RichPromptEditor = forwardRef<RichPromptEditorHandle, RichPromptEditorProps>(
   function RichPromptEditor(
-    { value, disabled = false, placeholder, onChange, onSubmit, onInterceptKeyDown, onPasteImages },
+    {
+      value,
+      disabled = false,
+      placeholder,
+      ariaLabel = "对话输入框",
+      submitMode = "enter",
+      className,
+      onChange,
+      onSubmit,
+      onInterceptKeyDown,
+      onPasteImages,
+    },
     ref,
   ) {
     const [blocks, setBlocks] = useState<EditorBlock[]>(() => parseMarkdownToBlocks(value));
@@ -897,7 +917,10 @@ export const RichPromptEditor = forwardRef<RichPromptEditorHandle, RichPromptEdi
 
     return (
       <div
-        className="w-full px-3.5 pt-3 pb-2 max-h-[260px] overflow-y-auto rd-scroll cursor-text"
+        className={
+          className ??
+          "w-full px-3.5 pt-3 pb-2 max-h-[260px] overflow-y-auto rd-scroll cursor-text"
+        }
         onClick={(e) => {
           if (e.target === e.currentTarget && !disabled) {
             const lastText = [...blocks].reverse().find((b) => b.type === "text");
@@ -914,6 +937,8 @@ export const RichPromptEditor = forwardRef<RichPromptEditorHandle, RichPromptEdi
               disabled={disabled}
               showPlaceholder={isCompletelyEmpty && idx === 0}
               placeholder={placeholder}
+              ariaLabel={ariaLabel}
+              submitMode={submitMode}
               isFirst={idx === 0}
               isLast={idx === blocks.length - 1}
               hasCodeBlocks={hasCodeBlocks}

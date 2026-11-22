@@ -1,11 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "~/lib/api.ts";
+import { resolveLocalTaskAgent } from "~/lib/model-catalog.ts";
 import type {
   BridgeAgentBindingSummary,
   BridgeAgentSummary,
+  ChatRuntime,
   ProjectRoutingConfig,
 } from "~/lib/types.ts";
 import { Icon } from "./Icon.tsx";
+import {
+  adaptSelectionForRuntimeSwitch,
+  LocalAgentEffortSelect,
+  LocalAgentModelCombobox,
+  runtimeLabel,
+} from "./LocalAgentModelPicker.tsx";
 import { Button, LivePulseDot, Select, useToast } from "./ui.tsx";
 
 interface ProjectRoutingCardProps {
@@ -54,8 +62,8 @@ export function ProjectRoutingCard({
   onOpenGlobalAgents,
 }: ProjectRoutingCardProps) {
   const toast = useToast();
-  const [modelDraft, setModelDraft] = useState<string | null>(null);
   const [routing, setRouting] = useState<ProjectRoutingConfig | null>(null);
+  const [defaultRuntime, setDefaultRuntime] = useState<ChatRuntime>("codex");
   const [effectivePriority, setEffectivePriority] = useState<string[]>([]);
   const [agents, setAgents] = useState<BridgeAgentSummary[]>([]);
   const [workdirDrafts, setWorkdirDrafts] = useState<Record<string, string>>({});
@@ -71,6 +79,7 @@ export function ProjectRoutingCard({
       const res = await api.getProjectExecutionRouting(projectId);
       if (seq.current !== n) return;
       setRouting(res.routing);
+      setDefaultRuntime(res.default_runtime ?? "codex");
       setEffectivePriority(res.effective_priority);
       setAgents(res.agents);
       setWorkdirDrafts((prev) => {
@@ -93,7 +102,6 @@ export function ProjectRoutingCard({
   useEffect(() => {
     setLoading(true);
     setWorkdirDrafts({});
-    setModelDraft(null);
     void load();
     const timer = window.setInterval(() => {
       if (!document.hidden) void load();
@@ -108,14 +116,27 @@ export function ProjectRoutingCard({
   const getBinding = (agent: BridgeAgentSummary): BridgeAgentBindingSummary | undefined =>
     agent.bindings.find((b) => b.project_id === projectId);
 
+  const effectiveTaskRuntime: ChatRuntime = routing?.task_runtime ?? defaultRuntime;
+  const resolvedTaskAgent = useMemo(
+    () =>
+      resolveLocalTaskAgent({
+        agents,
+        effectivePriority,
+        projectId,
+        executionTarget: "auto",
+        runtime: effectiveTaskRuntime,
+      }),
+    [agents, effectivePriority, projectId, effectiveTaskRuntime],
+  );
+
   const saveRouting = async (patch: Parameters<typeof api.updateProjectExecutionRouting>[1], successMessage?: string) => {
     setSavingRouting(true);
     try {
       const res = await api.updateProjectExecutionRouting(projectId, patch);
       setRouting(res.routing);
+      if (res.default_runtime) setDefaultRuntime(res.default_runtime);
       setEffectivePriority(res.effective_priority);
       setAgents(res.agents);
-      if (patch.task_model !== undefined) setModelDraft(null);
       if (successMessage) toast.success(successMessage);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "更新执行路由失败");
@@ -341,22 +362,89 @@ export function ProjectRoutingCard({
               <ToggleSwitch checked={Boolean(routing.auto_dispatch_tasks)} disabled={savingRouting} ariaLabel="新任务创建即自动分配 Local Agent" onChange={next => void saveRouting({ auto_dispatch_tasks: next })} />
             </div>
             <div className="grid items-start gap-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40 p-3.5 sm:grid-cols-2 lg:grid-cols-3">
-              <div className="space-y-1.5"><p className="text-xs text-[var(--text-secondary)]">运行时</p>
-                <Select<"default" | "codex" | "claude"> ariaLabel="任务运行时" fullWidth size="sm" value={routing.task_runtime ?? "default"} disabled={savingRouting}
-                  options={[{ value: "default", label: "跟随项目默认" }, { value: "codex", label: "Codex" }, { value: "claude", label: "Claude" }]}
-                  onChange={value => void saveRouting({ task_runtime: value === "default" ? null : value })} />
+              <div className="space-y-1.5">
+                <p className="text-xs text-[var(--text-secondary)]">Harness（运行工具）</p>
+                <Select<"default" | "codex" | "claude">
+                  ariaLabel="任务 Harness"
+                  fullWidth
+                  size="sm"
+                  value={routing.task_runtime ?? "default"}
+                  disabled={savingRouting}
+                  options={[
+                    { value: "default", label: `跟随项目默认（${runtimeLabel(defaultRuntime)}）` },
+                    { value: "codex", label: "Codex CLI" },
+                    { value: "claude", label: "Claude Code" },
+                  ]}
+                  onChange={(value) => {
+                    const nextRuntime: ChatRuntime = value === "default" ? defaultRuntime : value;
+                    const nextAgent = resolveLocalTaskAgent({
+                      agents,
+                      effectivePriority,
+                      projectId,
+                      executionTarget: "auto",
+                      runtime: nextRuntime,
+                    }).agent;
+                    const adapted = adaptSelectionForRuntimeSwitch({
+                      nextRuntime,
+                      agent: nextAgent,
+                      currentModel: routing.task_model ?? "",
+                      currentEffort: routing.task_reasoning_effort ?? "default",
+                    });
+                    void saveRouting(
+                      {
+                        task_runtime: value === "default" ? null : value,
+                        task_model: adapted.model,
+                        task_reasoning_effort: adapted.effort,
+                      },
+                      `已切换默认任务 Harness 为 ${value === "default" ? `跟随项目默认（${runtimeLabel(defaultRuntime)}）` : runtimeLabel(value)}`,
+                    );
+                  }}
+                />
               </div>
-              <form onSubmit={e => { e.preventDefault(); if (modelDraft !== null) void saveRouting({ task_model: modelDraft.trim() }, "已保存任务模型"); }}>
-                <label className="block space-y-1.5 text-xs text-[var(--text-secondary)]"><span>模型</span>
-                  <input value={modelDraft ?? routing.task_model ?? ""} onChange={e => setModelDraft(e.target.value)} disabled={savingRouting} placeholder="留空使用节点默认模型" className="h-8 w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] px-2.5 rd-focus-ring" />
-                </label>
-                {modelDraft !== null && modelDraft !== (routing.task_model ?? "") && <Button type="submit" size="xs" variant="secondary" className="mt-1.5" disabled={savingRouting}>保存模型</Button>}
-              </form>
-              <div className="space-y-1.5"><p className="text-xs text-[var(--text-secondary)]">推理强度</p>
-                <Select ariaLabel="任务推理强度" fullWidth size="sm" disabled={savingRouting} value={routing.task_reasoning_effort ?? "default"}
-                  options={([ ["default", "默认"], ["off", "关闭"], ["low", "低"], ["medium", "中"], ["high", "高"], ["max", "最高"] ] as const).map(([value, label]) => ({ value, label }))}
-                  onChange={value => void saveRouting({ task_reasoning_effort: value })} />
+              <div className="space-y-1.5">
+                <p className="text-xs text-[var(--text-secondary)]">模型</p>
+                <LocalAgentModelCombobox
+                  runtime={effectiveTaskRuntime}
+                  agent={resolvedTaskAgent.agent}
+                  model={routing.task_model ?? ""}
+                  currentEffort={routing.task_reasoning_effort ?? "default"}
+                  disabled={savingRouting}
+                  direction="down"
+                  size="sm"
+                  fullWidth
+                  ariaLabel="任务默认模型"
+                  onChange={(nextModel, nextEffort) =>
+                    void saveRouting(
+                      {
+                        task_model: nextModel,
+                        ...(nextEffort !== (routing.task_reasoning_effort ?? "default")
+                          ? { task_reasoning_effort: nextEffort }
+                          : {}),
+                      },
+                      nextModel ? `已设置任务默认模型为 ${nextModel}` : "已恢复使用节点默认模型",
+                    )
+                  }
+                />
               </div>
+              <div className="space-y-1.5">
+                <p className="text-xs text-[var(--text-secondary)]">推理强度</p>
+                <LocalAgentEffortSelect
+                  runtime={effectiveTaskRuntime}
+                  agent={resolvedTaskAgent.agent}
+                  model={routing.task_model ?? ""}
+                  value={routing.task_reasoning_effort ?? "default"}
+                  disabled={savingRouting}
+                  size="sm"
+                  fullWidth
+                  ariaLabel="任务推理强度"
+                  onChange={(value) => void saveRouting({ task_reasoning_effort: value })}
+                />
+              </div>
+              <p className="text-[11px] text-[var(--text-muted)] sm:col-span-2 lg:col-span-3">
+                {resolvedTaskAgent.agent
+                  ? `模型目录来自本机节点「${resolvedTaskAgent.agent.name}」${resolvedTaskAgent.ready ? "（在线就绪）" : resolvedTaskAgent.reason ? `（${resolvedTaskAgent.reason}）` : ""}；每个任务也可以在「Agent 执行」页单独指定节点、Harness 与模型。`
+                  : "尚未绑定本机节点，当前展示内置模型建议（也支持直接输入任意自定义模型 ID）；绑定并上线 Local Agent 后会自动同步其模型目录。"}
+              </p>
               <div className="flex items-center justify-between gap-3 border-t border-[var(--border-subtle)] pt-3 text-xs sm:col-span-2 lg:col-span-3">
                 <span>允许联网（git push / 装包 / gh pr）</span>
                 <ToggleSwitch checked={routing.task_network_access ?? true} disabled={savingRouting} ariaLabel="允许任务联网" onChange={next => void saveRouting({ task_network_access: next })} />

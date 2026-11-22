@@ -1057,6 +1057,13 @@ export class ApiRouter {
     this.store.getProjectRow(projectId);
     const listDescribedAgents = () =>
       this.store.listBridgeAgents().map((a) => this.describeBridgeAgent(a));
+    const readDefaultRuntime = (): ChatRuntime => {
+      try {
+        return projectCliConfiguration(this.store.dbPath, projectId).runtime;
+      } catch {
+        return "codex";
+      }
+    };
 
     if (method === "GET") {
       const routing = this.store.getProjectExecutionRouting(projectId);
@@ -1065,6 +1072,7 @@ export class ApiRouter {
         routing,
         effective_priority: normalizeExecutionPriority(routing, agents),
         agents,
+        default_runtime: readDefaultRuntime(),
       };
     }
 
@@ -1174,6 +1182,7 @@ export class ApiRouter {
         routing,
         effective_priority: normalizeExecutionPriority(routing, agents),
         agents,
+        default_runtime: readDefaultRuntime(),
       };
     }
 

@@ -67,6 +67,20 @@ describe("CLI invocation", () => {
     expect(dirs(resumed.args)).not.toContain("/space");
   });
 
+  it("sets Codex relaydesk MCP approval mode to approve on fresh and resumed turns", () => {
+    for (const resumeSessionId of ["", "existing-thread"]) {
+      const { args } = buildCliInvocation({
+        ...base,
+        runtime: "codex",
+        resumeSessionId,
+        mcp: { url: "http://127.0.0.1:4321/mcp", tokenEnvVar: "RELAYDESK_MCP_TOKEN" },
+      });
+      expect(args).toContain('mcp_servers.relaydesk.url="http://127.0.0.1:4321/mcp"');
+      expect(args).toContain('mcp_servers.relaydesk.bearer_token_env_var="RELAYDESK_MCP_TOKEN"');
+      expect(args).toContain('mcp_servers.relaydesk.default_tools_approval_mode="approve"');
+    }
+  });
+
   it("publishes the cloud catalog and applies project defaults only for the matching runtime", async () => {
     const dbPath = join(temp, "relaydesk.sqlite3");
     const fake = join(temp, "fake-cli");

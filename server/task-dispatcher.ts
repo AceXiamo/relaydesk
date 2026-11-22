@@ -8,6 +8,7 @@ import {
 } from "./execution-router.ts";
 import { Store, toAgentProject, toTaskView } from "./store.ts";
 import type {
+  ChatMessageRecord,
   ChatReasoningEffort,
   ChatRuntime,
   ChatSessionRecord,
@@ -67,6 +68,78 @@ export function buildTaskBriefPrompt(
     `请核实代码并自主处理任务 ${code}；完成后务必通过内置 \`relaydesk\` MCP 的 \`transition_task\` 工具更新任务状态。`,
   );
   return sections.join("\n");
+}
+
+export function buildTaskContinuationPrompt(
+  task: TaskRecord,
+  messages: TaskMessage[],
+  merged: TaskRecord[],
+  priorChatMessages: ChatMessageRecord[],
+  extraPrompt?: string,
+): string {
+  const lastDoneAssistant = [...priorChatMessages]
+    .reverse()
+    .find((m) => m.role === "assistant" && m.status === "done");
+  if (!lastDoneAssistant) {
+    return buildTaskBriefPrompt(task, messages, merged, extraPrompt);
+  }
+
+  const priorUserContents = priorChatMessages
+    .filter((m) => m.role === "user")
+    .map((m) => m.content);
+  const alreadyIncluded = (body: string) => {
+    const trimmed = body.trim();
+    if (!trimmed) return true;
+    const probe = trimmed.slice(0, 1200);
+    return priorUserContents.some((content) => content.includes(probe));
+  };
+
+  const newComments = messages
+    .filter(
+      (m) =>
+        m.kind === "comment" &&
+        m.author !== "agent" &&
+        m.created_at >= lastDoneAssistant.created_at &&
+        !alreadyIncluded(m.body),
+    )
+    .slice(-10);
+
+  const requirementsUpdated =
+    Boolean(task.requirements.trim()) &&
+    messages.some(
+      (m) =>
+        m.kind === "event" &&
+        m.body.startsWith("Updated requirements") &&
+        m.created_at >= lastDoneAssistant.created_at,
+    ) &&
+    !alreadyIncluded(task.requirements);
+
+  const trimmedExtra = extraPrompt?.trim() ?? "";
+  if (newComments.length === 0 && !requirementsUpdated) {
+    return (
+      trimmedExtra ||
+      `请继续处理任务 RD-${task.number}（当前状态已重新激活）。完成后请通过内置 \`relaydesk\` MCP 更新状态。`
+    );
+  }
+
+  const code = `RD-${task.number}`;
+  const sections: string[] = [];
+  if (newComments.length > 0) {
+    const commentLines = newComments.map(
+      (c) => `- [${c.author}] (${c.created_at}):\n  ${c.body.trim().slice(0, 2000)}`,
+    );
+    sections.push(`## 任务 ${code} 新增补充评论`, commentLines.join("\n"));
+  }
+  if (requirementsUpdated) {
+    sections.push("## 更新后的需求与验收标准", task.requirements.trim());
+  }
+  if (trimmedExtra) {
+    sections.push("## 额外说明", trimmedExtra);
+  }
+  sections.push(
+    `请直接结合以上最新信息继续处理任务 ${code}；完成后通过内置 \`relaydesk\` MCP 的 \`transition_task\` 更新任务状态。`,
+  );
+  return sections.join("\n\n");
 }
 
 export class TaskDispatcher {
@@ -226,11 +299,15 @@ export class TaskDispatcher {
       throw new ApiError(409, "当前任务正在由 Agent 执行中，可直接插话或先停止");
     }
 
+    if (opts.execution_target === "cloud") {
+      throw new ApiError(400, "任务直派仅支持 Local Agent（本机节点）");
+    }
+
     const projectId = taskRow.project_id;
     const routing = this.store.getProjectExecutionRouting(projectId);
     const runtimeInfo = getChatRuntimeInfo(this.store.dbPath, projectId);
-    const runtime: ChatRuntime =
-      opts.runtime ?? routing.task_runtime ?? runtimeInfo.project_cli.runtime ?? "codex";
+    const defaultRuntime: ChatRuntime = routing.task_runtime ?? runtimeInfo.project_cli.runtime ?? "codex";
+    const runtime: ChatRuntime = opts.runtime ?? defaultRuntime;
 
     const resolution = resolveLocalTaskExecutionTarget({
       store: this.store,
@@ -246,10 +323,17 @@ export class TaskDispatcher {
       );
     }
 
+    const model =
+      opts.model !== undefined
+        ? opts.model
+        : !opts.runtime || opts.runtime === defaultRuntime
+          ? (routing.task_model ?? "")
+          : "";
+
     return this.dispatchTaskWithTarget(taskId, resolution.target, {
       reason: "manual",
       runtime,
-      model: opts.model ?? routing.task_model ?? "",
+      model,
       reasoningEffort: opts.reasoning_effort ?? routing.task_reasoning_effort ?? "default",
       networkAccess: routing.task_network_access ?? true,
       extraPrompt: opts.prompt,
@@ -294,7 +378,8 @@ export class TaskDispatcher {
         const permChanged =
           session.sandbox_mode !== "workspace-write" ||
           session.network_access !== opts.networkAccess ||
-          session.runtime !== opts.runtime;
+          session.runtime !== opts.runtime ||
+          session.execution_target !== selected.targetKey;
         session = this.store.updateChatSession(projectInfo.id, session.id, {
           title,
           runtime: opts.runtime,
@@ -315,12 +400,13 @@ export class TaskDispatcher {
       );
 
       const priorChatMessages = this.store.listChatMessages(projectInfo.id, session.id);
-      const prompt =
-        priorChatMessages.length === 0
-          ? buildTaskBriefPrompt(taskViewBefore, messages, merged, opts.extraPrompt)
-          : opts.extraPrompt?.trim()
-            ? opts.extraPrompt.trim()
-            : `请继续处理任务 RD-${taskRow.number}（当前状态已重新激活）。完成后请通过内置 \`relaydesk\` MCP 更新状态。`;
+      const prompt = buildTaskContinuationPrompt(
+        taskViewBefore,
+        messages,
+        merged,
+        priorChatMessages,
+        opts.extraPrompt,
+      );
 
       return {
         projectInfo,

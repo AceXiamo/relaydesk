@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProjectChatStreams } from "~/lib/chat-streams.ts";
 import { TaskAgentSessionPanel } from "./TaskAgentSessionPanel.tsx";
+import { RichPromptEditor, type RichPromptEditorHandle } from "./agent-chat/RichPromptEditor.tsx";
 import { CliRunStatus, useCliRuns } from "./CliRunStatus.tsx";
 import { Icon } from "./Icon.tsx";
 import { MarkdownContent, hasMarkdownSyntax } from "./MarkdownContent.tsx";
@@ -99,19 +100,25 @@ function eventDotColor(rawBody: string): string {
   }
   if (
     lower.includes("claimed") ||
+    lower.includes("dispatched") ||
     lower.includes("handoff") ||
-    lower.includes("handed over")
+    lower.includes("handed over") ||
+    lower.includes("without changing task status")
   ) {
     return "bg-amber-500 dark:bg-amber-400";
   }
   if (
     lower.includes("stale") ||
     lower.includes("needs assistance") ||
-    lower.includes("revoked")
+    lower.includes("revoked") ||
+    lower.includes("interrupted") ||
+    lower.includes("failed") ||
+    lower.includes("stopped") ||
+    lower.includes("restarted")
   ) {
     return "bg-rose-500 dark:bg-rose-400";
   }
-  if (lower.includes("reopened") || lower.includes("triaged")) {
+  if (lower.includes("reopened") || lower.includes("triaged") || lower.includes("followed up")) {
     return "bg-indigo-500 dark:bg-indigo-400";
   }
   return "bg-zinc-400 dark:bg-zinc-500";
@@ -271,7 +278,7 @@ export function TaskDetailDrawer({
   const [mergeTarget, setMergeTarget] = useState("");
   const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
   const [tab, setTab] = useState(initialTab);
-  const commentInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const commentInputRef = useRef<RichPromptEditorHandle | null>(null);
 
   const task = detail?.task ?? null;
   const { runs, notice } = useCliRuns({
@@ -407,13 +414,18 @@ export function TaskDetailDrawer({
           canReopenTask ? { reopen: autoReopen } : undefined,
         );
         if (res.reopened) {
-          toast.success("已发送评论并重新推入自动队列");
+          toast.success(
+            routing?.routing.auto_dispatch_tasks
+              ? "已发送评论，将携带新说明唤醒 Local Agent"
+              : "已发送评论并重新推入自动队列",
+          );
         } else {
           toast.success("评论已发送");
         }
       }
       setComment("");
       await onRefreshTask(task.id);
+      onRefreshTasks();
     } catch (err) {
       if (askAssistant) {
         toast.error(err instanceof ClientApiError && err.status === 409
@@ -433,10 +445,7 @@ export function TaskDetailDrawer({
     }
     setComment(suggestion.text);
     window.requestAnimationFrame(() => {
-      const el = commentInputRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(suggestion.text.length, suggestion.text.length);
+      commentInputRef.current?.focus();
     });
   };
 
@@ -732,7 +741,11 @@ export function TaskDetailDrawer({
                       (task.status === "triage" || task.status === "ready") ? (
                       <span className="inline-flex items-center gap-1.5 text-[11.5px] text-emerald-600 dark:text-emerald-400">
                         <LivePulseDot tone="emerald" active />
-                        <span>自动队列巡检中，无需手动流转</span>
+                        <span>
+                          {routing?.routing.auto_dispatch_tasks
+                            ? "事件直派已开启，空闲 Local Agent 将自动接单"
+                            : "自动队列巡检中，无需手动流转"}
+                        </span>
                       </span>
                     ) : null}
                   </div>
@@ -747,7 +760,12 @@ export function TaskDetailDrawer({
                         onRefreshTasks();
                       } catch (err) { toast.error(err instanceof Error ? err.message : "分配任务失败"); }
                       finally { setBusyAction(null); }
-                    }}>分配给 Local Agent</Button>}
+                    }}>{task.agent_session_id ? "继续分配 Local Agent" : "分配给 Local Agent"}</Button>}
+                    {!isAgentWorking && task.agent_session_id && (
+                      <Button size="sm" variant="secondary" icon="message-square" onClick={() => setTab("agent")}>
+                        查看执行会话
+                      </Button>
+                    )}
 
                     {/* Optional Human Intervention CTA */}
                     {task.owner === "agent" ? (
@@ -1379,31 +1397,21 @@ export function TaskDetailDrawer({
                     </div>
                   )}
 
-                  <div className="px-3 py-2">
-                    <textarea
-                      ref={commentInputRef}
-                      value={comment}
-                      onChange={(e) => setComment(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (
-                          (e.metaKey || e.ctrlKey) &&
-                          e.key === "Enter" &&
-                          !e.nativeEvent.isComposing
-                        ) {
-                          e.preventDefault();
-                          void handleSendMessage(false);
-                        }
-                      }}
-                      rows={3}
-                      maxLength={8000}
-                      placeholder={
-                        canReopenTask
-                          ? "输入返工要求、补充说明或验收意见（支持 Markdown）…"
-                          : "输入评论补充上下文，或直接向项目 CLI 提问（支持 Markdown）…"
-                      }
-                      className="w-full resize-none bg-transparent text-[13px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
-                    />
-                  </div>
+                  <RichPromptEditor
+                    ref={commentInputRef}
+                    value={comment}
+                    disabled={busyAction !== null}
+                    ariaLabel="任务评论输入框"
+                    submitMode="mod-enter"
+                    placeholder={
+                      canReopenTask
+                        ? "输入返工要求、补充说明或验收意见（支持 `行内代码` 与 ``` 代码块）…"
+                        : "输入评论补充上下文，或直接向项目 CLI 提问（支持 `行内代码` 与 ``` 代码块）…"
+                    }
+                    onChange={(next) => setComment(next.slice(0, 8000))}
+                    onSubmit={() => void handleSendMessage(false)}
+                    className="w-full px-3 py-2 min-h-[72px] max-h-[220px] overflow-y-auto rd-scroll cursor-text"
+                  />
 
                   {/* Comment-to-Wakeup Indicator & Footer Controls */}
                   <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-t border-[var(--border-subtle)] bg-[var(--surface-subtle)]/45">
@@ -1413,6 +1421,7 @@ export function TaskDetailDrawer({
                           type="button"
                           role="switch"
                           aria-checked={autoReopen}
+                          title="开启后，发送评论将自动唤醒 Local Agent 并把评论内容直接带入执行会话"
                           onClick={() => setAutoReopen((v) => !v)}
                           className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-all cursor-pointer rd-focus-ring ${
                             autoReopen

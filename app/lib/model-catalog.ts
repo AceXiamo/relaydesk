@@ -208,3 +208,145 @@ export function resolveCatalogForTarget(options: {
   }
   return [...catalog.values()];
 }
+
+export interface LocalTaskAgentResolution {
+  agent: BridgeAgentSummary | null;
+  ready: boolean;
+  reason?: string;
+}
+
+function evaluateLocalAgentForTask(
+  agent: BridgeAgentSummary,
+  projectId: string | undefined,
+  runtime: ChatRuntime,
+): { ready: boolean; bound: boolean; hasRuntime: boolean; reason?: string } {
+  const binding = projectId ? agent.bindings.find((b) => b.project_id === projectId) : undefined;
+  const bound = !projectId || Boolean(binding?.enabled && binding?.path_ok);
+  const hasRuntime = Boolean(agent.runtimes[runtime]?.available);
+  if (!agent.online) {
+    return { ready: false, bound, hasRuntime, reason: `节点「${agent.name}」离线` };
+  }
+  if (!bound) {
+    return { ready: false, bound, hasRuntime, reason: `节点「${agent.name}」未绑定或未启用本项目目录` };
+  }
+  if (!hasRuntime) {
+    return {
+      ready: false,
+      bound,
+      hasRuntime,
+      reason: `节点「${agent.name}」未检测到 ${runtime === "claude" ? "Claude Code" : "Codex CLI"}`,
+    };
+  }
+  if (agent.active_runs >= agent.max_concurrency) {
+    return {
+      ready: false,
+      bound,
+      hasRuntime,
+      reason: `节点「${agent.name}」并发已满 (${agent.active_runs}/${agent.max_concurrency})`,
+    };
+  }
+  return { ready: true, bound, hasRuntime };
+}
+
+/**
+ * Resolve the Local Agent node for task dispatch (never falls back to Cloud).
+ * When no node is immediately ready, returns the best candidate node for model catalog preview
+ * along with `ready: false` and a human-readable `reason`.
+ */
+export function resolveLocalTaskAgent(options: {
+  agents?: BridgeAgentSummary[];
+  effectivePriority?: string[];
+  projectId?: string;
+  executionTarget?: string;
+  runtime: ChatRuntime;
+}): LocalTaskAgentResolution {
+  const { agents = [], effectivePriority, projectId, executionTarget = "auto", runtime } = options;
+
+  if (executionTarget.startsWith("local:")) {
+    const id = executionTarget.slice("local:".length);
+    const agent = agents.find((a) => a.id === id) ?? null;
+    if (!agent) {
+      return { agent: null, ready: false, reason: "指定的 Local Agent 不存在" };
+    }
+    const check = evaluateLocalAgentForTask(agent, projectId, runtime);
+    return { agent, ready: check.ready, reason: check.reason };
+  }
+
+  const orderedIds: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of effectivePriority ?? []) {
+    if (entry.startsWith("local:")) {
+      const id = entry.slice("local:".length);
+      if (!seen.has(id)) {
+        seen.add(id);
+        orderedIds.push(id);
+      }
+    }
+  }
+  for (const agent of agents) {
+    if (!seen.has(agent.id)) {
+      seen.add(agent.id);
+      orderedIds.push(agent.id);
+    }
+  }
+
+  const orderedAgents = orderedIds
+    .map((id) => agents.find((a) => a.id === id))
+    .filter((a): a is BridgeAgentSummary => Boolean(a));
+
+  if (orderedAgents.length === 0) {
+    return { agent: null, ready: false, reason: "暂无已注册的 Local Agent" };
+  }
+
+  let fallbackCandidate: { agent: BridgeAgentSummary; score: number; reason?: string } | null = null;
+  for (const agent of orderedAgents) {
+    const check = evaluateLocalAgentForTask(agent, projectId, runtime);
+    if (check.ready) {
+      return { agent, ready: true };
+    }
+    const hasModels = agent.models.some((m) => m.runtime === runtime) || Boolean(agent.runtimes[runtime]?.default_model);
+    const score =
+      (check.bound ? 4 : 0) +
+      (agent.online ? 2 : 0) +
+      (check.hasRuntime || hasModels ? 1 : 0);
+    if (!fallbackCandidate || score > fallbackCandidate.score) {
+      fallbackCandidate = { agent, score, reason: check.reason };
+    }
+  }
+
+  return {
+    agent: fallbackCandidate?.agent ?? null,
+    ready: false,
+    reason: fallbackCandidate?.reason ?? "暂无可用的 Local Agent",
+  };
+}
+
+/**
+ * Build the selectable model catalog for Local Agent task dispatch/settings.
+ * Mirrors the resolved Local Agent's reported models when an agent is present;
+ * falls back to built-in suggestions only when no Local Agent is registered yet.
+ */
+export function resolveLocalTaskModelCatalog(options: {
+  runtime: ChatRuntime;
+  agent: BridgeAgentSummary | null;
+  selectedModel?: string;
+  includeSelectedFallback?: boolean;
+}): ModelCatalogItem[] {
+  const { runtime, agent, selectedModel = "", includeSelectedFallback = true } = options;
+  if (agent) {
+    return resolveCatalogForTarget({
+      runtime,
+      activeLocalAgent: agent,
+      projectCli: undefined,
+      selectedModel,
+      includeSelectedFallback,
+    });
+  }
+  return resolveCatalogForTarget({
+    runtime,
+    activeLocalAgent: null,
+    projectCli: undefined,
+    selectedModel,
+    includeSelectedFallback,
+  });
+}

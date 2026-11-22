@@ -198,6 +198,8 @@ export function buildCliInvocation(params: {
         `mcp_servers.relaydesk.url=${JSON.stringify(params.mcp.url)}`,
         "-c",
         `mcp_servers.relaydesk.bearer_token_env_var=${JSON.stringify(params.mcp.tokenEnvVar)}`,
+        "-c",
+        'mcp_servers.relaydesk.default_tools_approval_mode="approve"',
       );
     }
 

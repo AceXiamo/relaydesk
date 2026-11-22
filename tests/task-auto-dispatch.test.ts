@@ -359,4 +359,166 @@ describe("event-driven task auto-dispatch to local agents", () => {
       result: { content: "ok", events: [], status: "done", externalSessionId: "" },
     });
   });
+
+  it("supports explicit node, harness, model, and effort on manual dispatch and rejects cloud target", async () => {
+    const projectId = await f.project();
+    const mac = await f.register("mac-mini");
+    const workstation = await f.register("workstation");
+    const connMac = await f.connect(mac.token);
+    await connMac.hello([{ project_id: projectId, workdir: "/repo/mac", path_ok: true }]);
+    const connWs = await f.connect(workstation.token);
+    await connWs.hello(
+      [{ project_id: projectId, workdir: "/repo/ws", path_ok: true }],
+      {
+        runtimes: {
+          codex: { available: true, version: "codex-test" },
+          claude: { available: true, version: "claude-test" },
+        },
+      },
+    );
+
+    // Configure default task routing to codex + gpt-5.4
+    const updatedRouting = await f.ok(`/projects/${projectId}/execution-routing`, "PATCH", {
+      auto_dispatch_tasks: false,
+      task_runtime: "codex",
+      task_model: "gpt-5.4",
+      task_reasoning_effort: "medium",
+    });
+    expect(updatedRouting.default_runtime).toBe("codex");
+
+    const created = await f.ok(`/projects/${projectId}/tasks`, "POST", {
+      title: "指定 Harness 与模型手动派发",
+      body: "需要用 Claude Code + 自定义模型在指定节点执行",
+    });
+
+    // Reject cloud execution target for task dispatch.
+    const cloudRes = await f.api(`/tasks/${created.task.id}/dispatch`, "POST", {
+      execution_target: "cloud",
+    });
+    expect(cloudRes.status).toBe(400);
+
+    // Dispatch explicitly to workstation with claude harness, custom model, and high effort.
+    const dispatched = await f.ok(`/tasks/${created.task.id}/dispatch`, "POST", {
+      execution_target: `local:${workstation.id}`,
+      runtime: "claude",
+      model: "claude-opus-4-6",
+      reasoning_effort: "high",
+    });
+    expect(dispatched.session.runtime).toBe("claude");
+    expect(dispatched.session.model).toBe("claude-opus-4-6");
+    expect(dispatched.session.reasoning_effort).toBe("high");
+    expect(dispatched.session.execution_target).toBe(`local:${workstation.id}`);
+
+    const start = await connWs.next("chat.start");
+    expect(start.payload.runtime).toBe("claude");
+    expect(start.payload.model).toBe("claude-opus-4-6");
+    expect(start.payload.reasoning_effort).toBe("high");
+
+    // Finish cleanly.
+    connWs.send("chat.event", {
+      run_id: start.payload.run_id,
+      session_id: start.payload.session_id,
+      event: { type: "done" },
+      result: { content: "done", events: [], status: "done", externalSessionId: "claude-thread-1" },
+    });
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Re-dispatch with explicit runtime=codex and omitted model should not leak claude model;
+    // wait: routing.task_runtime is codex so omitted model picks routing.task_model (gpt-5.4),
+    // while explicit empty model "" overrides to node default.
+    const redispatched = await f.ok(`/tasks/${created.task.id}/dispatch`, "POST", {
+      execution_target: `local:${mac.id}`,
+      runtime: "codex",
+      model: "",
+      reasoning_effort: "low",
+    });
+    expect(redispatched.session.runtime).toBe("codex");
+    expect(redispatched.session.model).toBe("");
+    expect(redispatched.session.reasoning_effort).toBe("low");
+    expect(redispatched.session.execution_target).toBe(`local:${mac.id}`);
+
+    const start2 = await connMac.next("chat.start");
+    expect(start2.payload.runtime).toBe("codex");
+    expect(start2.payload.model).toBe("");
+    expect(start2.payload.reasoning_effort).toBe("low");
+    expect(start2.payload.resume_session_id).toBe("");
+
+    connMac.send("chat.event", {
+      run_id: start2.payload.run_id,
+      session_id: start2.payload.session_id,
+      event: { type: "done" },
+      result: { content: "done2", events: [], status: "done", externalSessionId: "" },
+    });
+  });
+
+  it("passes new operator comments on wakeup, retries full brief after failed turn 1, and omits conflicting chat MCP rules", async () => {
+    const projectId = await f.project();
+    const agent = await f.register("mac-mini");
+    const conn = await f.connect(agent.token);
+    await conn.hello([{ project_id: projectId, workdir: "/repo", path_ok: true }]);
+    await f.ok(`/projects/${projectId}/execution-routing`, "PATCH", {
+      auto_dispatch_tasks: true,
+      task_runtime: "codex",
+    });
+
+    const created = await f.ok(`/projects/${projectId}/tasks`, "POST", {
+      title: "为移动端增加密码登录入口",
+      body: "请在登录页增加密码入口。",
+    });
+    const taskId = created.task.id as string;
+
+    // Turn 1 starts automatically and fails (e.g. model_not_found).
+    const start1 = await conn.next("chat.start");
+    expect(String(start1.payload.system_context)).toContain("Autonomous Task Execution Workflow (RD-1)");
+    expect(String(start1.payload.system_context)).not.toContain("do NOT transition task status");
+    expect(String(start1.payload.system_context)).toContain("relaydesk.mjs");
+    conn.send("chat.event", {
+      run_id: start1.payload.run_id,
+      session_id: start1.payload.session_id,
+      event: { type: "error", error: "model_not_found" },
+      result: { content: "", events: [], status: "error", error: "model_not_found", externalSessionId: "" },
+    });
+    await expect.poll(async () => (await f.ok(`/tasks/${taskId}`)).task.status).toBe("waiting");
+
+    // Operator posts clarification in Task Detail with reopen=true -> should resend full brief including new comment since Turn 1 failed!
+    await f.ok(`/tasks/${taskId}/messages`, "POST", {
+      body: "需要实现这个功能，你需要哪些信息？",
+      reopen: true,
+    });
+    const start2 = await conn.next("chat.start");
+    expect(String(start2.payload.prompt)).toContain("请在登录页增加密码入口。");
+    expect(String(start2.payload.prompt)).toContain("需要实现这个功能，你需要哪些信息？");
+
+    // Turn 2 finishes without transitioning status -> moved to waiting.
+    conn.send("chat.event", {
+      run_id: start2.payload.run_id,
+      session_id: start2.payload.session_id,
+      event: { type: "done" },
+      result: {
+        content: "请提供密码哈希配置项名称。",
+        events: [],
+        status: "done",
+        externalSessionId: "codex-thread-rd1",
+      },
+    });
+    await expect.poll(async () => (await f.ok(`/tasks/${taskId}`)).task.status).toBe("waiting");
+
+    // Operator replies in Task Detail with the SHA-256 hash -> Turn 3 MUST include that comment verbatim!
+    await f.ok(`/tasks/${taskId}/messages`, "POST", {
+      body: "69a7ee64ebeaf14fd015ca2ceec7e4f99edcaf8cbc09d58f5bbcd97ff64addb1\n密文 sha-256 如上",
+      reopen: true,
+    });
+    const start3 = await conn.next("chat.start");
+    expect(start3.payload.resume_session_id).toBe("codex-thread-rd1");
+    expect(String(start3.payload.prompt)).toContain("69a7ee64ebeaf14fd015ca2ceec7e4f99edcaf8cbc09d58f5bbcd97ff64addb1");
+    expect(String(start3.payload.prompt)).toContain("密文 sha-256 如上");
+    expect(String(start3.payload.prompt)).not.toContain("需要实现这个功能，你需要哪些信息？");
+
+    conn.send("chat.event", {
+      run_id: start3.payload.run_id,
+      session_id: start3.payload.session_id,
+      event: { type: "done" },
+      result: { content: "已收到哈希并实现。", events: [], status: "done", externalSessionId: "codex-thread-rd1" },
+    });
+  });
 });

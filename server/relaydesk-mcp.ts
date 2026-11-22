@@ -727,12 +727,24 @@ function isValidSqlIdentifier(name: string): boolean {
 }
 
 function buildToolDefinitions(hasTasks: boolean) {
+  const readOnlyAnnotations = {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  };
+  const taskWriteAnnotations = {
+    readOnlyHint: false,
+    destructiveHint: false,
+    openWorldHint: false,
+  };
   const taskTools = hasTasks
     ? [
         {
           name: "list_tasks",
           description:
             "List tasks in the current Relaydesk project. Use this to inspect open/recent tickets before updating or cross-referencing.",
+          annotations: readOnlyAnnotations,
           inputSchema: {
             type: "object",
             properties: {
@@ -756,6 +768,7 @@ function buildToolDefinitions(hasTasks: boolean) {
           name: "get_task",
           description:
             "Fetch full details, comment/event thread, and linked feedback for a task in the current project. Accepts task ID, number (e.g. 12), or code (e.g. RD-12).",
+          annotations: readOnlyAnnotations,
           inputSchema: {
             type: "object",
             required: ["task"],
@@ -768,6 +781,7 @@ function buildToolDefinitions(hasTasks: boolean) {
           name: "comment_task",
           description:
             "Post an agent comment (e.g., root-cause analysis, DB investigation findings, or progress update) onto a task in the current project.",
+          annotations: taskWriteAnnotations,
           inputSchema: {
             type: "object",
             required: ["task", "body"],
@@ -785,6 +799,7 @@ function buildToolDefinitions(hasTasks: boolean) {
           name: "update_task",
           description:
             "Update metadata fields (title, priority, requirements, delivery_ref, body) on an unmerged task in the current project.",
+          annotations: taskWriteAnnotations,
           inputSchema: {
             type: "object",
             required: ["task"],
@@ -802,6 +817,7 @@ function buildToolDefinitions(hasTasks: boolean) {
           name: "transition_task",
           description:
             "Transition a task's workflow status (triage, ready, working, waiting, review, done) or merge it into another task, optionally recording a delivery_ref and comment. Only call when asked or clearly appropriate for the user's request.",
+          annotations: taskWriteAnnotations,
           inputSchema: {
             type: "object",
             required: ["task"],
@@ -830,6 +846,7 @@ function buildToolDefinitions(hasTasks: boolean) {
           name: "create_task",
           description:
             "Create a new follow-up or bug task in the current Relaydesk project.",
+          annotations: taskWriteAnnotations,
           inputSchema: {
             type: "object",
             required: ["title"],
@@ -850,12 +867,14 @@ function buildToolDefinitions(hasTasks: boolean) {
       name: "list_datasources",
       description:
         "List all databases/datasources configured for this Relaydesk project (workspace SQLite files and external databases) along with read-only MCP query availability.",
+      annotations: readOnlyAnnotations,
       inputSchema: { type: "object", properties: {} },
     },
     {
       name: "describe_datasource",
       description:
         "Inspect tables, collections, or keyspace schema for a project datasource in strict read-only mode. Pass table name to view columns.",
+      annotations: readOnlyAnnotations,
       inputSchema: {
         type: "object",
         required: ["datasource"],
@@ -875,6 +894,7 @@ function buildToolDefinitions(hasTasks: boolean) {
       name: "query_datasource",
       description:
         "Execute a strictly read-only query against a project datasource (SQLite, PostgreSQL, MySQL, Redis, or MongoDB) without exposing raw credentials. Works even in read-only chat mode.",
+      annotations: readOnlyAnnotations,
       inputSchema: {
         type: "object",
         required: ["datasource"],

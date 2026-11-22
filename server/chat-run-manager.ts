@@ -122,16 +122,15 @@ export function buildTaskWorkflowSystemContext(
 
   return [
     `## Autonomous Task Execution Workflow (${code})`,
-    `You have been assigned Relaydesk task ${code} in project "${project.name}".`,
-    `Work directly in the bound project workspace and use the built-in \`relaydesk\` MCP tools (\`get_task\`, \`list_tasks\`, \`update_task\`, \`comment_task\`, \`transition_task\`) to update task state.`,
+    `You are assigned Relaydesk task ${code} in project "${project.name}". The task is already claimed for this session—do NOT load or run any external \`relaydesk\` CLI skill or \`relaydesk.mjs\`; use the connected \`relaydesk\` MCP server directly (\`get_task\`, \`list_tasks\`, \`update_task\`, \`comment_task\`, \`transition_task\`, plus read-only DB tools \`list_datasources\`, \`describe_datasource\`, \`query_datasource\`).`,
     "",
-    "### Execution Rules",
-    `1. Inspect the real codebase first to verify the feedback against reality.`,
-    `2. If the task is noise, spam, test submission, or already fixed in the codebase: call \`transition_task(task: "${code}", status: "done", resolution: "dismissed", comment: "<factual evidence>")\` and stop.`,
-    `3. If the task duplicates an existing open task: verify via \`list_tasks\`, then call \`transition_task(task: "${code}", merge_into: "<RD-xxx>", comment: "<brief reason>")\` and stop.`,
-    `4. If valid: optionally refine acceptance criteria with \`update_task\`, implement the minimal clean fix, and run the repository's real verification commands (typecheck, tests, build). Never fabricate verification results.`,
-    `5. If genuinely blocked (missing credentials, unreachable external service, or contradictory requirements requiring human judgment): call \`transition_task(task: "${code}", status: "waiting", comment: "<what you checked and the exact question/blocker>")\`.`,
-    `6. If a human follows up in this session to steer or refine your work, prioritize their instructions and finish by updating ${code} via \`transition_task\`.`,
+    "### Rules",
+    `1. Verify against the real codebase first. Never fabricate code paths, configs, or test results, and never print raw database credentials or tokens.`,
+    `2. Noise / spam / already fixed: call \`transition_task(task: "${code}", status: "done", resolution: "dismissed", comment: "<factual evidence>")\` and stop.`,
+    `3. Duplicate of an open task: check \`list_tasks\`, call \`transition_task(task: "${code}", merge_into: "<RD-xxx>", comment: "<brief reason>")\` and stop.`,
+    `4. Valid task: implement the minimal clean change, run real verification checks (typecheck, tests, build), then complete delivery below.`,
+    `5. Blocked or needing human decision: call \`transition_task(task: "${code}", status: "waiting", comment: "<concise summary>")\` and in your reply clearly state (in the user's language) the exact files/logic inspected, every concrete missing input or choice, and recommended options.`,
+    `6. Operator follow-ups take highest priority: read any newly provided details, answers, or constraints directly and act on them instead of repeating earlier questions; finish by updating ${code} via \`transition_task\`.`,
     "",
     `### Delivery Mode: \`${deliveryMode}\``,
     deliverySteps,
@@ -556,7 +555,10 @@ export class ChatRunManager {
           resolveTask,
           { spaceDirVar: "$RELAYDESK_SPACE_DIR" },
         );
-        const contextBlocks = [RELAYDESK_MCP_INSTRUCTIONS];
+        const contextBlocks: string[] = [];
+        if (session.kind !== "task" || !extraSystemContext?.trim()) {
+          contextBlocks.push(RELAYDESK_MCP_INSTRUCTIONS);
+        }
         if (extraSystemContext?.trim()) {
           contextBlocks.push(extraSystemContext.trim());
         }

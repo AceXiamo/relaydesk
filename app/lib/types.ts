@@ -501,6 +501,7 @@ export interface ProjectExecutionRoutingResponse {
   routing: ProjectRoutingConfig;
   effective_priority: string[];
   agents: BridgeAgentSummary[];
+  default_runtime?: ChatRuntime;
 }
 
 export interface ChatContextRef {
