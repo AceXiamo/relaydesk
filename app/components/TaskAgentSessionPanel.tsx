@@ -27,11 +27,19 @@ import { Button, LivePulseDot, useToast } from "./ui.tsx";
 
 type SessionHistory = Awaited<ReturnType<typeof api.getTaskAgentSession>>;
 
+export interface TaskDispatchDraftConfig {
+  execution_target: string;
+  runtime: ChatRuntime | null;
+  model: string | null;
+  reasoning_effort: ChatReasoningEffort | null;
+}
+
 interface Props {
   task: TaskRecord;
   streams: ProjectChatStreams;
   routing?: ProjectExecutionRoutingResponse;
   paused?: boolean;
+  initialDraftConfig?: TaskDispatchDraftConfig;
   onTaskUpdated?: () => void;
 }
 
@@ -39,7 +47,7 @@ export function TaskAgentSessionPanel(props: Props) {
   return <SessionPanel key={props.task.id} {...props} />;
 }
 
-function SessionPanel({ task, streams, routing, paused, onTaskUpdated }: Props) {
+function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTaskUpdated }: Props) {
   const toast = useToast();
   const [data, setData] = useState<SessionHistory>();
   const [error, setError] = useState("");
@@ -50,10 +58,10 @@ function SessionPanel({ task, streams, routing, paused, onTaskUpdated }: Props) 
   const [attachments, setAttachments] = useState<ChatContextRef[]>([]);
   const [uploadingImages, setUploadingImages] = useState(false);
   const [dragOverImage, setDragOverImage] = useState(false);
-  const [draftTarget, setDraftTarget] = useState<string>("auto");
-  const [draftRuntime, setDraftRuntime] = useState<ChatRuntime | null>(null);
-  const [draftModel, setDraftModel] = useState<string | null>(null);
-  const [draftEffort, setDraftEffort] = useState<ChatReasoningEffort | null>(null);
+  const [draftTarget, setDraftTarget] = useState<string>(initialDraftConfig?.execution_target ?? "auto");
+  const [draftRuntime, setDraftRuntime] = useState<ChatRuntime | null>(initialDraftConfig?.runtime ?? null);
+  const [draftModel, setDraftModel] = useState<string | null>(initialDraftConfig?.model ?? null);
+  const [draftEffort, setDraftEffort] = useState<ChatReasoningEffort | null>(initialDraftConfig?.reasoning_effort ?? null);
 
   const sequence = useRef(0);
   const transcript = useRef<HTMLDivElement>(null);
@@ -121,6 +129,8 @@ function SessionPanel({ task, streams, routing, paused, onTaskUpdated }: Props) 
         if (cached && !cached.running && !cached.pending && history.session.status !== "running" &&
             (!cached.saved || (tail?.id !== cached.assistant.id && history.messages.some(m => m.id === cached.assistant.id)))) {
           streams.retire(history.session.id, cached);
+        } else if (history.session.status !== "running") {
+          streams.syncSession(history.session);
         }
         streams.observe(history.session, history.messages);
       }
@@ -175,6 +185,7 @@ function SessionPanel({ task, streams, routing, paused, onTaskUpdated }: Props) 
     setSavingConfig(true);
     try {
       const res = await api.updateCodexChatSession(task.project_id, session.id, patch);
+      streams.syncSession(res.session);
       setData(previous => previous ? { ...previous, session: res.session } : { session: res.session, messages: [] });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "更新执行配置失败");

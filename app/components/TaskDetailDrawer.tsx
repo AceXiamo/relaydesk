@@ -1,9 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ProjectChatStreams } from "~/lib/chat-streams.ts";
-import { TaskAgentSessionPanel } from "./TaskAgentSessionPanel.tsx";
+import { TaskAgentSessionPanel, type TaskDispatchDraftConfig } from "./TaskAgentSessionPanel.tsx";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./agent-chat/RichPromptEditor.tsx";
 import { CliRunStatus, useCliRuns } from "./CliRunStatus.tsx";
 import { Icon } from "./Icon.tsx";
+import {
+  adaptSelectionForRuntimeSwitch,
+  LocalAgentEffortSelect,
+  LocalAgentModelCombobox,
+  LocalAgentTargetSelect,
+} from "./LocalAgentModelPicker.tsx";
 import { MarkdownContent, hasMarkdownSyntax } from "./MarkdownContent.tsx";
 import {
   Button,
@@ -22,6 +28,7 @@ import {
   type SelectOption,
 } from "./ui.tsx";
 import { api, ClientApiError } from "~/lib/api.ts";
+import { resolveLocalTaskAgent } from "~/lib/model-catalog.ts";
 import {
   AUTHOR_LABELS,
   PRIORITY_LABELS,
@@ -34,6 +41,9 @@ import {
   taskCode,
 } from "~/lib/format.ts";
 import type {
+  ChatReasoningEffort,
+  ChatRuntime,
+  ChatSessionRecord,
   ProjectExecutionRoutingResponse,
   CliRun,
   DiscussMode,
@@ -278,9 +288,68 @@ export function TaskDetailDrawer({
   const [mergeTarget, setMergeTarget] = useState("");
   const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
   const [tab, setTab] = useState(initialTab);
+  const [agentSessionData, setAgentSessionData] = useState<ChatSessionRecord | null>(null);
+  const [savingDispatchConfig, setSavingDispatchConfig] = useState(false);
+  const [draftTarget, setDraftTarget] = useState<string>("auto");
+  const [draftRuntime, setDraftRuntime] = useState<ChatRuntime | null>(null);
+  const [draftModel, setDraftModel] = useState<string | null>(null);
+  const [draftEffort, setDraftEffort] = useState<ChatReasoningEffort | null>(null);
   const commentInputRef = useRef<RichPromptEditorHandle | null>(null);
 
   const task = detail?.task ?? null;
+  const agentSessionId = task?.agent_session_id ?? "";
+  const readAgentTurn = useCallback(
+    () => (agentSessionId ? streams.snapshot().get(agentSessionId) : undefined),
+    [streams, agentSessionId],
+  );
+  const agentTurn = useSyncExternalStore(streams.subscribe, readAgentTurn, readAgentTurn);
+  const activeAgentSession =
+    agentTurn?.session ??
+    (agentSessionData && agentSessionData.id === agentSessionId ? agentSessionData : null);
+
+  const agents = routing?.agents ?? [];
+  const effectivePriority = routing?.effective_priority;
+  const projectDefaultRuntime: ChatRuntime =
+    routing?.routing.task_runtime ?? routing?.default_runtime ?? "codex";
+
+  const dispatchTarget = activeAgentSession
+    ? activeAgentSession.execution_target || "auto"
+    : draftTarget;
+  const dispatchRuntime: ChatRuntime = activeAgentSession
+    ? activeAgentSession.runtime
+    : (draftRuntime ?? projectDefaultRuntime);
+  const dispatchModel = activeAgentSession
+    ? activeAgentSession.model
+    : (draftModel ??
+      (dispatchRuntime === projectDefaultRuntime
+        ? (routing?.routing.task_model ?? "")
+        : ""));
+  const dispatchEffort: ChatReasoningEffort = activeAgentSession
+    ? (activeAgentSession.reasoning_effort ?? "default")
+    : (draftEffort ?? routing?.routing.task_reasoning_effort ?? "default");
+
+  const dispatchResolvedAgent = useMemo(
+    () =>
+      resolveLocalTaskAgent({
+        agents,
+        effectivePriority,
+        projectId: task?.project_id,
+        executionTarget: dispatchTarget,
+        runtime: dispatchRuntime,
+      }),
+    [agents, effectivePriority, task?.project_id, dispatchTarget, dispatchRuntime],
+  );
+
+  const initialDraftConfig = useMemo<TaskDispatchDraftConfig>(
+    () => ({
+      execution_target: draftTarget,
+      runtime: draftRuntime,
+      model: draftModel,
+      reasoning_effort: draftEffort,
+    }),
+    [draftTarget, draftRuntime, draftModel, draftEffort],
+  );
+
   const { runs, notice } = useCliRuns({
     projectId: task?.project_id,
     taskId: task?.id,
@@ -299,7 +368,36 @@ export function TaskDetailDrawer({
     setExpandedTraces({});
     setMergeOpen(false);
     setMergeTarget("");
+    setAgentSessionData(null);
+    setDraftTarget("auto");
+    setDraftRuntime(null);
+    setDraftModel(null);
+    setDraftEffort(null);
   }, [task?.id]);
+
+  useEffect(() => {
+    if (!task?.id || !task.agent_session_id) {
+      setAgentSessionData(null);
+      return;
+    }
+    if (tab !== "details") return;
+    let active = true;
+    void api
+      .getTaskAgentSession(task.id)
+      .then((res) => {
+        if (!active) return;
+        setAgentSessionData(res.session);
+        if (res.session && res.session.status !== "running") {
+          streams.syncSession(res.session);
+        }
+      })
+      .catch(() => {
+        // non-fatal: fall back to project defaults
+      });
+    return () => {
+      active = false;
+    };
+  }, [task?.id, task?.agent_session_id, task?.agent_session_status, tab, streams]);
 
   useEffect(() => {
     setAutoReopen(true);
@@ -337,8 +435,81 @@ export function TaskDetailDrawer({
   );
 
   const isAgentWorking = Boolean(
-    task && (task.owner === "agent" || task.agent_session_status === "running"),
+    task && (task.owner === "agent" || task.agent_session_status === "running" || agentTurn?.running),
   );
+
+  const updateDispatchSessionConfig = async (
+    patch: Partial<Pick<ChatSessionRecord, "execution_target" | "runtime" | "model" | "reasoning_effort">>,
+  ) => {
+    const targetSessionId = activeAgentSession?.id ?? task?.agent_session_id;
+    if (!task || !targetSessionId || isAgentWorking || savingDispatchConfig) return;
+    setSavingDispatchConfig(true);
+    try {
+      const res = await api.updateCodexChatSession(task.project_id, targetSessionId, patch);
+      streams.syncSession(res.session);
+      setAgentSessionData(res.session);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "更新执行配置失败");
+    } finally {
+      setSavingDispatchConfig(false);
+    }
+  };
+
+  const handleDispatchTargetChange = (nextTarget: string) => {
+    if (activeAgentSession || task?.agent_session_id) {
+      void updateDispatchSessionConfig({ execution_target: nextTarget });
+    } else {
+      setDraftTarget(nextTarget);
+    }
+  };
+
+  const handleDispatchRuntimeChange = (nextRuntime: ChatRuntime) => {
+    if (nextRuntime === dispatchRuntime) return;
+    const nextAgent = resolveLocalTaskAgent({
+      agents,
+      effectivePriority,
+      projectId: task?.project_id,
+      executionTarget: dispatchTarget,
+      runtime: nextRuntime,
+    }).agent;
+    const adapted = adaptSelectionForRuntimeSwitch({
+      nextRuntime,
+      agent: nextAgent,
+      currentModel: dispatchModel,
+      currentEffort: dispatchEffort,
+    });
+    if (activeAgentSession || task?.agent_session_id) {
+      void updateDispatchSessionConfig({
+        runtime: nextRuntime,
+        model: adapted.model,
+        reasoning_effort: adapted.effort,
+      });
+    } else {
+      setDraftRuntime(nextRuntime);
+      setDraftModel(adapted.model);
+      setDraftEffort(adapted.effort);
+    }
+  };
+
+  const handleDispatchModelChange = (nextModel: string, nextEffort: ChatReasoningEffort) => {
+    if (activeAgentSession || task?.agent_session_id) {
+      void updateDispatchSessionConfig({
+        model: nextModel,
+        ...(nextEffort !== dispatchEffort ? { reasoning_effort: nextEffort } : {}),
+      });
+    } else {
+      setDraftModel(nextModel);
+      setDraftEffort(nextEffort);
+    }
+  };
+
+  const handleDispatchEffortChange = (nextEffort: ChatReasoningEffort) => {
+    if (activeAgentSession || task?.agent_session_id) {
+      void updateDispatchSessionConfig({ reasoning_effort: nextEffort });
+    } else {
+      setDraftEffort(nextEffort);
+    }
+  };
 
   const isDeliveryUrl = Boolean(
     task?.delivery_ref && /^https?:\/\//i.test(task.delivery_ref.trim()),
@@ -555,7 +726,7 @@ export function TaskDetailDrawer({
               正在加载任务详情…
             </div>
           ) : task && tab === "agent" ? (
-            <TaskAgentSessionPanel task={task} streams={streams} routing={routing} paused={project?.automation_paused} onTaskUpdated={() => { void onRefreshTask(task.id).catch(err => toast.error(err instanceof Error ? err.message : "刷新任务失败")); }} />
+            <TaskAgentSessionPanel task={task} streams={streams} routing={routing} paused={project?.automation_paused} initialDraftConfig={initialDraftConfig} onTaskUpdated={() => { void onRefreshTask(task.id).catch(err => toast.error(err instanceof Error ? err.message : "刷新任务失败")); }} />
           ) : task ? (
             <div className="flex-1 overflow-y-auto rd-scroll px-5 py-5 space-y-5">
               {isAgentWorking && <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-3 py-2">
@@ -750,22 +921,111 @@ export function TaskDetailDrawer({
                     ) : null}
                   </div>
 
+                  {!isAgentWorking && (
+                    <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40 p-2.5 space-y-2.5">
+                      <div className="flex flex-wrap items-center gap-1.5" aria-label="分配执行配置">
+                        <div
+                          className="inline-flex h-7 items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)]/70 p-0.5"
+                          role="group"
+                          aria-label="选择分配 Harness"
+                        >
+                          {(["codex", "claude"] as const).map((rt) => (
+                            <button
+                              key={rt}
+                              type="button"
+                              disabled={busyAction !== null || savingDispatchConfig}
+                              aria-pressed={dispatchRuntime === rt}
+                              onClick={() => handleDispatchRuntimeChange(rt)}
+                              className={`rd-focus-ring rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
+                                dispatchRuntime === rt
+                                  ? "bg-[var(--surface-elevated)] text-[var(--text-primary)] shadow-2xs"
+                                  : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                              }`}
+                            >
+                              {rt === "claude" ? "Claude" : "Codex"}
+                            </button>
+                          ))}
+                        </div>
+                        <LocalAgentModelCombobox
+                          runtime={dispatchRuntime}
+                          agent={dispatchResolvedAgent.agent}
+                          model={dispatchModel}
+                          currentEffort={dispatchEffort}
+                          disabled={busyAction !== null || savingDispatchConfig}
+                          direction="down"
+                          size="xs"
+                          ariaLabel="选择分配模型"
+                          onChange={handleDispatchModelChange}
+                        />
+                        <LocalAgentTargetSelect
+                          projectId={task.project_id}
+                          runtime={dispatchRuntime}
+                          agents={agents}
+                          effectivePriority={effectivePriority}
+                          value={dispatchTarget}
+                          disabled={busyAction !== null || savingDispatchConfig}
+                          size="xs"
+                          className="max-w-[180px]"
+                          onChange={handleDispatchTargetChange}
+                        />
+                        <LocalAgentEffortSelect
+                          runtime={dispatchRuntime}
+                          agent={dispatchResolvedAgent.agent}
+                          model={dispatchModel}
+                          value={dispatchEffort}
+                          disabled={busyAction !== null || savingDispatchConfig}
+                          size="xs"
+                          ariaLabel="选择分配推理强度"
+                          onChange={handleDispatchEffortChange}
+                        />
+                      </div>
+
+                      {routing !== undefined && !dispatchResolvedAgent.ready && dispatchResolvedAgent.reason && (
+                        <p className="flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-300">
+                          <Icon name="alert-circle" size={12} className="shrink-0" />
+                          <span>{dispatchResolvedAgent.reason}</span>
+                        </p>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          icon="terminal"
+                          disabled={busyAction !== null || savingDispatchConfig}
+                          loading={busyAction === "dispatch"}
+                          onClick={async () => {
+                            setBusyAction("dispatch");
+                            try {
+                              const { session } = await api.dispatchTaskToAgent(task.id, {
+                                execution_target: dispatchTarget,
+                                runtime: dispatchRuntime,
+                                model: dispatchModel,
+                                reasoning_effort: dispatchEffort,
+                              });
+                              setAgentSessionData(session);
+                              streams.observe(session, []);
+                              setTab("agent");
+                              onRefreshTasks();
+                            } catch (err) {
+                              toast.error(err instanceof Error ? err.message : "分配任务失败");
+                            } finally {
+                              setBusyAction(null);
+                            }
+                          }}
+                        >
+                          {task.agent_session_id ? "继续分配 Local Agent" : "分配给 Local Agent"}
+                        </Button>
+                        {task.agent_session_id && (
+                          <Button size="sm" variant="secondary" icon="message-square" onClick={() => setTab("agent")}>
+                            查看执行会话
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex flex-wrap items-center gap-2">
-                    {!isAgentWorking && <Button size="sm" variant="primary" icon="terminal" disabled={busyAction !== null} loading={busyAction === "dispatch"} onClick={async () => {
-                      setBusyAction("dispatch");
-                      try {
-                        const { session } = await api.dispatchTaskToAgent(task.id);
-                        streams.observe(session, []);
-                        setTab("agent");
-                        onRefreshTasks();
-                      } catch (err) { toast.error(err instanceof Error ? err.message : "分配任务失败"); }
-                      finally { setBusyAction(null); }
-                    }}>{task.agent_session_id ? "继续分配 Local Agent" : "分配给 Local Agent"}</Button>}
-                    {!isAgentWorking && task.agent_session_id && (
-                      <Button size="sm" variant="secondary" icon="message-square" onClick={() => setTab("agent")}>
-                        查看执行会话
-                      </Button>
-                    )}
 
                     {/* Optional Human Intervention CTA */}
                     {task.owner === "agent" ? (

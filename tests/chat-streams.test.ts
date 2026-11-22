@@ -382,4 +382,50 @@ describe("project chat streams", () => {
     } finally { fetch.mockRestore(); }
   });
 
+  it("syncSession updates a finished turn's runtime/model while preserving trace, and ignores running turns", async () => {
+    const { streams, requests } = fixture();
+    const taskSession: ChatSessionRecord = {
+      ...session("p", "task-s1"),
+      kind: "task",
+      task_id: "t1",
+      runtime: "codex",
+      model: "gpt-6.2-astra",
+    };
+    const first = streams.send(taskSession, "run task", []);
+    const run = requests.get("p/task-s1")!;
+    const initial = streams.snapshot().get("task-s1")!;
+    const user = { ...initial.user, id: "u1" };
+    run.emit({ type: "session", user_message: user, assistant_message_id: "a1", session: taskSession });
+    run.emit({ type: "reasoning", text: "checking files" });
+
+    // While running, syncSession must not overwrite live run state.
+    const claudeWhileRunning: ChatSessionRecord = { ...taskSession, runtime: "claude", model: "sonnet" };
+    streams.syncSession(claudeWhileRunning);
+    expect(streams.snapshot().get("task-s1")?.session.runtime).toBe("codex");
+
+    // Finish the turn; cached turn stays in snapshot to keep its trace visible.
+    run.emit({ type: "done", session: taskSession, message: { ...streams.snapshot().get("task-s1")!.assistant, content: "stopped", status: "aborted" } });
+    run.end();
+    await first;
+
+    const listener = vi.fn();
+    const unsub = streams.subscribe(listener);
+    const updated: ChatSessionRecord = {
+      ...taskSession,
+      runtime: "claude",
+      model: "sonnet",
+      reasoning_effort: "high",
+      external_session_id: "",
+    };
+    streams.syncSession(updated);
+    unsub();
+
+    const synced = streams.snapshot().get("task-s1")!;
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(synced.running).toBe(false);
+    expect(synced.session).toEqual(updated);
+    expect(synced.trace.entries).toEqual([{ id: expect.any(String), kind: "reasoning", text: "checking files" }]);
+    expect(streams.chatSnapshot().has("task-s1")).toBe(false);
+  });
+
 });

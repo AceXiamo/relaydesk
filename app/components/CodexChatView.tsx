@@ -298,6 +298,7 @@ export function CodexChatView({
     void api
       .updateCodexChatSession(projectId, activeSession.id, patch)
       .then((res) => {
+        streams.syncSession(res.session);
         setActiveSession(res.session);
         setSessions((prev) =>
           prev.map((s) => (s.id === res.session.id ? { ...s, ...res.session } : s)),
@@ -306,7 +307,7 @@ export function CodexChatView({
       .catch(() => {
         // non-fatal
       });
-  }, [projectId, activeSession]);
+  }, [projectId, activeSession, streams]);
 
   useEffect(() => {
     if (!projectId || !activeSessionId) {
@@ -336,6 +337,8 @@ export function CodexChatView({
         if (requestedTurn && !requestedTurn.running && !requestedTurn.pending && streams.snapshot().get(activeSessionId) === requestedTurn) {
           setTurnTraces(prev => ({ ...prev, ...Object.fromEntries([...requestedTurn.previous, requestedTurn].map(t => [t.assistant.id, t.trace])) }));
           streams.retire(activeSessionId, requestedTurn);
+        } else if (res.session.status !== "running") {
+          streams.syncSession(res.session);
         }
         // Another tab owns the SSE connection. Only the terminal result is persisted.
         if (res.session.status === "running" && !streams.snapshot().has(activeSessionId)) {
@@ -509,6 +512,7 @@ export function CodexChatView({
     setSavingSettings(true);
     try {
       const res = await api.updateCodexChatSession(projectId, activeSession.id, patch);
+      streams.syncSession(res.session);
       setActiveSession((curr) => curr?.id === res.session.id ? res.session : curr);
       setSessions((prev) => prev.map((s) => (s.id === res.session.id ? { ...s, ...res.session } : s)));
     } catch (err) {

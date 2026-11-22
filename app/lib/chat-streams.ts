@@ -132,6 +132,12 @@ export class ProjectChatStreams {
     if (expected && !expected.running && this.turns.get(id) === expected) this.publish(id);
   }
 
+  syncSession(session: ChatSessionRecord) {
+    const turn = this.turns.get(session.id);
+    if (!turn || turn.running || turn.session === session) return;
+    this.publish(session.id, { ...turn, session });
+  }
+
   takeUnsent(id: string) {
     const turn = this.turns.get(id);
     if (turn?.running || !turn?.pending) return;
