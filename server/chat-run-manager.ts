@@ -39,6 +39,7 @@ export interface ChatTurnFinishedInfo {
   sessionId: string;
   sessionKind: ChatSessionRecord["kind"];
   taskId: string | null;
+  releaseId: string | null;
   status: "done" | "error" | "aborted";
   stopReason?: string;
 }
@@ -90,6 +91,7 @@ const MUTATING_TASK_ACTIONS = new Set([
   "update_task",
   "transition_task",
   "create_task",
+  "finish_release",
 ]);
 
 const LEASE_TOUCH_INTERVAL_MS = 30_000;
@@ -120,6 +122,18 @@ export function buildTaskWorkflowSystemContext(
             `3. Call MCP \`transition_task\` with \`task: "${code}", status: "done", resolution: "shipped", delivery_ref: "<branch>@<shortsha>", comment: "<concise Markdown summary>"\`.`,
           ].join("\n");
 
+  const deployMode = project.deploy_policy?.mode ?? "none";
+  const deployBoundary =
+    deployMode !== "none"
+      ? [
+          "",
+          `### Production Deployment Policy (\`${deployMode}\`)`,
+          `- **Do NOT deploy to production during this task session.** Only complete code delivery (\`${deliveryMode}\`) and call \`transition_task\`.`,
+          `- Production releases are executed separately by Relaydesk's Release pipeline according to the project deploy policy.`,
+          `- If this task ONLY changes documentation, tests, or non-deployed tooling/config and does not require a production deployment, pass \`needs_deploy: false\` in \`transition_task\`.`,
+        ]
+      : [];
+
   return [
     `## Autonomous Task Execution Workflow (${code})`,
     `You are assigned Relaydesk task ${code} in project "${project.name}". The task is already claimed for this session—do NOT load or run any external \`relaydesk\` CLI skill or \`relaydesk.mjs\`; use the connected \`relaydesk\` MCP server directly (\`get_task\`, \`list_tasks\`, \`update_task\`, \`comment_task\`, \`transition_task\`, plus read-only DB tools \`list_datasources\`, \`describe_datasource\`, \`query_datasource\`).`,
@@ -134,6 +148,7 @@ export function buildTaskWorkflowSystemContext(
     "",
     `### Delivery Mode: \`${deliveryMode}\``,
     deliverySteps,
+    ...deployBoundary,
   ].join("\n");
 }
 
@@ -556,7 +571,7 @@ export class ChatRunManager {
           { spaceDirVar: "$RELAYDESK_SPACE_DIR" },
         );
         const contextBlocks: string[] = [];
-        if (session.kind !== "task" || !extraSystemContext?.trim()) {
+        if ((session.kind !== "task" && session.kind !== "release") || !extraSystemContext?.trim()) {
           contextBlocks.push(RELAYDESK_MCP_INSTRUCTIONS);
         }
         if (extraSystemContext?.trim()) {
@@ -683,6 +698,7 @@ export class ChatRunManager {
         });
 
         let taskFinalized = false;
+        let releaseFinalized = false;
         if (updatedSession.kind === "task" && updatedSession.task_id) {
           const moved = this.store.finalizeTaskSessionTurn(updatedSession.task_id, sessionId, {
             status: result.status,
@@ -691,8 +707,16 @@ export class ChatRunManager {
             replyContent: result.content,
           });
           taskFinalized = Boolean(moved);
+        } else if (updatedSession.kind === "release" && updatedSession.release_id) {
+          const moved = this.store.finalizeReleaseSessionTurn(updatedSession.release_id, sessionId, {
+            status: result.status,
+            stopReason,
+            error: result.error,
+            replyContent: result.content,
+          });
+          releaseFinalized = Boolean(moved);
         }
-        return { updatedMsg, updatedSession, taskFinalized };
+        return { updatedMsg, updatedSession, taskFinalized, releaseFinalized };
       });
 
       if (saved.taskFinalized && saved.updatedSession.task_id) {
@@ -700,6 +724,12 @@ export class ChatRunManager {
           type: "task_updated",
           task_id: saved.updatedSession.task_id,
           action: "finalize_task",
+        });
+      }
+      if (saved.releaseFinalized && saved.updatedSession.release_id) {
+        this.emit(run, {
+          type: "task_updated",
+          action: "finalize_release",
         });
       }
 
@@ -719,7 +749,7 @@ export class ChatRunManager {
       }
       const errMsg = err instanceof Error ? err.message : "对话执行异常";
       terminalStatus = "error";
-      const { savedMsg, taskFinalized } = this.store.transaction(true, () => {
+      const { savedMsg, taskFinalized, releaseFinalized } = this.store.transaction(true, () => {
         const msg = this.store.updateChatMessage(run.assistantMessageId, {
           content: `执行异常：${errMsg}`,
           status: "error",
@@ -728,20 +758,33 @@ export class ChatRunManager {
           status: "error",
         });
         let finalized = false;
+        let relFinalized = false;
         if (updatedSession.kind === "task" && updatedSession.task_id) {
           const moved = this.store.finalizeTaskSessionTurn(updatedSession.task_id, sessionId, {
             status: "error",
             error: errMsg,
           });
           finalized = Boolean(moved);
+        } else if (updatedSession.kind === "release" && updatedSession.release_id) {
+          const moved = this.store.finalizeReleaseSessionTurn(updatedSession.release_id, sessionId, {
+            status: "error",
+            error: errMsg,
+          });
+          relFinalized = Boolean(moved);
         }
-        return { savedMsg: msg, taskFinalized: finalized };
+        return { savedMsg: msg, taskFinalized: finalized, releaseFinalized: relFinalized };
       });
       if (taskFinalized && session.task_id) {
         this.emit(run, {
           type: "task_updated",
           task_id: session.task_id,
           action: "finalize_task",
+        });
+      }
+      if (releaseFinalized && session.release_id) {
+        this.emit(run, {
+          type: "task_updated",
+          action: "finalize_release",
         });
       }
       this.emit(run, { type: "error", error: errMsg, message: savedMsg });
@@ -753,6 +796,7 @@ export class ChatRunManager {
         sessionId,
         sessionKind: session.kind,
         taskId: session.task_id,
+        releaseId: session.release_id,
         status: terminalStatus,
         stopReason: terminalStopReason,
       });

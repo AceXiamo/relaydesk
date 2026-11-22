@@ -1,11 +1,55 @@
 import type {
   DeliveryMode,
+  DeployMode,
+  ReleaseStatus,
+  ReleaseTrigger,
+  TaskDeployStatus,
   TaskOwner,
   TaskPriority,
   TaskResolution,
   TaskSource,
   TaskStatus,
 } from "./types.ts";
+
+export const DEPLOY_MODE_LABELS: Record<DeployMode, string> = {
+  none: "不管理部署",
+  manual: "仅手动发布",
+  immediate: "完成后自动发布",
+  scheduled: "定时窗口期发布",
+};
+
+export const DEPLOY_MODE_DESCRIPTIONS: Record<DeployMode, string> = {
+  none: "代码推送或合流即视作闭环（适合已接入 Vercel / GitHub Actions 等外部 CI/CD 的项目）。",
+  manual: "任务交付完成后进入「待发布」队列，由你在控制台手动点击「立即发布」触发生产部署。",
+  immediate: "待处理任务队列清空后，自动启动 Release Agent 将所有待发布变更合并部署到生产环境。",
+  scheduled: "任务交付完成后先积攒在待发布队列，仅在设定的低峰窗口期内自动发布（紧急任务可穿透）。",
+};
+
+export const TASK_DEPLOY_STATUS_LABELS: Record<TaskDeployStatus, string> = {
+  not_required: "无需发布",
+  pending: "待发布",
+  deploying: "发布中",
+  deployed: "已发布",
+  failed: "发布失败",
+};
+
+export const RELEASE_STATUS_LABELS: Record<ReleaseStatus, string> = {
+  running: "发布中",
+  succeeded: "发布成功",
+  failed: "发布失败",
+  blocked: "已阻塞",
+};
+
+export const RELEASE_TRIGGER_LABELS: Record<ReleaseTrigger, string> = {
+  immediate: "自动立即",
+  scheduled: "窗口期自动",
+  urgent: "紧急穿透",
+  manual: "手动触发",
+};
+
+export function releaseCode(num: number): string {
+  return `REL-${num}`;
+}
 
 export const DELIVERY_MODE_LABELS: Record<DeliveryMode, string> = {
   direct_push: "直推部署",

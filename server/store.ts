@@ -18,9 +18,16 @@ import type {
   ChatSessionRecord,
   ChatToolEvent,
   DeliveryMode,
+  DeployMode,
+  ProjectDeployPolicy,
   ProjectDetail,
   ProjectRoutingConfig,
   ProjectSummary,
+  ReleaseRecord,
+  ReleaseStatus,
+  ReleaseTaskSnapshot,
+  ReleaseTrigger,
+  TaskDeployStatus,
   TaskMessage,
   TaskPriority,
   TaskRecord,
@@ -51,6 +58,193 @@ export const DELIVERY_MODES = new Set<DeliveryMode>([
   "review_only",
 ]);
 
+export const DEPLOY_MODES = new Set<DeployMode>([
+  "none",
+  "manual",
+  "immediate",
+  "scheduled",
+]);
+
+export const TASK_DEPLOY_STATUSES = new Set<TaskDeployStatus>([
+  "not_required",
+  "pending",
+  "deploying",
+  "deployed",
+  "failed",
+]);
+
+export const RELEASE_STATUSES = new Set<ReleaseStatus>([
+  "running",
+  "succeeded",
+  "failed",
+  "blocked",
+]);
+
+export const RELEASE_TRIGGERS = new Set<ReleaseTrigger>([
+  "immediate",
+  "scheduled",
+  "urgent",
+  "manual",
+]);
+
+export const DEFAULT_DEPLOY_POLICY: ProjectDeployPolicy = {
+  mode: "none",
+  window_start: "02:00",
+  window_end: "06:00",
+  timezone: "Asia/Shanghai",
+  allow_urgent_override: true,
+  doc_path: "",
+};
+
+export function isValidClockHHmm(value: string): boolean {
+  return /^([01]\d|2[0-3]):([0-5]\d)$/.test(value);
+}
+
+export function isValidIanaTimeZone(value: string): boolean {
+  if (!value || value.length > 80) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeDeployPolicy(raw: unknown): ProjectDeployPolicy {
+  let parsed: Record<string, unknown> = {};
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        parsed = obj as Record<string, unknown>;
+      }
+    } catch {
+      parsed = {};
+    }
+  } else if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    parsed = raw as Record<string, unknown>;
+  }
+
+  const mode =
+    typeof parsed.mode === "string" && DEPLOY_MODES.has(parsed.mode as DeployMode)
+      ? (parsed.mode as DeployMode)
+      : DEFAULT_DEPLOY_POLICY.mode;
+  const window_start =
+    typeof parsed.window_start === "string" && isValidClockHHmm(parsed.window_start.trim())
+      ? parsed.window_start.trim()
+      : DEFAULT_DEPLOY_POLICY.window_start;
+  const window_end =
+    typeof parsed.window_end === "string" && isValidClockHHmm(parsed.window_end.trim())
+      ? parsed.window_end.trim()
+      : DEFAULT_DEPLOY_POLICY.window_end;
+  const timezone =
+    typeof parsed.timezone === "string" && isValidIanaTimeZone(parsed.timezone.trim())
+      ? parsed.timezone.trim()
+      : DEFAULT_DEPLOY_POLICY.timezone;
+  const allow_urgent_override =
+    typeof parsed.allow_urgent_override === "boolean"
+      ? parsed.allow_urgent_override
+      : DEFAULT_DEPLOY_POLICY.allow_urgent_override;
+  const doc_path =
+    typeof parsed.doc_path === "string" ? parsed.doc_path.trim().slice(0, 240) : "";
+
+  return {
+    mode,
+    window_start,
+    window_end,
+    timezone,
+    allow_urgent_override,
+    doc_path,
+  };
+}
+
+export function parseDeployPolicyPatch(
+  current: ProjectDeployPolicy,
+  patch: Record<string, unknown>,
+): ProjectDeployPolicy {
+  let mode = current.mode;
+  if ("mode" in patch && patch.mode !== undefined) {
+    if (typeof patch.mode !== "string" || !DEPLOY_MODES.has(patch.mode as DeployMode)) {
+      throw new ApiError(400, "Invalid deploy policy mode (allowed: none, manual, immediate, scheduled)");
+    }
+    mode = patch.mode as DeployMode;
+  }
+
+  let window_start = current.window_start;
+  if ("window_start" in patch && patch.window_start !== undefined) {
+    const val = typeof patch.window_start === "string" ? patch.window_start.trim() : "";
+    if (!isValidClockHHmm(val)) {
+      throw new ApiError(400, "Invalid window_start (expected HH:mm)");
+    }
+    window_start = val;
+  }
+
+  let window_end = current.window_end;
+  if ("window_end" in patch && patch.window_end !== undefined) {
+    const val = typeof patch.window_end === "string" ? patch.window_end.trim() : "";
+    if (!isValidClockHHmm(val)) {
+      throw new ApiError(400, "Invalid window_end (expected HH:mm)");
+    }
+    window_end = val;
+  }
+
+  let timezone = current.timezone;
+  if ("timezone" in patch && patch.timezone !== undefined) {
+    const val = typeof patch.timezone === "string" ? patch.timezone.trim() : "";
+    if (!isValidIanaTimeZone(val)) {
+      throw new ApiError(400, "Invalid IANA timezone");
+    }
+    timezone = val;
+  }
+
+  let allow_urgent_override = current.allow_urgent_override;
+  if ("allow_urgent_override" in patch && patch.allow_urgent_override !== undefined) {
+    if (typeof patch.allow_urgent_override !== "boolean") {
+      throw new ApiError(400, "allow_urgent_override must be a boolean");
+    }
+    allow_urgent_override = patch.allow_urgent_override;
+  }
+
+  let doc_path = current.doc_path;
+  if ("doc_path" in patch && patch.doc_path !== undefined) {
+    if (typeof patch.doc_path !== "string") {
+      throw new ApiError(400, "doc_path must be a string");
+    }
+    const cleaned = patch.doc_path.trim();
+    if (
+      cleaned.length > 240 ||
+      /[\x00-\x1f\x7f\\]/.test(cleaned) ||
+      cleaned.startsWith("/") ||
+      cleaned.split("/").some((part) => part === "..")
+    ) {
+      throw new ApiError(400, "Invalid doc_path (use a safe relative path)");
+    }
+    doc_path = cleaned;
+  }
+
+  return {
+    mode,
+    window_start,
+    window_end,
+    timezone,
+    allow_urgent_override,
+    doc_path,
+  };
+}
+
+function normalizeTaskDeployStatus(value: unknown): TaskDeployStatus {
+  if (typeof value === "string" && TASK_DEPLOY_STATUSES.has(value as TaskDeployStatus)) {
+    return value as TaskDeployStatus;
+  }
+  return "not_required";
+}
+
+function normalizeChatSessionKind(value: unknown): ChatSessionKind {
+  if (value === "task") return "task";
+  if (value === "release") return "release";
+  return "chat";
+}
+
 export const MAX_AGENT_ATTEMPTS = 3;
 export const STALE_LEASE_MS = 45 * 60 * 1000;
 export const CLI_LEASE_MS = 5 * 60 * 1000;
@@ -65,7 +259,8 @@ CREATE TABLE IF NOT EXISTS projects (
     automation_paused INTEGER NOT NULL DEFAULT 0,
     delivery_mode TEXT NOT NULL DEFAULT 'direct_push',
     widget_code_context INTEGER NOT NULL DEFAULT 1,
-    execution_routing_json TEXT NOT NULL DEFAULT '{}'
+    execution_routing_json TEXT NOT NULL DEFAULT '{}',
+    deploy_policy_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS bridge_agents (
     id TEXT PRIMARY KEY, name TEXT NOT NULL,
@@ -96,6 +291,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     delivery_ref TEXT NOT NULL DEFAULT '',
     triaged_by TEXT NOT NULL DEFAULT '',
     merged_into TEXT REFERENCES tasks(id),
+    deploy_status TEXT NOT NULL DEFAULT 'not_required',
+    deployed_at TEXT,
+    release_id TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_seen TEXT,
     UNIQUE(project_id, number), UNIQUE(project_id, source, external_id)
 );
@@ -116,11 +314,30 @@ CREATE TABLE IF NOT EXISTS cli_runs (
 CREATE UNIQUE INDEX IF NOT EXISTS cli_active_task ON cli_runs(task_id) WHERE status IN ('queued','running');
 CREATE INDEX IF NOT EXISTS cli_pending ON cli_runs(project_id, status, created_at);
 CREATE INDEX IF NOT EXISTS cli_thread ON cli_runs(task_id, created_at);
+CREATE TABLE IF NOT EXISTS releases (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    number INTEGER NOT NULL,
+    trigger TEXT NOT NULL CHECK(trigger IN ('immediate','scheduled','urgent','manual')),
+    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','succeeded','failed','blocked')),
+    session_id TEXT,
+    task_ids_json TEXT NOT NULL DEFAULT '[]',
+    task_snapshot_json TEXT NOT NULL DEFAULT '[]',
+    deploy_ref TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE(project_id, number)
+);
+CREATE INDEX IF NOT EXISTS releases_project ON releases(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS releases_project_status ON releases(project_id, status);
 CREATE TABLE IF NOT EXISTS chat_sessions (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id),
-    kind TEXT NOT NULL DEFAULT 'chat' CHECK(kind IN ('chat','task')),
+    kind TEXT NOT NULL DEFAULT 'chat' CHECK(kind IN ('chat','task','release')),
     task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    release_id TEXT,
     title TEXT NOT NULL,
     runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude')),
     model TEXT NOT NULL DEFAULT '',
@@ -321,6 +538,7 @@ export interface RawProjectRow {
   delivery_mode?: string;
   widget_code_context?: number;
   execution_routing_json: string;
+  deploy_policy_json?: string;
 }
 
 export interface RawTaskRow {
@@ -343,6 +561,10 @@ export interface RawTaskRow {
   delivery_ref?: string;
   triaged_by?: string;
   merged_into: string | null;
+  deploy_status?: string;
+  deployed_at?: string | null;
+  release_id?: string | null;
+  release_number?: number | null;
   created_at: string;
   updated_at: string;
   last_seen: string | null;
@@ -351,6 +573,22 @@ export interface RawTaskRow {
   agent_session_id?: string | null;
   agent_session_status?: string | null;
   agent_session_target?: string | null;
+}
+
+export interface RawReleaseRow {
+  id: string;
+  project_id: string;
+  number: number;
+  trigger: string;
+  status: string;
+  session_id: string | null;
+  task_ids_json: string;
+  task_snapshot_json: string;
+  deploy_ref: string;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
 }
 
 function normalizeDeliveryMode(value: unknown): DeliveryMode {
@@ -387,7 +625,13 @@ function toAgentQueueItem(row: RawTaskRow): AgentQueueItem {
   };
 }
 
-export function toProjectView(row: RawProjectRow): ProjectDetail {
+export interface ProjectDeployStats {
+  pending_deploy_count: number;
+  failed_deploy_count: number;
+  active_release_id: string | null;
+}
+
+export function toProjectView(row: RawProjectRow, stats?: Partial<ProjectDeployStats>): ProjectDetail {
   const repos = deserializeProjectRepos(row);
   return {
     id: row.id,
@@ -396,6 +640,10 @@ export function toProjectView(row: RawProjectRow): ProjectDetail {
     repos,
     automation_paused: Boolean(row.automation_paused),
     delivery_mode: normalizeDeliveryMode(row.delivery_mode),
+    deploy_policy: normalizeDeployPolicy(row.deploy_policy_json),
+    pending_deploy_count: stats?.pending_deploy_count ?? 0,
+    failed_deploy_count: stats?.failed_deploy_count ?? 0,
+    active_release_id: stats?.active_release_id ?? null,
     widget_code_context: row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
     intake_key: row.intake_key,
     bot_key: row.bot_key,
@@ -415,8 +663,49 @@ export function toAgentProject(row: RawProjectRow): AgentProjectInfo {
     repos,
     automation_paused: Boolean(row.automation_paused),
     delivery_mode: normalizeDeliveryMode(row.delivery_mode),
+    deploy_policy: normalizeDeployPolicy(row.deploy_policy_json),
     widget_code_context: row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
     agent_instructions: row.agent_instructions,
+  };
+}
+
+export function toReleaseView(row: RawReleaseRow): ReleaseRecord {
+  let taskIds: string[] = [];
+  let taskSnapshot: ReleaseTaskSnapshot[] = [];
+  try {
+    const parsed = JSON.parse(row.task_ids_json);
+    if (Array.isArray(parsed)) {
+      taskIds = parsed.filter((v): v is string => typeof v === "string");
+    }
+  } catch {
+    taskIds = [];
+  }
+  try {
+    const parsed = JSON.parse(row.task_snapshot_json);
+    if (Array.isArray(parsed)) {
+      taskSnapshot = parsed as ReleaseTaskSnapshot[];
+    }
+  } catch {
+    taskSnapshot = [];
+  }
+  return {
+    id: row.id,
+    project_id: row.project_id,
+    number: row.number,
+    trigger: (RELEASE_TRIGGERS.has(row.trigger as ReleaseTrigger)
+      ? row.trigger
+      : "manual") as ReleaseTrigger,
+    status: (RELEASE_STATUSES.has(row.status as ReleaseStatus)
+      ? row.status
+      : "failed") as ReleaseStatus,
+    session_id: row.session_id ?? null,
+    task_ids: taskIds,
+    task_snapshot: taskSnapshot,
+    deploy_ref: row.deploy_ref ?? "",
+    summary: row.summary ?? "",
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    finished_at: row.finished_at ?? null,
   };
 }
 
@@ -439,10 +728,18 @@ export function toTaskView(row: RawTaskRow): TaskRecord {
     delivery_ref: row.delivery_ref ?? "",
     triaged_by: row.triaged_by ?? "",
     merged_into: row.merged_into,
+    deploy_status: normalizeTaskDeployStatus(row.deploy_status),
+    deployed_at: row.deployed_at ?? null,
+    release_id: row.release_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     last_seen: row.last_seen,
   };
+  if (typeof row.release_number === "number") {
+    result.release_number = row.release_number;
+  } else if (row.release_number === null) {
+    result.release_number = null;
+  }
   if (typeof row.message_count === "number") {
     result.message_count = row.message_count;
   }
@@ -512,6 +809,7 @@ function bridgeToken() {
 export class Store {
   readonly dbPath: string;
   private db: DatabaseSync;
+  private txDepth = 0;
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
@@ -555,6 +853,9 @@ export class Store {
     if (!cols.some((c) => c.name === "execution_routing_json")) {
       this.db.exec("ALTER TABLE projects ADD COLUMN execution_routing_json TEXT NOT NULL DEFAULT '{}'");
     }
+    if (!cols.some((c) => c.name === "deploy_policy_json")) {
+      this.db.exec("ALTER TABLE projects ADD COLUMN deploy_policy_json TEXT NOT NULL DEFAULT '{}'");
+    }
     const taskCols = this.db
       .prepare("PRAGMA table_info(tasks)")
       .all() as Array<{ name: string }>;
@@ -576,6 +877,18 @@ export class Store {
         "ALTER TABLE tasks ADD COLUMN triaged_by TEXT NOT NULL DEFAULT ''",
       );
     }
+    if (!taskCols.some((c) => c.name === "deploy_status")) {
+      this.db.exec(
+        "ALTER TABLE tasks ADD COLUMN deploy_status TEXT NOT NULL DEFAULT 'not_required'",
+      );
+    }
+    if (!taskCols.some((c) => c.name === "deployed_at")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN deployed_at TEXT");
+    }
+    if (!taskCols.some((c) => c.name === "release_id")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN release_id TEXT");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS tasks_project_deploy ON tasks(project_id, deploy_status, updated_at DESC)");
     const messageCols = this.db.prepare("PRAGMA table_info(chat_messages)").all();
     if (!messageCols.some((c) => c.name === "stop_reason")) {
       this.db.exec("ALTER TABLE chat_messages ADD COLUMN stop_reason TEXT");
@@ -603,8 +916,10 @@ export class Store {
     if (!chatSessionCols.some((c) => c.name === "task_id")) {
       this.db.exec("ALTER TABLE chat_sessions ADD COLUMN task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE");
     }
+    this.migrateChatSessionsForReleases();
     this.db.exec("CREATE INDEX IF NOT EXISTS chat_sessions_project_kind ON chat_sessions(project_id, kind, updated_at DESC)");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS chat_sessions_task_unique ON chat_sessions(task_id) WHERE task_id IS NOT NULL");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS chat_sessions_release_unique ON chat_sessions(release_id) WHERE release_id IS NOT NULL");
     // Before routing existed, only the cloud runner could have issued a thread ID.
     this.db.exec("UPDATE chat_sessions SET resolved_target = 'cloud' WHERE resolved_target = '' AND external_session_id != ''");
     const unmigrated = this.db
@@ -618,17 +933,104 @@ export class Store {
     }
   }
 
+  private migrateChatSessionsForReleases(): void {
+    const meta = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chat_sessions'")
+      .get() as { sql?: string } | undefined;
+    const tableSql = meta?.sql ?? "";
+    const cols = this.db
+      .prepare("PRAGMA table_info(chat_sessions)")
+      .all() as Array<{ name: string }>;
+    const hasReleaseId = cols.some((c) => c.name === "release_id");
+    const hasOldKindCheck = /CHECK\s*\(\s*kind\s+IN\s*\(\s*'chat'\s*,\s*'task'\s*\)\s*\)/i.test(tableSql);
+
+    if (!hasOldKindCheck) {
+      if (!hasReleaseId) {
+        this.db.exec("ALTER TABLE chat_sessions ADD COLUMN release_id TEXT");
+      }
+      return;
+    }
+
+    // Safely rebuild chat_sessions to allow kind='release' and add release_id
+    // without triggering ON DELETE CASCADE on chat_messages.
+    this.db.exec("PRAGMA foreign_keys=OFF");
+    try {
+      this.transaction(true, () => {
+        this.db.exec(`
+          CREATE TABLE chat_sessions_new (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            kind TEXT NOT NULL DEFAULT 'chat' CHECK(kind IN ('chat','task','release')),
+            task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+            release_id TEXT,
+            title TEXT NOT NULL,
+            runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude')),
+            model TEXT NOT NULL DEFAULT '',
+            reasoning_effort TEXT NOT NULL DEFAULT 'default',
+            execution_target TEXT NOT NULL DEFAULT 'auto',
+            resolved_target TEXT NOT NULL DEFAULT '',
+            sandbox_mode TEXT NOT NULL DEFAULT 'read-only' CHECK(sandbox_mode IN ('read-only','workspace-write')),
+            network_access INTEGER NOT NULL DEFAULT 0,
+            external_session_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'idle' CHECK(status IN ('idle','running','error')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO chat_sessions_new (
+            id, project_id, kind, task_id, release_id, title, runtime, model,
+            reasoning_effort, execution_target, resolved_target, sandbox_mode,
+            network_access, external_session_id, status, created_at, updated_at
+          )
+          SELECT
+            id, project_id, kind, task_id, ${hasReleaseId ? "release_id" : "NULL"}, title, runtime, model,
+            reasoning_effort, execution_target, resolved_target, sandbox_mode,
+            network_access, external_session_id, status, created_at, updated_at
+          FROM chat_sessions;
+          DROP TABLE chat_sessions;
+          ALTER TABLE chat_sessions_new RENAME TO chat_sessions;
+          CREATE INDEX IF NOT EXISTS chat_sessions_project ON chat_sessions(project_id, updated_at DESC);
+        `);
+      });
+    } finally {
+      this.db.exec("PRAGMA foreign_keys=ON");
+    }
+  }
+
   close(): void {
     this.db.close();
   }
 
   transaction<T>(write: boolean, fn: () => T): T {
+    if (this.txDepth > 0) {
+      const sp = `rd_sp_${this.txDepth}`;
+      this.db.exec(`SAVEPOINT ${sp}`);
+      this.txDepth += 1;
+      try {
+        const result = fn();
+        this.txDepth -= 1;
+        this.db.exec(`RELEASE SAVEPOINT ${sp}`);
+        return result;
+      } catch (err) {
+        this.txDepth -= 1;
+        try {
+          this.db.exec(`ROLLBACK TO SAVEPOINT ${sp}`);
+          this.db.exec(`RELEASE SAVEPOINT ${sp}`);
+        } catch {
+          // Ignore savepoint rollback failure if outer transaction was aborted.
+        }
+        throw err;
+      }
+    }
+
     this.db.exec(write ? "BEGIN IMMEDIATE" : "BEGIN");
+    this.txDepth = 1;
     try {
       const result = fn();
+      this.txDepth = 0;
       this.db.exec("COMMIT");
       return result;
     } catch (err) {
+      this.txDepth = 0;
       try {
         this.db.exec("ROLLBACK");
       } catch {
@@ -638,10 +1040,33 @@ export class Store {
     }
   }
 
+  getProjectDeployStats(projectId: string): ProjectDeployStats {
+    const counts = this.db
+      .prepare(
+        `SELECT
+           SUM(CASE WHEN deploy_status = 'pending' THEN 1 ELSE 0 END) AS pending_cnt,
+           SUM(CASE WHEN deploy_status = 'failed' THEN 1 ELSE 0 END) AS failed_cnt
+         FROM tasks
+         WHERE project_id = ? AND merged_into IS NULL AND deploy_status IN ('pending', 'failed')`,
+      )
+      .get(projectId) as { pending_cnt?: number | null; failed_cnt?: number | null } | undefined;
+    const activeRel = this.db
+      .prepare(
+        "SELECT id FROM releases WHERE project_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(projectId) as { id?: string } | undefined;
+    return {
+      pending_deploy_count: Number(counts?.pending_cnt ?? 0),
+      failed_deploy_count: Number(counts?.failed_cnt ?? 0),
+      active_release_id: activeRel?.id ?? null,
+    };
+  }
+
   listProjects(): ProjectSummary[] {
     const rows = this.db
       .prepare(
-        "SELECT id, name, repo, repos, automation_paused, delivery_mode, widget_code_context, created_at FROM projects ORDER BY created_at",
+        `SELECT id, name, repo, repos, automation_paused, delivery_mode, deploy_policy_json, widget_code_context, created_at
+         FROM projects ORDER BY created_at`,
       )
       .all() as unknown as Array<{
       id: string;
@@ -650,11 +1075,41 @@ export class Store {
       repos?: string;
       automation_paused?: number;
       delivery_mode?: string;
+      deploy_policy_json?: string;
       widget_code_context?: number;
       created_at: string;
     }>;
+    const taskCounts = this.db
+      .prepare(
+        `SELECT project_id,
+           SUM(CASE WHEN deploy_status = 'pending' THEN 1 ELSE 0 END) AS pending_cnt,
+           SUM(CASE WHEN deploy_status = 'failed' THEN 1 ELSE 0 END) AS failed_cnt
+         FROM tasks
+         WHERE merged_into IS NULL AND deploy_status IN ('pending', 'failed')
+         GROUP BY project_id`,
+      )
+      .all() as Array<{ project_id: string; pending_cnt: number; failed_cnt: number }>;
+    const countMap = new Map<string, { pending: number; failed: number }>();
+    for (const c of taskCounts) {
+      countMap.set(c.project_id, {
+        pending: Number(c.pending_cnt ?? 0),
+        failed: Number(c.failed_cnt ?? 0),
+      });
+    }
+    const activeReleases = this.db
+      .prepare(
+        `SELECT project_id, id FROM releases WHERE status = 'running' ORDER BY created_at DESC`,
+      )
+      .all() as Array<{ project_id: string; id: string }>;
+    const activeMap = new Map<string, string>();
+    for (const r of activeReleases) {
+      if (!activeMap.has(r.project_id)) {
+        activeMap.set(r.project_id, r.id);
+      }
+    }
     return rows.map((row) => {
       const repos = deserializeProjectRepos(row);
+      const counts = countMap.get(row.id);
       return {
         id: row.id,
         name: row.name,
@@ -662,6 +1117,10 @@ export class Store {
         repos,
         automation_paused: Boolean(row.automation_paused),
         delivery_mode: normalizeDeliveryMode(row.delivery_mode),
+        deploy_policy: normalizeDeployPolicy(row.deploy_policy_json),
+        pending_deploy_count: counts?.pending ?? 0,
+        failed_deploy_count: counts?.failed ?? 0,
+        active_release_id: activeMap.get(row.id) ?? null,
         widget_code_context:
           row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
         created_at: row.created_at,
@@ -675,6 +1134,27 @@ export class Store {
       .get(projectId) as unknown as RawProjectRow | undefined;
     if (!row) throw new ApiError(404, "Record not found");
     return row;
+  }
+
+  getProjectDetail(projectId: string): ProjectDetail {
+    const row = this.getProjectRow(projectId);
+    return toProjectView(row, this.getProjectDeployStats(projectId));
+  }
+
+  getProjectDeployPolicy(projectId: string): ProjectDeployPolicy {
+    return normalizeDeployPolicy(this.getProjectRow(projectId).deploy_policy_json);
+  }
+
+  updateProjectDeployPolicy(
+    projectId: string,
+    patch: Record<string, unknown>,
+  ): ProjectDeployPolicy {
+    const current = this.getProjectDeployPolicy(projectId);
+    const next = parseDeployPolicyPatch(current, patch);
+    this.db
+      .prepare("UPDATE projects SET deploy_policy_json = ? WHERE id = ?")
+      .run(JSON.stringify(next), projectId);
+    return next;
   }
 
   createBridgeAgent(name: string): { agent: BridgeAgentSummary; token: string } {
@@ -877,7 +1357,7 @@ export class Store {
         deliveryMode,
         widgetCodeContext,
       );
-    return toProjectView(this.getProjectRow(projectId));
+    return this.getProjectDetail(projectId);
   }
 
   updateProject(projectId: string, data: Record<string, unknown>): ProjectDetail {
@@ -926,9 +1406,20 @@ export class Store {
       }
       widgetCodeContext = data.widget_code_context ? 1 : 0;
     }
+    let deployPolicyJson = project.deploy_policy_json ?? "{}";
+    if ("deploy_policy" in data && data.deploy_policy !== undefined) {
+      if (!data.deploy_policy || typeof data.deploy_policy !== "object" || Array.isArray(data.deploy_policy)) {
+        throw new ApiError(400, "deploy_policy must be an object");
+      }
+      const nextPolicy = parseDeployPolicyPatch(
+        normalizeDeployPolicy(deployPolicyJson),
+        data.deploy_policy as Record<string, unknown>,
+      );
+      deployPolicyJson = JSON.stringify(nextPolicy);
+    }
     this.db
       .prepare(
-        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ?, automation_paused = ?, delivery_mode = ?, widget_code_context = ? WHERE id = ?",
+        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ?, automation_paused = ?, delivery_mode = ?, widget_code_context = ?, deploy_policy_json = ? WHERE id = ?",
       )
       .run(
         name,
@@ -939,9 +1430,10 @@ export class Store {
         automationPaused,
         deliveryMode,
         widgetCodeContext,
+        deployPolicyJson,
         projectId,
       );
-    return toProjectView(this.getProjectRow(projectId));
+    return this.getProjectDetail(projectId);
   }
 
   listTasks(projectId: string): TaskRecord[] {
@@ -952,9 +1444,11 @@ export class Store {
            (SELECT COUNT(*) FROM tasks sub WHERE sub.merged_into = t.id) AS merged_count,
            s.id AS agent_session_id,
            s.status AS agent_session_status,
-           s.resolved_target AS agent_session_target
+           s.resolved_target AS agent_session_target,
+           r.number AS release_number
          FROM tasks t
          LEFT JOIN chat_sessions s ON s.task_id = t.id AND s.kind = 'task'
+         LEFT JOIN releases r ON r.id = t.release_id
          WHERE t.project_id = ?
          ORDER BY t.updated_at DESC, t.number DESC`,
       )
@@ -970,9 +1464,11 @@ export class Store {
            (SELECT COUNT(*) FROM tasks sub WHERE sub.merged_into = t.id) AS merged_count,
            s.id AS agent_session_id,
            s.status AS agent_session_status,
-           s.resolved_target AS agent_session_target
+           s.resolved_target AS agent_session_target,
+           r.number AS release_number
          FROM tasks t
          LEFT JOIN chat_sessions s ON s.task_id = t.id AND s.kind = 'task'
+         LEFT JOIN releases r ON r.id = t.release_id
          WHERE t.id = ?`,
       )
       .get(taskId) as unknown as RawTaskRow | undefined;
@@ -1323,6 +1819,10 @@ export class Store {
       changes = { status: newStatus };
       if (newStatus === "done") {
         changes.owner = "none";
+      } else {
+        changes.deploy_status = "not_required";
+        changes.deployed_at = null;
+        changes.release_id = null;
       }
       event = `${status} → ${newStatus}`;
     } else if (action === "reopen" && owner !== "agent") {
@@ -1332,6 +1832,9 @@ export class Store {
         lease: null,
         attempts: 0,
         resolution: null,
+        deploy_status: "not_required",
+        deployed_at: null,
+        release_id: null,
       };
       event = "Reopened for automation";
     } else if (action === "merge" && owner !== "agent") {
@@ -1357,6 +1860,9 @@ export class Store {
         status: "done",
         owner: "none",
         resolution: "merged",
+        deploy_status: "not_required",
+        deployed_at: null,
+        release_id: null,
       };
       event = `Merged into #${target.number}`;
       this.updateTaskFields(target, {});
@@ -1372,7 +1878,7 @@ export class Store {
 
     this.updateTaskFields(task, changes);
     this.addMessage(task.id, "event", "human", event);
-    return { task: toTaskView(this.getTaskRow(task.id)) };
+    return { task: this.getTaskView(task.id) };
   }
 
   operatorAddComment(
@@ -1393,13 +1899,16 @@ export class Store {
         status: "ready",
         attempts: 0,
         resolution: null,
+        deploy_status: "not_required",
+        deployed_at: null,
+        release_id: null,
       });
       this.addMessage(taskId, "event", "human", "Reopened by operator comment");
       reopened = true;
     }
     return {
       message,
-      task: toTaskView(this.getTaskRow(taskId)),
+      task: this.getTaskView(taskId),
       reopened,
     };
   }
@@ -1490,13 +1999,25 @@ export class Store {
     return byId;
   }
 
+  private resolveDeployStatusOnDone(
+    project: RawProjectRow,
+    resolution: string | null,
+    needsDeploy?: boolean,
+  ): TaskDeployStatus {
+    if (resolution !== "shipped") return "not_required";
+    if (needsDeploy === false) return "not_required";
+    const policy = normalizeDeployPolicy(project.deploy_policy_json);
+    if (policy.mode === "none") return "not_required";
+    return "pending";
+  }
+
   chatAgentTaskOp(
     projectId: string,
     action: string,
     params: Record<string, unknown>,
     context?: { sessionId?: string },
-  ): { result: unknown; mutated?: { task_id?: string; action: string } } {
-    this.getProjectRow(projectId);
+  ): { result: unknown; mutated?: { task_id?: string; release_id?: string; action: string } } {
+    const project = this.getProjectRow(projectId);
 
     if (action === "list_tasks") {
       const statusFilter =
@@ -1513,6 +2034,16 @@ export class Store {
       if (priorityFilter && !PRIORITIES.has(priorityFilter as TaskPriority)) {
         throw new ApiError(400, "Invalid priority filter");
       }
+      const deployStatusFilter =
+        typeof params.deploy_status === "string" && params.deploy_status.trim()
+          ? params.deploy_status.trim()
+          : "";
+      if (
+        deployStatusFilter &&
+        !TASK_DEPLOY_STATUSES.has(deployStatusFilter as TaskDeployStatus)
+      ) {
+        throw new ApiError(400, "Invalid deploy_status filter");
+      }
       const search =
         typeof params.search === "string" ? params.search.trim().toLowerCase() : "";
       const includeDone = params.include_done !== false;
@@ -1524,9 +2055,14 @@ export class Store {
 
       let tasks = this.listTasks(projectId);
       if (!includeMerged) tasks = tasks.filter((t) => !t.merged_into);
-      if (!includeDone && !statusFilter) tasks = tasks.filter((t) => t.status !== "done");
+      if (!includeDone && !statusFilter && !deployStatusFilter) {
+        tasks = tasks.filter((t) => t.status !== "done");
+      }
       if (statusFilter) tasks = tasks.filter((t) => t.status === statusFilter);
       if (priorityFilter) tasks = tasks.filter((t) => t.priority === priorityFilter);
+      if (deployStatusFilter) {
+        tasks = tasks.filter((t) => t.deploy_status === deployStatusFilter);
+      }
       if (search) {
         tasks = tasks.filter(
           (t) =>
@@ -1548,6 +2084,10 @@ export class Store {
         resolution: t.resolution,
         triaged_by: t.triaged_by,
         delivery_ref: t.delivery_ref,
+        deploy_status: t.deploy_status,
+        release_id: t.release_id,
+        release_number: t.release_number ?? null,
+        deployed_at: t.deployed_at,
         attempts: t.attempts,
         message_count: t.message_count ?? 0,
         merged_count: t.merged_count ?? 0,
@@ -1560,7 +2100,7 @@ export class Store {
 
     if (action === "get_task") {
       const row = this.findProjectTask(projectId, params.task ?? params.task_id ?? params.number);
-      const task = toTaskView(row);
+      const task = this.getTaskView(row.id);
       const messages = this.getTaskMessages(row.id);
       const merged = this.getMergedTasks(row.id);
       return {
@@ -1588,11 +2128,14 @@ export class Store {
           status: "ready",
           resolution: null,
           attempts: 0,
+          deploy_status: "not_required",
+          deployed_at: null,
+          release_id: null,
         });
         this.addMessage(row.id, "event", "agent", "Agent reopened task via comment");
         reopened = true;
       }
-      const updated = toTaskView(this.getTaskRow(row.id));
+      const updated = this.getTaskView(row.id);
       return {
         result: { code: `RD-${updated.number}`, message, task: updated, reopened },
         mutated: { task_id: row.id, action: "comment_task" },
@@ -1678,6 +2221,9 @@ export class Store {
           owner: "none",
           lease: null,
           resolution: "merged",
+          deploy_status: "not_required",
+          deployed_at: null,
+          release_id: null,
         });
         if (comment) {
           this.addMessage(row.id, "comment", "agent", comment);
@@ -1690,7 +2236,7 @@ export class Store {
           "agent",
           `Linked feedback RD-${row.number}: ${row.title}`,
         );
-        const updated = toTaskView(this.getTaskRow(row.id));
+        const updated = this.getTaskView(row.id);
         return {
           result: { code: `RD-${updated.number}`, task: updated, merged_into: `RD-${target.number}` },
           mutated: { task_id: row.id, action: "transition_task" },
@@ -1701,12 +2247,22 @@ export class Store {
       if (!STATUSES.has(nextStatus) || nextStatus === "handoff") {
         throw new ApiError(400, "Invalid target status (allowed: triage, ready, working, waiting, review, done)");
       }
+      let needsDeploy: boolean | undefined;
+      if ("needs_deploy" in params && params.needs_deploy !== undefined) {
+        if (typeof params.needs_deploy !== "boolean") {
+          throw new ApiError(400, "needs_deploy must be a boolean");
+        }
+        needsDeploy = params.needs_deploy;
+      }
       const changes: Record<string, string | number | null> = { status: nextStatus };
       if (nextStatus === "working") {
         changes.owner = "agent";
         changes.lease = ownSessionLease ? row.lease : null;
         changes.last_seen = nowIso();
         changes.resolution = null;
+        changes.deploy_status = "not_required";
+        changes.deployed_at = null;
+        changes.release_id = null;
       } else if (nextStatus === "done") {
         const rawRes =
           "resolution" in params && params.resolution !== undefined && params.resolution !== null
@@ -1715,9 +2271,13 @@ export class Store {
         if (rawRes && rawRes !== "shipped" && rawRes !== "dismissed" && rawRes !== "wontfix") {
           throw new ApiError(400, "Invalid resolution (allowed: shipped, dismissed, wontfix)");
         }
+        const effectiveRes = rawRes || "shipped";
         changes.owner = "none";
         changes.lease = null;
-        changes.resolution = (rawRes || "shipped") as TaskResolution;
+        changes.resolution = effectiveRes as TaskResolution;
+        changes.deploy_status = this.resolveDeployStatusOnDone(project, effectiveRes, needsDeploy);
+        changes.deployed_at = null;
+        changes.release_id = null;
         if (ownSessionLease && rawRes === "dismissed" && !row.triaged_by) {
           changes.triaged_by = "local_agent";
         }
@@ -1725,6 +2285,9 @@ export class Store {
         changes.owner = "none";
         changes.lease = null;
         changes.resolution = null;
+        changes.deploy_status = "not_required";
+        changes.deployed_at = null;
+        changes.release_id = null;
       }
       if ("delivery_ref" in params && params.delivery_ref !== undefined) {
         changes.delivery_ref = field(params, "delivery_ref", 500, false);
@@ -1739,10 +2302,77 @@ export class Store {
         "agent",
         `Agent transitioned status: ${row.status} → ${nextStatus}`,
       );
-      const updated = toTaskView(this.getTaskRow(row.id));
+      const updated = this.getTaskView(row.id);
       return {
         result: { code: `RD-${updated.number}`, task: updated },
         mutated: { task_id: row.id, action: "transition_task" },
+      };
+    }
+
+    if (action === "list_releases") {
+      const statusFilter =
+        typeof params.status === "string" && params.status.trim()
+          ? params.status.trim()
+          : "";
+      if (statusFilter && !RELEASE_STATUSES.has(statusFilter as ReleaseStatus)) {
+        throw new ApiError(400, "Invalid release status filter");
+      }
+      const limit = Math.max(1, Math.min(50, Math.floor(Number(params.limit) || 20)));
+      let releases = this.listReleases(projectId, 100);
+      if (statusFilter) {
+        releases = releases.filter((r) => r.status === statusFilter);
+      }
+      return {
+        result: {
+          total: releases.length,
+          releases: releases.slice(0, limit).map((r) => ({
+            ...r,
+            code: `REL-${r.number}`,
+          })),
+        },
+      };
+    }
+
+    if (action === "finish_release") {
+      const releaseRef = params.release_id ?? params.release ?? params.number;
+      if (releaseRef === undefined || releaseRef === null || String(releaseRef).trim() === "") {
+        throw new ApiError(400, "release_id is required");
+      }
+      const rawStatus = field(params, "status", 16);
+      if (rawStatus !== "succeeded" && rawStatus !== "failed" && rawStatus !== "blocked") {
+        throw new ApiError(400, "Invalid release status (allowed: succeeded, failed, blocked)");
+      }
+      const summary = field(params, "summary", 16000);
+      const deployRef =
+        "deploy_ref" in params && params.deploy_ref !== undefined
+          ? field(params, "deploy_ref", 500, false)
+          : undefined;
+      let deployedTaskIds: string[] | undefined;
+      if ("deployed_task_ids" in params && params.deployed_task_ids !== undefined) {
+        if (!Array.isArray(params.deployed_task_ids)) {
+          throw new ApiError(400, "deployed_task_ids must be an array of task IDs or codes");
+        }
+        deployedTaskIds = params.deployed_task_ids.map((item) => {
+          if (typeof item !== "string" || !item.trim()) {
+            throw new ApiError(400, "Invalid entry in deployed_task_ids");
+          }
+          return item.trim();
+        });
+      }
+      const { release, updatedTaskIds } = this.finishRelease(projectId, releaseRef as string | number, {
+        status: rawStatus,
+        summary,
+        deploy_ref: deployRef,
+        deployed_task_ids: deployedTaskIds,
+        author: "agent",
+      });
+      return {
+        result: {
+          code: `REL-${release.number}`,
+          release,
+          updated_task_ids: updatedTaskIds,
+        },
+        mutated: { release_id: release.id, action: "finish_release" },
       };
     }
 
@@ -2132,6 +2762,10 @@ export class Store {
       const completeNow = data.complete === true;
       const nextStatus: TaskStatus = completeNow ? "done" : "review";
       const nextResolution: TaskResolution = completeNow ? "shipped" : null;
+      const needsDeploy = typeof data.needs_deploy === "boolean" ? data.needs_deploy : undefined;
+      const nextDeployStatus: TaskDeployStatus = completeNow
+        ? this.resolveDeployStatusOnDone(project, nextResolution, needsDeploy)
+        : "not_required";
       const fallback = completeNow
         ? "Agent shipped and completed task"
         : "Agent submitted task for review";
@@ -2140,6 +2774,9 @@ export class Store {
         status: nextStatus,
         owner: "none",
         resolution: nextResolution,
+        deploy_status: nextDeployStatus,
+        deployed_at: null,
+        release_id: null,
         last_seen: nowIso(),
       });
       if (completeNow && body) {
@@ -2233,9 +2870,10 @@ export class Store {
         ? this.db.prepare(sql).all(projectId)
         : this.db.prepare(sql).all(projectId, kind)
     ) as unknown as Array<
-      Omit<ChatSessionRecord, "network_access" | "kind" | "task_id"> & {
+      Omit<ChatSessionRecord, "network_access" | "kind" | "task_id" | "release_id"> & {
         kind?: string;
         task_id?: string | null;
+        release_id?: string | null;
         network_access?: number;
         message_count: number;
         last_message_preview: string | null;
@@ -2243,8 +2881,9 @@ export class Store {
     >;
     return rows.map((row) => ({
       ...row,
-      kind: row.kind === "task" ? "task" : "chat",
+      kind: normalizeChatSessionKind(row.kind),
       task_id: row.task_id ?? null,
+      release_id: row.release_id ?? null,
       network_access: Boolean(row.network_access),
       message_count: Number(row.message_count ?? 0),
       last_message_preview: row.last_message_preview
@@ -2258,17 +2897,19 @@ export class Store {
     const row = this.db
       .prepare("SELECT * FROM chat_sessions WHERE id = ? AND project_id = ?")
       .get(sessionId, projectId) as unknown as
-      | (Omit<ChatSessionRecord, "network_access" | "kind" | "task_id"> & {
+      | (Omit<ChatSessionRecord, "network_access" | "kind" | "task_id" | "release_id"> & {
           kind?: string;
           task_id?: string | null;
+          release_id?: string | null;
           network_access?: number;
         })
       | undefined;
     if (!row) throw new ApiError(404, "对话会话不存在");
     return {
       ...row,
-      kind: row.kind === "task" ? "task" : "chat",
+      kind: normalizeChatSessionKind(row.kind),
       task_id: row.task_id ?? null,
+      release_id: row.release_id ?? null,
       network_access: Boolean(row.network_access),
     };
   }
@@ -2277,9 +2918,10 @@ export class Store {
     const row = this.db
       .prepare("SELECT * FROM chat_sessions WHERE task_id = ? AND kind = 'task' LIMIT 1")
       .get(taskId) as unknown as
-      | (Omit<ChatSessionRecord, "network_access" | "kind" | "task_id"> & {
+      | (Omit<ChatSessionRecord, "network_access" | "kind" | "task_id" | "release_id"> & {
           kind?: string;
           task_id?: string | null;
+          release_id?: string | null;
           network_access?: number;
         })
       | undefined;
@@ -2288,6 +2930,28 @@ export class Store {
       ...row,
       kind: "task",
       task_id: row.task_id ?? taskId,
+      release_id: row.release_id ?? null,
+      network_access: Boolean(row.network_access),
+    };
+  }
+
+  getReleaseChatSession(releaseId: string): ChatSessionRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM chat_sessions WHERE release_id = ? AND kind = 'release' LIMIT 1")
+      .get(releaseId) as unknown as
+      | (Omit<ChatSessionRecord, "network_access" | "kind" | "task_id" | "release_id"> & {
+          kind?: string;
+          task_id?: string | null;
+          release_id?: string | null;
+          network_access?: number;
+        })
+      | undefined;
+    if (!row) return null;
+    return {
+      ...row,
+      kind: "release",
+      task_id: row.task_id ?? null,
+      release_id: row.release_id ?? releaseId,
       network_access: Boolean(row.network_access),
     };
   }
@@ -2295,13 +2959,16 @@ export class Store {
   createChatSession(
     projectId: string,
     data: Partial<Pick<ChatSessionRecord,
-      "kind" | "task_id" | "title" | "runtime" | "model" | "reasoning_effort" | "execution_target" | "sandbox_mode" | "network_access"
+      "kind" | "task_id" | "release_id" | "title" | "runtime" | "model" | "reasoning_effort" | "execution_target" | "sandbox_mode" | "network_access"
     >> = {},
   ): ChatSessionRecord {
     this.getProjectRow(projectId);
-    const kind: ChatSessionKind = data.kind === "task" ? "task" : "chat";
+    const kind: ChatSessionKind = normalizeChatSessionKind(data.kind);
     const taskId = kind === "task" && typeof data.task_id === "string" && data.task_id.trim()
       ? data.task_id.trim()
+      : null;
+    const releaseId = kind === "release" && typeof data.release_id === "string" && data.release_id.trim()
+      ? data.release_id.trim()
       : null;
     const title =
       typeof data.title === "string" && data.title.trim()
@@ -2317,15 +2984,29 @@ export class Store {
     const now = nowIso();
     this.db
       .prepare(
-        `INSERT INTO chat_sessions(id, project_id, kind, task_id, title, runtime, model, reasoning_effort, execution_target, sandbox_mode, network_access, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chat_sessions(id, project_id, kind, task_id, release_id, title, runtime, model, reasoning_effort, execution_target, sandbox_mode, network_access, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, projectId, kind, taskId, title, runtime, model, data.reasoning_effort ?? "default",
+      .run(id, projectId, kind, taskId, releaseId, title, runtime, model, data.reasoning_effort ?? "default",
         data.execution_target ?? "auto", sandboxMode, networkAccess, now, now);
     return this.getChatSession(projectId, id);
   }
 
   /* ── Event-Driven Task Session Lifecycle Helpers ──────────────────────── */
+
+  hasActiveRelease(projectId: string): boolean {
+    const running = this.db
+      .prepare("SELECT 1 FROM releases WHERE project_id = ? AND status = 'running' LIMIT 1")
+      .get(projectId);
+    return Boolean(running);
+  }
+
+  getActiveRelease(projectId: string): ReleaseRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM releases WHERE project_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1")
+      .get(projectId) as unknown as RawReleaseRow | undefined;
+    return row ? toReleaseView(row) : null;
+  }
 
   hasActiveAgentTask(projectId: string): boolean {
     const working = this.db
@@ -2336,10 +3017,357 @@ export class Store {
     if (working) return true;
     const runningSession = this.db
       .prepare(
-        "SELECT 1 FROM chat_sessions WHERE project_id = ? AND kind = 'task' AND status = 'running' LIMIT 1",
+        "SELECT 1 FROM chat_sessions WHERE project_id = ? AND kind IN ('task', 'release') AND status = 'running' LIMIT 1",
       )
       .get(projectId);
-    return Boolean(runningSession);
+    if (runningSession) return true;
+    return this.hasActiveRelease(projectId);
+  }
+
+  hasPendingReadyTasks(projectId: string): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT 1 FROM tasks WHERE project_id = ? AND status = 'ready' AND owner = 'none' AND merged_into IS NULL LIMIT 1",
+      )
+      .get(projectId);
+    return Boolean(row);
+  }
+
+  listTasksByDeployStatus(projectId: string, statuses: TaskDeployStatus[]): TaskRecord[] {
+    if (statuses.length === 0) return [];
+    const placeholders = statuses.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `SELECT t.*,
+           (SELECT COUNT(*) FROM messages m WHERE m.task_id = t.id AND m.kind = 'comment') AS message_count,
+           (SELECT COUNT(*) FROM tasks sub WHERE sub.merged_into = t.id) AS merged_count,
+           s.id AS agent_session_id,
+           s.status AS agent_session_status,
+           s.resolved_target AS agent_session_target,
+           r.number AS release_number
+         FROM tasks t
+         LEFT JOIN chat_sessions s ON s.task_id = t.id AND s.kind = 'task'
+         LEFT JOIN releases r ON r.id = t.release_id
+         WHERE t.project_id = ? AND t.merged_into IS NULL AND t.deploy_status IN (${placeholders})
+         ORDER BY
+           CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+           t.number ASC`,
+      )
+      .all(projectId, ...statuses) as unknown as RawTaskRow[];
+    return rows.map(toTaskView);
+  }
+
+  getLastRelease(projectId: string): ReleaseRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM releases WHERE project_id = ? ORDER BY number DESC LIMIT 1")
+      .get(projectId) as unknown as RawReleaseRow | undefined;
+    return row ? toReleaseView(row) : null;
+  }
+
+  listReleases(projectId: string, limit = 50): ReleaseRecord[] {
+    this.getProjectRow(projectId);
+    const capped = Math.max(1, Math.min(200, Math.floor(limit || 50)));
+    const rows = this.db
+      .prepare("SELECT * FROM releases WHERE project_id = ? ORDER BY number DESC LIMIT ?")
+      .all(projectId, capped) as unknown as RawReleaseRow[];
+    return rows.map(toReleaseView);
+  }
+
+  findProjectRelease(projectId: string, ref: string | number): RawReleaseRow {
+    if (typeof ref === "number" && Number.isInteger(ref) && ref > 0) {
+      const row = this.db
+        .prepare("SELECT * FROM releases WHERE project_id = ? AND number = ? LIMIT 1")
+        .get(projectId, ref) as unknown as RawReleaseRow | undefined;
+      if (!row) throw new ApiError(404, `Release REL-${ref} not found`);
+      return row;
+    }
+    const raw = typeof ref === "string" ? ref.trim() : "";
+    if (!raw || raw.length > 128) {
+      throw new ApiError(400, "Invalid release reference");
+    }
+    const codeMatch = /^(?:rel-|#)?(\d+)$/i.exec(raw);
+    if (codeMatch) {
+      const num = Number(codeMatch[1]);
+      if (Number.isInteger(num) && num > 0) {
+        const byNum = this.db
+          .prepare("SELECT * FROM releases WHERE project_id = ? AND number = ? LIMIT 1")
+          .get(projectId, num) as unknown as RawReleaseRow | undefined;
+        if (byNum) return byNum;
+      }
+    }
+    const byId = this.db
+      .prepare("SELECT * FROM releases WHERE project_id = ? AND id = ? LIMIT 1")
+      .get(projectId, raw) as unknown as RawReleaseRow | undefined;
+    if (!byId) throw new ApiError(404, `Release ${raw} not found`);
+    return byId;
+  }
+
+  getRelease(projectId: string, releaseIdOrRef: string | number): ReleaseRecord {
+    return toReleaseView(this.findProjectRelease(projectId, releaseIdOrRef));
+  }
+
+  findReleaseById(releaseId: string): ReleaseRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM releases WHERE id = ? LIMIT 1")
+      .get(releaseId) as unknown as RawReleaseRow | undefined;
+    return row ? toReleaseView(row) : null;
+  }
+
+  createRelease(
+    projectId: string,
+    options: {
+      trigger: ReleaseTrigger;
+      taskIds: string[];
+      runtime?: ChatRuntime;
+      model?: string;
+      reasoning_effort?: ChatSessionRecord["reasoning_effort"];
+      execution_target?: string;
+      network_access?: boolean;
+    },
+  ): { release: ReleaseRecord; session: ChatSessionRecord } {
+    return this.transaction(true, () => {
+      this.getProjectRow(projectId);
+      if (this.hasActiveRelease(projectId)) {
+        throw new ApiError(409, "A release is already running for this project");
+      }
+
+      const uniqueTaskIds = [...new Set(options.taskIds.filter((id) => typeof id === "string" && id.trim()))];
+      const snapshot: ReleaseTaskSnapshot[] = [];
+      const claimedTaskIds: string[] = [];
+      for (const taskId of uniqueTaskIds) {
+        const task = this.db
+          .prepare("SELECT * FROM tasks WHERE id = ? AND project_id = ? AND merged_into IS NULL")
+          .get(taskId, projectId) as unknown as RawTaskRow | undefined;
+        if (!task) continue;
+        if (task.deploy_status !== "pending" && task.deploy_status !== "failed") continue;
+        claimedTaskIds.push(task.id);
+        snapshot.push({
+          id: task.id,
+          number: task.number,
+          title: task.title,
+          priority: task.priority as TaskPriority,
+          delivery_ref: task.delivery_ref ?? "",
+        });
+      }
+
+      const nextRow = this.db
+        .prepare("SELECT COALESCE(MAX(number), 0) + 1 AS next_num FROM releases WHERE project_id = ?")
+        .get(projectId) as unknown as { next_num: number };
+      const releaseNumber = nextRow.next_num;
+      const releaseId = uuidHex();
+      const sessionId = uuidHex();
+      const now = nowIso();
+      const title = `REL-${releaseNumber} 发布${claimedTaskIds.length > 0 ? `（${claimedTaskIds.length} 个任务）` : ""}`;
+      const runtime: ChatRuntime = options.runtime === "claude" ? "claude" : "codex";
+      const model = typeof options.model === "string" ? options.model.trim().slice(0, 160) : "";
+      const reasoningEffort = options.reasoning_effort ?? "default";
+      const executionTarget = options.execution_target ?? "auto";
+      const networkAccess = options.network_access === false ? 0 : 1;
+
+      this.db
+        .prepare(
+          `INSERT INTO releases(id, project_id, number, trigger, status, session_id, task_ids_json, task_snapshot_json, deploy_ref, summary, created_at, updated_at, finished_at)
+           VALUES(?, ?, ?, ?, 'running', ?, ?, ?, '', '', ?, ?, NULL)`,
+        )
+        .run(
+          releaseId,
+          projectId,
+          releaseNumber,
+          options.trigger,
+          sessionId,
+          JSON.stringify(claimedTaskIds),
+          JSON.stringify(snapshot),
+          now,
+          now,
+        );
+
+      this.db
+        .prepare(
+          `INSERT INTO chat_sessions(id, project_id, kind, task_id, release_id, title, runtime, model, reasoning_effort, execution_target, sandbox_mode, network_access, created_at, updated_at)
+           VALUES(?, ?, 'release', NULL, ?, ?, ?, ?, ?, ?, 'workspace-write', ?, ?, ?)`,
+        )
+        .run(
+          sessionId,
+          projectId,
+          releaseId,
+          title,
+          runtime,
+          model,
+          reasoningEffort,
+          executionTarget,
+          networkAccess,
+          now,
+          now,
+        );
+
+      for (const taskId of claimedTaskIds) {
+        this.db
+          .prepare("UPDATE tasks SET deploy_status = 'deploying', release_id = ?, updated_at = ? WHERE id = ?")
+          .run(releaseId, now, taskId);
+        this.addMessage(taskId, "event", "system", `Queued for release REL-${releaseNumber}`);
+      }
+
+      return {
+        release: this.getRelease(projectId, releaseId),
+        session: this.getChatSession(projectId, sessionId),
+      };
+    });
+  }
+
+  finishRelease(
+    projectId: string,
+    releaseRef: string | number,
+    payload: {
+      status: "succeeded" | "failed" | "blocked";
+      summary: string;
+      deploy_ref?: string;
+      deployed_task_ids?: string[];
+      author?: "agent" | "system";
+    },
+  ): { release: ReleaseRecord; updatedTaskIds: string[] } {
+    return this.transaction(true, () => {
+      const row = this.findProjectRelease(projectId, releaseRef);
+      if (row.status !== "running") {
+        throw new ApiError(409, `Release REL-${row.number} is already finished (${row.status})`);
+      }
+      const release = toReleaseView(row);
+      const now = nowIso();
+      const author = payload.author ?? "agent";
+      const deployRef = payload.deploy_ref?.trim() ?? release.deploy_ref ?? "";
+      const summary = payload.summary.trim().slice(0, 16000);
+      const updatedTaskIds: string[] = [];
+
+      if (payload.status === "succeeded") {
+        let targetIds: Set<string>;
+        if (payload.deployed_task_ids && payload.deployed_task_ids.length > 0) {
+          targetIds = new Set<string>();
+          for (const ref of payload.deployed_task_ids) {
+            try {
+              const found = this.findProjectTask(projectId, ref);
+              targetIds.add(found.id);
+            } catch {
+              // Ignore unknown task references if agent listed an unrelated code
+            }
+          }
+        } else {
+          targetIds = new Set<string>(release.task_ids);
+        }
+
+        for (const taskId of targetIds) {
+          const taskRow = this.db
+            .prepare("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
+            .get(taskId, projectId) as unknown as RawTaskRow | undefined;
+          if (!taskRow) continue;
+          if (
+            taskRow.deploy_status === "deploying" ||
+            taskRow.deploy_status === "pending" ||
+            taskRow.deploy_status === "failed"
+          ) {
+            this.db
+              .prepare(
+                "UPDATE tasks SET deploy_status = 'deployed', deployed_at = ?, release_id = ?, updated_at = ? WHERE id = ?",
+              )
+              .run(now, release.id, now, taskId);
+            this.addMessage(
+              taskId,
+              "event",
+              author,
+              `Released in REL-${release.number}${deployRef ? ` (${deployRef})` : ""}`,
+            );
+            updatedTaskIds.push(taskId);
+          }
+        }
+
+        // Any tasks claimed by this release that were NOT deployed return to pending.
+        for (const taskId of release.task_ids) {
+          if (targetIds.has(taskId)) continue;
+          const taskRow = this.db
+            .prepare("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
+            .get(taskId, projectId) as unknown as RawTaskRow | undefined;
+          if (taskRow && taskRow.deploy_status === "deploying" && taskRow.release_id === release.id) {
+            this.db
+              .prepare(
+                "UPDATE tasks SET deploy_status = 'pending', release_id = NULL, updated_at = ? WHERE id = ?",
+              )
+              .run(now, taskId);
+            this.addMessage(
+              taskId,
+              "event",
+              author,
+              `Not included in REL-${release.number}; returned to pending deploy`,
+            );
+          }
+        }
+      } else {
+        for (const taskId of release.task_ids) {
+          const taskRow = this.db
+            .prepare("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
+            .get(taskId, projectId) as unknown as RawTaskRow | undefined;
+          if (taskRow && taskRow.deploy_status === "deploying" && taskRow.release_id === release.id) {
+            this.db
+              .prepare("UPDATE tasks SET deploy_status = 'failed', updated_at = ? WHERE id = ?")
+              .run(now, taskId);
+            this.addMessage(
+              taskId,
+              "event",
+              author,
+              `Release REL-${release.number} ${payload.status}: ${summary.slice(0, 300)}`,
+            );
+            updatedTaskIds.push(taskId);
+          }
+        }
+      }
+
+      this.db
+        .prepare(
+          `UPDATE releases
+           SET status = ?, summary = ?, deploy_ref = ?, updated_at = ?, finished_at = ?
+           WHERE id = ?`,
+        )
+        .run(payload.status, summary, deployRef, now, now, release.id);
+
+      return {
+        release: this.getRelease(projectId, release.id),
+        updatedTaskIds,
+      };
+    });
+  }
+
+  finalizeReleaseSessionTurn(
+    releaseId: string,
+    sessionId: string,
+    outcome: {
+      status: "done" | "error" | "aborted";
+      stopReason?: string;
+      error?: string;
+      replyContent?: string;
+    },
+  ): ReleaseRecord | null {
+    if (outcome.status === "aborted" && outcome.stopReason === "follow_up") {
+      return null;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM releases WHERE id = ? LIMIT 1")
+      .get(releaseId) as unknown as RawReleaseRow | undefined;
+    if (!row || row.status !== "running" || row.session_id !== sessionId) {
+      return null;
+    }
+    let summary: string;
+    if (outcome.status === "error") {
+      summary = `Release session error: ${(outcome.error?.trim() || "Unknown error").slice(0, 500)}`;
+    } else if (outcome.status === "aborted") {
+      summary = "Release session was aborted before calling finish_release.";
+    } else {
+      const preview = outcome.replyContent?.trim().slice(0, 500);
+      summary = preview
+        ? `Release agent exited without calling finish_release. Last reply: ${preview}`
+        : "Release agent exited without calling finish_release.";
+    }
+    return this.finishRelease(row.project_id, row.id, {
+      status: "failed",
+      summary,
+      author: "system",
+    }).release;
   }
 
   findNextDispatchableTask(projectId: string): RawTaskRow | null {
@@ -2443,7 +3471,11 @@ export class Store {
     return this.getTaskView(taskId);
   }
 
-  recoverInterruptedSessionRuns(): { recoveredSessions: number; recoveredTasks: number } {
+  recoverInterruptedSessionRuns(): {
+    recoveredSessions: number;
+    recoveredTasks: number;
+    recoveredReleases: number;
+  } {
     return this.transaction(true, () => {
       const now = nowIso();
       const runningMessages = this.db
@@ -2469,10 +3501,43 @@ export class Store {
           "Server restarted while agent session was running; moved to waiting",
         );
       }
+      const staleReleases = this.db
+        .prepare("SELECT * FROM releases WHERE status = 'running'")
+        .all() as unknown as RawReleaseRow[];
+      for (const rel of staleReleases) {
+        this.db
+          .prepare(
+            "UPDATE releases SET status = 'failed', summary = ?, updated_at = ?, finished_at = ? WHERE id = ?",
+          )
+          .run(
+            "Server restarted while release session was running.",
+            now,
+            now,
+            rel.id,
+          );
+        const relView = toReleaseView(rel);
+        for (const taskId of relView.task_ids) {
+          const taskRow = this.db
+            .prepare("SELECT * FROM tasks WHERE id = ? AND release_id = ? AND deploy_status = 'deploying'")
+            .get(taskId, rel.id) as unknown as RawTaskRow | undefined;
+          if (taskRow) {
+            this.db
+              .prepare("UPDATE tasks SET deploy_status = 'failed', updated_at = ? WHERE id = ?")
+              .run(now, taskId);
+            this.addMessage(
+              taskId,
+              "event",
+              "system",
+              `Release REL-${rel.number} interrupted by server restart; marked deploy failed`,
+            );
+          }
+        }
+      }
       void runningMessages;
       return {
         recoveredSessions: Number(runningSessions.changes ?? 0),
         recoveredTasks: staleTasks.length,
+        recoveredReleases: staleReleases.length,
       };
     });
   }

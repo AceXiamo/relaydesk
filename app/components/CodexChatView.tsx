@@ -44,6 +44,7 @@ interface CodexChatViewProps {
     prompt?: string;
     enableNetwork?: boolean;
     sandboxMode?: ChatSandboxMode;
+    sessionId?: string;
   } | null;
   onConsumePendingContext?: () => void;
   onNewProject: () => void;
@@ -233,16 +234,30 @@ export function CodexChatView({
     }
   }, [projectId]);
 
+  const pendingSessionIdRef = useRef<string | null>(null);
+
   const loadSessions = useCallback(async () => {
     if (!projectId) return;
     setSessionsLoading(true);
     try {
-      const res = await api.listCodexChatSessions(projectId);
+      const res = await api.listCodexChatSessions(projectId, "all");
       if (prevProjectIdRef.current !== projectId) return;
-      setSessions(res.sessions);
-      const selected = streams.selection();
-      setActiveSessionId(selected === null || res.sessions.some(s => s.id === selected)
-        ? selected ?? null : res.sessions[0]?.id ?? null);
+      const visibleSessions = res.sessions.filter(
+        (s) => s.kind === "chat" || s.kind === "release",
+      );
+      setSessions(visibleSessions);
+      const pendingId = pendingSessionIdRef.current;
+      if (pendingId && visibleSessions.some((s) => s.id === pendingId)) {
+        pendingSessionIdRef.current = null;
+        setActiveSessionId(pendingId);
+      } else {
+        const selected = streams.selection();
+        setActiveSessionId(
+          selected === null || visibleSessions.some((s) => s.id === selected)
+            ? selected ?? null
+            : visibleSessions[0]?.id ?? null,
+        );
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "加载对话列表失败");
     } finally {
@@ -258,9 +273,14 @@ export function CodexChatView({
     return () => { prevProjectIdRef.current = null; };
   }, [projectId, loadContextCatalog, loadSessions]);
 
-  // Consume context handed over from Project Space
+  // Consume context handed over from Project Space or ReleasesView
   useEffect(() => {
     if (!pendingContext) return;
+    if (pendingContext.sessionId) {
+      pendingSessionIdRef.current = pendingContext.sessionId;
+      setActiveSessionId(pendingContext.sessionId);
+      void loadSessions();
+    }
     if (pendingContext.ref) {
       setAttachments((prev) =>
         prev.some((a) => a.kind === pendingContext.ref!.kind && a.ref === pendingContext.ref!.ref)
@@ -280,8 +300,10 @@ export function CodexChatView({
       pendingSandboxModeRef.current = pendingContext.sandboxMode;
     }
     onConsumePendingContext?.();
-    window.setTimeout(() => composerRef.current?.focus(), 40);
-  }, [pendingContext, onConsumePendingContext]);
+    if (!pendingContext.sessionId) {
+      window.setTimeout(() => composerRef.current?.focus(), 40);
+    }
+  }, [pendingContext, onConsumePendingContext, setActiveSessionId, loadSessions]);
 
   useEffect(() => {
     if (!projectId || !activeSession) return;
@@ -881,11 +903,18 @@ export function CodexChatView({
                   >
                     <div className="flex items-center justify-between gap-1.5">
                       <span className="flex items-center gap-1.5 min-w-0">
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                            s.runtime === "codex" ? "bg-emerald-500" : "bg-amber-500"
-                          }`}
-                        />
+                        {s.kind === "release" ? (
+                          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 border border-indigo-500/20 shrink-0">
+                            <Icon name="rocket" size={10} />
+                            发布
+                          </span>
+                        ) : (
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                              s.runtime === "codex" ? "bg-emerald-500" : "bg-amber-500"
+                            }`}
+                          />
+                        )}
                         <span className="text-[12.5px] font-medium truncate">{s.title}</span>
                       </span>
 
@@ -1084,6 +1113,13 @@ export function CodexChatView({
                   <Icon name="plus" size={15} />
                 </button>
               </div>
+            )}
+
+            {activeSession?.kind === "release" && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-500/12 text-indigo-700 dark:text-indigo-300 border border-indigo-500/25 shrink-0">
+                <Icon name="rocket" size={11} />
+                生产发布会话
+              </span>
             )}
 
             {activeSession && editingTitle ? (

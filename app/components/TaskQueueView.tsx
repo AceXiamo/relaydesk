@@ -3,6 +3,7 @@ import { Icon } from "./Icon.tsx";
 import {
   Button,
   DeliveryModeBadge,
+  DeployStatusBadge,
   EmptyState,
   Kbd,
   LivePulseDot,
@@ -15,6 +16,7 @@ import {
   type SelectOption,
 } from "./ui.tsx";
 import {
+  DEPLOY_MODE_LABELS,
   PRIORITY_WEIGHT,
   STATUS_LABELS,
   STATUS_ORDER,
@@ -44,6 +46,7 @@ interface TaskQueueViewProps {
   sortMode: SortMode;
   loading: boolean;
   automationBusy?: boolean;
+  deployBusy?: boolean;
   onSearchChange: (q: string) => void;
   onStatusFilterChange: (s: TaskStatus | "") => void;
   onSourceFilterChange: (s: TaskSource | "") => void;
@@ -57,6 +60,7 @@ interface TaskQueueViewProps {
   ) => Promise<void>;
   onReopenTask: (task: TaskRecord) => Promise<void>;
   onToggleAutomation: (paused: boolean) => Promise<void>;
+  onTriggerRelease?: () => Promise<void>;
   onNewFeedback: () => void;
   onNewProject: () => void;
   onRefresh: () => void;
@@ -66,7 +70,7 @@ interface TaskQueueViewProps {
 }
 
 const VIEW_META: Record<
-  Exclude<WorkspaceView, "sources" | "settings" | "workspace" | "chat">,
+  Exclude<WorkspaceView, "sources" | "settings" | "workspace" | "chat" | "releases">,
   { title: string; subtitle: string; emptyTitle: string; emptyDesc: string }
 > = {
   queue: {
@@ -250,6 +254,7 @@ export function TaskQueueView({
   sortMode,
   loading,
   automationBusy = false,
+  deployBusy = false,
   onSearchChange,
   onStatusFilterChange,
   onSourceFilterChange,
@@ -260,6 +265,7 @@ export function TaskQueueView({
   onQuickAction,
   onReopenTask,
   onToggleAutomation,
+  onTriggerRelease,
   onNewFeedback,
   onNewProject,
   onRefresh,
@@ -292,6 +298,9 @@ export function TaskQueueView({
       dismissed: active.filter((t) => t.status === "done" && t.resolution === "dismissed")
         .length,
       attention: active.filter(isAttentionTask).length,
+      pendingDeploy: active.filter((t) => t.deploy_status === "pending").length,
+      deployingDeploy: active.filter((t) => t.deploy_status === "deploying").length,
+      failedDeploy: active.filter((t) => t.deploy_status === "failed").length,
     };
   }, [tasks]);
 
@@ -325,8 +334,17 @@ export function TaskQueueView({
 
   const paused = project.automation_paused;
   const meta =
-    VIEW_META[view as Exclude<WorkspaceView, "sources" | "settings" | "workspace" | "chat">] ??
-    VIEW_META.queue;
+    VIEW_META[
+      view as Exclude<
+        WorkspaceView,
+        "sources" | "settings" | "workspace" | "chat" | "releases"
+      >
+    ] ?? VIEW_META.queue;
+  const deployPolicy = project.deploy_policy;
+  const deployQueuedCount = metrics.pendingDeploy + metrics.failedDeploy;
+  const showDeployBar =
+    deployPolicy.mode !== "none" &&
+    (deployQueuedCount > 0 || metrics.deployingDeploy > 0);
   const hasFilters = Boolean(
     search.trim() || statusFilter || sourceFilter || (view === "queue" && cockpitFilter),
   );
@@ -520,6 +538,73 @@ export function TaskQueueView({
             </button>
           </div>
         </div>
+
+        {/* Pending Deploy Status Bar */}
+        {showDeployBar && (
+          <div
+            className={`mb-2.5 sm:mb-3.5 px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl border flex flex-wrap items-center justify-between gap-2 transition-colors ${
+              metrics.deployingDeploy > 0
+                ? "border-indigo-500/30 bg-indigo-500/[0.06]"
+                : metrics.failedDeploy > 0 && metrics.pendingDeploy === 0
+                  ? "border-rose-500/30 bg-rose-500/[0.05]"
+                  : "border-amber-500/25 bg-amber-500/[0.05]"
+            }`}
+          >
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 min-w-0">
+              {metrics.deployingDeploy > 0 ? (
+                <LivePulseDot tone="indigo" active />
+              ) : (
+                <Icon
+                  name={metrics.failedDeploy > 0 && metrics.pendingDeploy === 0 ? "alert-circle" : "rocket"}
+                  size={13.5}
+                  className={
+                    metrics.failedDeploy > 0 && metrics.pendingDeploy === 0
+                      ? "text-rose-600 dark:text-rose-400 shrink-0"
+                      : "text-amber-600 dark:text-amber-400 shrink-0"
+                  }
+                />
+              )}
+              <span className="text-[12px] sm:text-[12.5px] font-medium text-[var(--text-primary)]">
+                {metrics.deployingDeploy > 0
+                  ? `生产发布进行中（${metrics.deployingDeploy} 个任务正在部署）`
+                  : metrics.pendingDeploy > 0
+                    ? `${metrics.pendingDeploy} 个已交付任务待发布生产${metrics.failedDeploy > 0 ? ` · 含 ${metrics.failedDeploy} 个上次失败` : ""}`
+                    : `${metrics.failedDeploy} 个任务上次发布失败，已熔断自动重试`}
+              </span>
+              <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-[var(--surface-card)] border border-[var(--border-subtle)] text-[var(--text-muted)]">
+                {DEPLOY_MODE_LABELS[deployPolicy.mode]}
+                {deployPolicy.mode === "scheduled" && (
+                  <span className="font-mono">
+                    {deployPolicy.window_start}–{deployPolicy.window_end}
+                  </span>
+                )}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              <Button
+                variant="ghost"
+                size="xs"
+                icon="history"
+                onClick={() => onNavigateView("releases")}
+              >
+                发布历史
+              </Button>
+              {onTriggerRelease && (
+                <Button
+                  variant="primary"
+                  size="xs"
+                  icon="rocket"
+                  loading={deployBusy}
+                  disabled={metrics.deployingDeploy > 0 || deployQueuedCount === 0}
+                  onClick={() => void onTriggerRelease()}
+                >
+                  {metrics.deployingDeploy > 0 ? "发布中" : "立即发布"}
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Title Row */}
         <div className="flex items-center justify-between gap-2 sm:gap-3">
@@ -830,6 +915,7 @@ export function TaskQueueView({
                 task.body && task.body !== task.title ? formatTaskPreview(task.body) : "";
               const hasMobileMeta = Boolean(
                 task.resolution ||
+                  (task.deploy_status && task.deploy_status !== "not_required") ||
                   deliveryChip ||
                   (task.attempts > 0 && task.status !== "done") ||
                   task.requirements ||
@@ -922,6 +1008,11 @@ export function TaskQueueView({
                             compact
                           />
                         )}
+                        <DeployStatusBadge
+                          status={task.deploy_status}
+                          releaseNumber={task.release_number}
+                          compact
+                        />
                         {deliveryChip &&
                           (deliveryChip.href ? (
                             <a
@@ -1018,6 +1109,13 @@ export function TaskQueueView({
                           className="shrink-0"
                         />
                       )}
+
+                      <DeployStatusBadge
+                        status={task.deploy_status}
+                        releaseNumber={task.release_number}
+                        compact
+                        className="shrink-0"
+                      />
 
                       {deliveryChip &&
                         (deliveryChip.href ? (

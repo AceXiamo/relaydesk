@@ -4,7 +4,7 @@ import { api } from "../app/lib/api.ts";
 import type { ChatSessionRecord, ChatStreamEvent } from "../app/lib/types.ts";
 
 function session(project_id: string, id: string): ChatSessionRecord {
-  return { project_id, id, kind: "chat", task_id: null, title: id, runtime: "codex", model: "", sandbox_mode: "read-only",
+  return { project_id, id, kind: "chat", task_id: null, release_id: null, title: id, runtime: "codex", model: "", sandbox_mode: "read-only",
     network_access: false, execution_target: "auto", resolved_target: "", reasoning_effort: "default",
     external_session_id: "", status: "idle", created_at: "", updated_at: "" };
 }

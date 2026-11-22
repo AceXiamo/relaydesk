@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ProjectCliSettingsCard } from "./ProjectCliSettingsCard.tsx";
+import { ProjectDeployPolicyCard } from "./ProjectDeployPolicyCard.tsx";
 import { ProjectRoutingCard } from "./ProjectRoutingCard.tsx";
 import { UtilityAiSettingsCard } from "./UtilityAiSettingsCard.tsx";
 import { LocalAgentsSettingsCard } from "./LocalAgentsSettingsCard.tsx";
@@ -43,6 +44,8 @@ interface SettingsViewProps {
   onGithubConnectionsUpdated: (connections: GithubConnectionSummary[]) => void;
   onProjectUpdated: (project: ProjectDetail) => void;
   onNewProject: () => void;
+  onEditDeployDoc?: () => void;
+  onOpenReleases?: () => void;
   activeTab?: SettingsTab;
   onTabChange?: (tab: SettingsTab) => void;
 }
@@ -142,6 +145,8 @@ export function SettingsView({
   onGithubConnectionsUpdated,
   onProjectUpdated,
   onNewProject,
+  onEditDeployDoc,
+  onOpenReleases,
   activeTab,
   onTabChange,
 }: SettingsViewProps) {
@@ -1731,6 +1736,17 @@ export function SettingsView({
                 </Button>
               </div>
             </form>
+
+            {/* 1.5. Project Production Deploy Policy */}
+            <ProjectDeployPolicyCard
+              key={`deploy-policy-${project.id}`}
+              project={project}
+              onPolicyUpdated={(nextPolicy) =>
+                onProjectUpdated({ ...project, deploy_policy: nextPolicy })
+              }
+              onEditDeployDoc={onEditDeployDoc}
+              onOpenReleases={onOpenReleases}
+            />
 
             {/* 2. Project Execution Priority & Per-Agent Workdir Binding */}
             <ProjectRoutingCard

@@ -15,6 +15,7 @@ import {
   Button,
   CopyButton,
   DeliveryModeBadge,
+  DeployStatusBadge,
   Kbd,
   LivePulseDot,
   Modal,
@@ -66,6 +67,7 @@ interface TaskDetailDrawerProps {
   onOpenRelated: (taskId: string) => void;
   onRefreshTask: (taskId: string) => Promise<void>;
   onOpenCliSettings: () => void;
+  onOpenReleases?: () => void;
   streams: ProjectChatStreams;
   onRefreshTasks: () => void;
   routing?: ProjectExecutionRoutingResponse;
@@ -267,6 +269,7 @@ export function TaskDetailDrawer({
   onOpenRelated,
   onRefreshTask,
   onOpenCliSettings,
+  onOpenReleases,
   streams,
   onRefreshTasks,
   routing,
@@ -428,6 +431,7 @@ export function TaskDetailDrawer({
   const showTelemetryBanner = Boolean(
     task &&
       (task.resolution ||
+        (task.deploy_status && task.deploy_status !== "not_required") ||
         task.delivery_ref ||
         task.attempts > 0 ||
         task.triaged_by ||
@@ -763,6 +767,40 @@ export function TaskDetailDrawer({
                         resolution={task.resolution}
                         triagedBy={task.triaged_by}
                       />
+
+                      {task.deploy_status && task.deploy_status !== "not_required" && (
+                        onOpenReleases ? (
+                          <button
+                            type="button"
+                            onClick={onOpenReleases}
+                            title={
+                              task.deployed_at
+                                ? `已发布于 ${formatDateTime(task.deployed_at)} · 点击查看发布历史`
+                                : "点击查看生产发布队列与历史"
+                            }
+                            className="inline-flex items-center cursor-pointer hover:opacity-85 transition-opacity"
+                          >
+                            <DeployStatusBadge
+                              status={task.deploy_status}
+                              releaseNumber={task.release_number}
+                            />
+                          </button>
+                        ) : (
+                          <DeployStatusBadge
+                            status={task.deploy_status}
+                            releaseNumber={task.release_number}
+                          />
+                        )
+                      )}
+
+                      {task.deployed_at && task.deploy_status === "deployed" && (
+                        <span
+                          title={`发布时间：${formatDateTime(task.deployed_at)}`}
+                          className="text-[11.5px] text-[var(--text-muted)]"
+                        >
+                          发布于 {formatRelativeTime(task.deployed_at)}
+                        </span>
+                      )}
 
                       {task.triaged_by && !task.resolution && (
                         <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium border border-indigo-500/20 bg-indigo-500/8 text-indigo-700 dark:text-indigo-300">

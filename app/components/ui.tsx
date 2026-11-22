@@ -15,14 +15,21 @@ import {
   DELIVERY_MODE_LABELS,
   OWNER_LABELS,
   PRIORITY_LABELS,
+  RELEASE_STATUS_LABELS,
+  RELEASE_TRIGGER_LABELS,
   SOURCE_ICONS,
   SOURCE_LABELS,
   STATUS_LABELS,
+  TASK_DEPLOY_STATUS_LABELS,
   formatDateTime,
   formatRelativeTime,
+  releaseCode,
 } from "../lib/format.ts";
 import type {
   DeliveryMode,
+  ReleaseStatus,
+  ReleaseTrigger,
+  TaskDeployStatus,
   TaskOwner,
   TaskPriority,
   TaskResolution,
@@ -511,6 +518,158 @@ export function ResolutionBadge({
     >
       <Icon name={iconName} size={iconSize} />
       <span>{label}</span>
+    </span>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* DeployStatusBadge                                                          */
+/* -------------------------------------------------------------------------- */
+
+export interface DeployStatusBadgeProps {
+  status: TaskDeployStatus | undefined;
+  releaseNumber?: number | null;
+  compact?: boolean;
+  className?: string;
+}
+
+export function DeployStatusBadge({
+  status,
+  releaseNumber,
+  compact = false,
+  className,
+}: DeployStatusBadgeProps) {
+  if (!status || status === "not_required") return null;
+
+  const iconSize = compact ? 11 : 12;
+  let pillClass =
+    "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25";
+  let iconName = "clock";
+  let spin = false;
+
+  if (status === "deploying") {
+    pillClass =
+      "bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/25";
+    iconName = "loader-2";
+    spin = true;
+  } else if (status === "deployed") {
+    pillClass =
+      "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25";
+    iconName = "rocket";
+  } else if (status === "failed") {
+    pillClass =
+      "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25";
+    iconName = "alert-circle";
+  }
+
+  const label = TASK_DEPLOY_STATUS_LABELS[status];
+  const relSuffix =
+    typeof releaseNumber === "number" && releaseNumber > 0
+      ? ` · ${releaseCode(releaseNumber)}`
+      : "";
+
+  return (
+    <span
+      title={`生产发布状态：${label}${relSuffix}`}
+      className={cn(
+        "inline-flex items-center font-medium border whitespace-nowrap select-none rounded-full",
+        compact
+          ? "px-1.5 py-0.5 text-[11px] leading-none gap-1"
+          : "px-2 py-0.5 text-xs leading-4 gap-1.5",
+        pillClass,
+        className,
+      )}
+    >
+      <Icon name={iconName} size={iconSize} className={spin ? "animate-spin" : undefined} />
+      <span>
+        {label}
+        {relSuffix}
+      </span>
+    </span>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* ReleaseStatusBadge & ReleaseTriggerBadge                                   */
+/* -------------------------------------------------------------------------- */
+
+export function ReleaseStatusBadge({
+  status,
+  compact = false,
+  className,
+}: {
+  status: ReleaseStatus;
+  compact?: boolean;
+  className?: string;
+}) {
+  const iconSize = compact ? 11 : 12;
+  const styles: Record<ReleaseStatus, { pill: string; icon: string; spin?: boolean }> = {
+    running: {
+      pill: "bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/25",
+      icon: "loader-2",
+      spin: true,
+    },
+    succeeded: {
+      pill: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25",
+      icon: "check-circle-2",
+    },
+    failed: {
+      pill: "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25",
+      icon: "x-circle",
+    },
+    blocked: {
+      pill: "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25",
+      icon: "ban",
+    },
+  };
+  const cfg = styles[status];
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center font-medium border whitespace-nowrap select-none rounded-full",
+        compact
+          ? "px-1.5 py-0.5 text-[11px] leading-none gap-1"
+          : "px-2 py-0.5 text-xs leading-4 gap-1.5",
+        cfg.pill,
+        className,
+      )}
+    >
+      <Icon name={cfg.icon} size={iconSize} className={cfg.spin ? "animate-spin" : undefined} />
+      <span>{RELEASE_STATUS_LABELS[status]}</span>
+    </span>
+  );
+}
+
+export function ReleaseTriggerBadge({
+  trigger,
+  className,
+}: {
+  trigger: ReleaseTrigger;
+  className?: string;
+}) {
+  const iconMap: Record<ReleaseTrigger, string> = {
+    immediate: "zap",
+    scheduled: "calendar-clock",
+    urgent: "alert-triangle",
+    manual: "hand",
+  };
+  const toneMap: Record<ReleaseTrigger, string> = {
+    immediate: "bg-sky-500/10 text-sky-700 dark:text-sky-300 border-sky-500/25",
+    scheduled: "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/25",
+    urgent: "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25",
+    manual: "bg-[var(--rd-subtle)] text-[var(--rd-muted)] border-[var(--rd-border)]",
+  };
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[11px] font-medium leading-none whitespace-nowrap select-none",
+        toneMap[trigger],
+        className,
+      )}
+    >
+      <Icon name={iconMap[trigger]} size={11} />
+      <span>{RELEASE_TRIGGER_LABELS[trigger]}</span>
     </span>
   );
 }

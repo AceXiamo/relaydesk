@@ -24,6 +24,8 @@ const HASH = /^[a-f0-9]{64}$/;
 export interface SpaceManifest {
   handbook_sha256?: string | null;
   handbook?: { size: number; sha256: string } | null;
+  deploy_doc_sha256?: string | null;
+  deploy_doc?: { size: number; sha256: string } | null;
   files: { path: string; size: number; sha256: string; mtime?: unknown }[];
   databases?: unknown[];
 }
@@ -86,7 +88,7 @@ function projectDir(options: SyncOptions) {
   return root;
 }
 function checkedPath(root: string, path: string, create: boolean) {
-  if (path !== "HANDBOOK.md" && !(path.startsWith("files/") && safeFile(path.slice(6))))
+  if (path !== "HANDBOOK.md" && path !== "DEPLOY.md" && !(path.startsWith("files/") && safeFile(path.slice(6))))
     throw new Error("Unsafe workspace file path");
   directory(root, false);
   let parent = root;
@@ -163,6 +165,8 @@ function prune(root: string, expected: Map<string, string>) {
   directory(root, false);
   const handbook = join(root, "HANDBOOK.md");
   if (!expected.has("HANDBOOK.md") && stat(handbook)) unlinkSync(handbook);
+  const deployDoc = join(root, "DEPLOY.md");
+  if (!expected.has("DEPLOY.md") && stat(deployDoc)) unlinkSync(deployDoc);
   visit(join(root, "files"), "files/");
 }
 function httpUrl(o: SyncOptions, path: string) {
@@ -252,6 +256,13 @@ export async function syncSpace(o: SyncOptions, manifest: SpaceManifest) {
   )
     throw new Error("Invalid handbook size");
   if (handbookHash) entries.push({ path: "HANDBOOK.md", hash: handbookHash, size: manifest.handbook?.size });
+  const deployDocHash = manifest.deploy_doc_sha256 ?? manifest.deploy_doc?.sha256;
+  if (
+    manifest.deploy_doc &&
+    (!Number.isSafeInteger(manifest.deploy_doc.size) || manifest.deploy_doc.size < 0 || manifest.deploy_doc.size > 64 * 1024)
+  )
+    throw new Error("Invalid deploy doc size");
+  if (deployDocHash) entries.push({ path: "DEPLOY.md", hash: deployDocHash, size: manifest.deploy_doc?.size });
   let total = 0;
   for (const file of manifest.files) {
     if (!file || !safeFile(file.path) || !Number.isSafeInteger(file.size) || file.size < 0)

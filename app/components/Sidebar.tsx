@@ -66,12 +66,18 @@ export function Sidebar({
   const waitingCount = openTasks.filter(
     (t) => t.status === "waiting" || t.status === "handoff",
   ).length;
+  const pendingDeployCount = openTasks.filter(
+    (t) => t.deploy_status === "pending" || t.deploy_status === "deploying",
+  ).length;
+  const deployingCount = openTasks.filter((t) => t.deploy_status === "deploying").length;
+  const failedDeployCount = openTasks.filter((t) => t.deploy_status === "failed").length;
   const counts: Record<WorkspaceView, number> = {
     queue: openTasks.filter((t) => t.status !== "done").length,
     triage: openTasks.filter((t) => t.status === "triage").length,
     mine: openTasks.filter((t) => t.owner === "human" && t.status !== "done").length,
     agents: openTasks.filter((t) => t.owner === "agent" || t.agent_session_status === "running").length,
     review: openTasks.filter((t) => t.status === "review").length,
+    releases: pendingDeployCount,
     workspace: 0,
     chat: 0,
     sources: 0,
@@ -104,6 +110,15 @@ export function Sidebar({
       count: counts.review,
       alertCount: waitingCount,
       alertTitle: `${waitingCount} 条待补充或交接异常`,
+    },
+    {
+      id: "releases",
+      label: "生产发布",
+      icon: "rocket",
+      count: counts.releases,
+      pulse: deployingCount > 0,
+      alertCount: failedDeployCount,
+      alertTitle: `${failedDeployCount} 条上次发布失败待排查`,
     },
   ];
 

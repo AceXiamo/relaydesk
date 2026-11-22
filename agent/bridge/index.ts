@@ -521,7 +521,15 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
           };
           const taskClient = {
             async call(
-              action: "list_tasks" | "get_task" | "comment_task" | "update_task" | "transition_task" | "create_task",
+              action:
+                | "list_tasks"
+                | "get_task"
+                | "comment_task"
+                | "update_task"
+                | "transition_task"
+                | "create_task"
+                | "list_releases"
+                | "finish_release",
               params: Record<string, unknown>,
             ) {
               const res = await bridgeRpc(

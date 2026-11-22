@@ -9,7 +9,11 @@ import {
   CreateFeedbackModal,
   CreateProjectModal,
 } from "~/components/ProjectModals.tsx";
-import { ProjectWorkspaceView } from "~/components/ProjectWorkspaceView.tsx";
+import {
+  ProjectWorkspaceView,
+  type WorkspaceTab,
+} from "~/components/ProjectWorkspaceView.tsx";
+import { ReleasesView } from "~/components/ReleasesView.tsx";
 import { SettingsView, type SettingsTab } from "~/components/SettingsView.tsx";
 import { Sidebar } from "~/components/Sidebar.tsx";
 import { TaskDetailDrawer } from "~/components/TaskDetailDrawer.tsx";
@@ -21,6 +25,7 @@ import {
 } from "~/components/TaskQueueView.tsx";
 import { Button, ToastProvider, useToast } from "~/components/ui.tsx";
 import { api } from "~/lib/api.ts";
+import { releaseCode } from "~/lib/format.ts";
 import type {
   AuthStatusPayload,
   ChatContextRef,
@@ -50,6 +55,7 @@ const VALID_VIEWS = new Set<WorkspaceView>([
   "mine",
   "agents",
   "review",
+  "releases",
   "workspace",
   "chat",
   "sources",
@@ -62,6 +68,7 @@ const MOBILE_VIEW_LABELS: Record<WorkspaceView, string> = {
   mine: "我的任务",
   agents: "Agent 执行",
   review: "待验收",
+  releases: "生产发布",
   workspace: "项目空间",
   chat: "Codex 对话",
   sources: "收集入口",
@@ -99,6 +106,8 @@ function ConsoleWorkspace() {
   const [booting, setBooting] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [automationBusy, setAutomationBusy] = useState(false);
+  const [deployBusy, setDeployBusy] = useState(false);
+  const [pendingWorkspaceTab, setPendingWorkspaceTab] = useState<WorkspaceTab | null>(null);
 
   // Filters
   const [search, setSearch] = useState("");
@@ -140,6 +149,7 @@ function ConsoleWorkspace() {
     prompt?: string;
     enableNetwork?: boolean;
     sandboxMode?: ChatSandboxMode;
+    sessionId?: string;
   } | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -224,6 +234,31 @@ function ConsoleWorkspace() {
     setSettingsTab("global");
     changeView("settings");
   }, [changeView]);
+
+  const openDeploySettings = useCallback(() => {
+    setSettingsTab("project");
+    changeView("settings");
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => {
+        document
+          .getElementById("relaydesk-deploy-policy")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 60);
+    }
+  }, [changeView]);
+
+  const openEditDeployDoc = useCallback(() => {
+    setPendingWorkspaceTab("deploy");
+    changeView("workspace");
+  }, [changeView]);
+
+  const openReleaseSession = useCallback(
+    (sessionId: string) => {
+      setPendingChatContext({ sessionId });
+      changeView("chat");
+    },
+    [changeView],
+  );
 
   const toggleTheme = useCallback(() => {
     setDark((prev) => {
@@ -479,6 +514,25 @@ function ConsoleWorkspace() {
     },
     [automationBusy, currentProject, toast],
   );
+
+  const handleTriggerRelease = useCallback(async () => {
+    if (!currentProject || deployBusy) return;
+    setDeployBusy(true);
+    try {
+      const res = await api.triggerProjectRelease(currentProject.id, {});
+      toast.success(`已启动生产发布 ${releaseCode(res.release.number)}`);
+      await refreshTasks();
+      if (res.session?.id) {
+        openReleaseSession(res.session.id);
+      } else {
+        changeView("releases");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "无法启动生产发布");
+    } finally {
+      setDeployBusy(false);
+    }
+  }, [changeView, currentProject, deployBusy, openReleaseSession, refreshTasks, toast]);
 
   const visibleTasks = useMemo(
     () =>
@@ -746,6 +800,8 @@ function ConsoleWorkspace() {
         {view === "workspace" ? (
           <ProjectWorkspaceView
             project={currentProject}
+            initialTab={pendingWorkspaceTab}
+            onConsumeInitialTab={() => setPendingWorkspaceTab(null)}
             onNewProject={() => setProjectModalOpen(true)}
             onOpenChatWithContext={(ref, prompt, opts) => {
               if (ref || prompt || opts?.enableNetwork) {
@@ -757,6 +813,16 @@ function ConsoleWorkspace() {
               }
               changeView("chat");
             }}
+          />
+        ) : view === "releases" ? (
+          <ReleasesView
+            project={currentProject}
+            onNewProject={() => setProjectModalOpen(true)}
+            onOpenReleaseSession={openReleaseSession}
+            onSelectTask={(id) => void openTaskDetail(id, false)}
+            onEditDeployDoc={openEditDeployDoc}
+            onOpenDeploySettings={openDeploySettings}
+            onMutated={() => void refreshTasks()}
           />
         ) : view === "chat" ? (
           <CodexChatView
@@ -789,6 +855,8 @@ function ConsoleWorkspace() {
             onGithubConnectionsUpdated={setGithubConnections}
             activeTab={settingsTab}
             onTabChange={setSettingsTab}
+            onEditDeployDoc={openEditDeployDoc}
+            onOpenReleases={() => changeView("releases")}
             onProjectUpdated={(updated) => {
               setCurrentProject((current) => current?.id === updated.id ? updated : current);
               setProjects((prev) =>
@@ -801,6 +869,7 @@ function ConsoleWorkspace() {
                         repos: updated.repos,
                         automation_paused: updated.automation_paused,
                         delivery_mode: updated.delivery_mode,
+                        deploy_policy: updated.deploy_policy,
                       }
                     : p,
                 ),
@@ -821,6 +890,7 @@ function ConsoleWorkspace() {
             sortMode={sortMode}
             loading={refreshing}
             automationBusy={automationBusy}
+            deployBusy={deployBusy}
             onSearchChange={setSearch}
             onStatusFilterChange={setStatusFilter}
             onSourceFilterChange={setSourceFilter}
@@ -836,6 +906,7 @@ function ConsoleWorkspace() {
             onQuickAction={handleQuickAction}
             onReopenTask={handleReopenTask}
             onToggleAutomation={handleToggleAutomation}
+            onTriggerRelease={handleTriggerRelease}
             onNewFeedback={() =>
               currentProject ? setFeedbackModalOpen(true) : setProjectModalOpen(true)
             }
@@ -872,6 +943,11 @@ function ConsoleWorkspace() {
           setDetailStack([]);
           openCliSettings();
         }}
+        onOpenReleases={() => {
+          setDetail(null);
+          setDetailStack([]);
+          changeView("releases");
+        }}
         streams={chatStreams}
         routing={executionRouting}
         onRefreshTasks={refreshTasks}
@@ -894,6 +970,8 @@ function ConsoleWorkspace() {
               repos: proj.repos,
               automation_paused: proj.automation_paused,
               delivery_mode: proj.delivery_mode,
+              deploy_policy: proj.deploy_policy,
+              pending_deploy_count: proj.pending_deploy_count ?? 0,
               widget_code_context: proj.widget_code_context,
               created_at: proj.created_at,
             },

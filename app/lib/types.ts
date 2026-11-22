@@ -15,6 +15,53 @@ export type TaskSource = "widget" | "bot" | "console";
 
 export type DeliveryMode = "direct_push" | "pr_automerge" | "review_only";
 
+export type DeployMode = "none" | "manual" | "immediate" | "scheduled";
+
+export interface ProjectDeployPolicy {
+  mode: DeployMode;
+  window_start: string;
+  window_end: string;
+  timezone: string;
+  allow_urgent_override: boolean;
+  doc_path: string;
+}
+
+export type TaskDeployStatus =
+  | "not_required"
+  | "pending"
+  | "deploying"
+  | "deployed"
+  | "failed";
+
+export type ReleaseTrigger = "immediate" | "scheduled" | "manual" | "urgent";
+
+export type ReleaseStatus = "running" | "succeeded" | "failed" | "blocked";
+
+export interface ReleaseTaskSnapshot {
+  id: string;
+  number: number;
+  title: string;
+  priority: TaskPriority;
+  delivery_ref: string;
+  summary?: string;
+}
+
+export interface ReleaseRecord {
+  id: string;
+  project_id: string;
+  number: number;
+  trigger: ReleaseTrigger;
+  status: ReleaseStatus;
+  session_id: string | null;
+  task_ids: string[];
+  task_snapshot: ReleaseTaskSnapshot[];
+  deploy_ref: string;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
 export type TaskResolution = "shipped" | "dismissed" | "merged" | null;
 
 export type WorkspaceView =
@@ -23,6 +70,7 @@ export type WorkspaceView =
   | "mine"
   | "agents"
   | "review"
+  | "releases"
   | "workspace"
   | "chat"
   | "sources"
@@ -35,6 +83,10 @@ export interface ProjectSummary {
   repos: string[];
   automation_paused: boolean;
   delivery_mode: DeliveryMode;
+  deploy_policy: ProjectDeployPolicy;
+  pending_deploy_count: number;
+  failed_deploy_count?: number;
+  active_release_id?: string | null;
   widget_code_context: boolean;
   created_at: string;
 }
@@ -54,6 +106,7 @@ export interface AgentProjectInfo {
   repos: string[];
   automation_paused: boolean;
   delivery_mode: DeliveryMode;
+  deploy_policy: ProjectDeployPolicy;
   widget_code_context: boolean;
   agent_instructions: string;
 }
@@ -92,6 +145,10 @@ export interface TaskRecord {
   attempts: number;
   resolution: TaskResolution;
   delivery_ref: string;
+  deploy_status: TaskDeployStatus;
+  deployed_at: string | null;
+  release_id: string | null;
+  release_number?: number | null;
   triaged_by: string;
   merged_into: string | null;
   created_at: string;
@@ -377,6 +434,9 @@ export interface WorkspaceSummary {
   handbook_exists: boolean;
   handbook_size: number;
   handbook_updated_at: string | null;
+  deploy_doc_exists?: boolean;
+  deploy_doc_size?: number;
+  deploy_doc_updated_at?: string | null;
   databases_count: number;
   sqlite_count: number;
   repos_status: ProjectReposSyncStatus;
@@ -481,6 +541,7 @@ export interface BridgeWorkspaceManifestFile {
 
 export interface BridgeWorkspaceManifest {
   handbook?: Omit<BridgeWorkspaceManifestFile, "path"> | null;
+  deploy_doc?: Omit<BridgeWorkspaceManifestFile, "path"> | null;
   files: BridgeWorkspaceManifestFile[];
 }
 
@@ -528,13 +589,14 @@ export interface ChatToolEvent {
   images?: ChatToolImage[];
 }
 
-export type ChatSessionKind = "chat" | "task";
+export type ChatSessionKind = "chat" | "task" | "release";
 
 export interface ChatSessionRecord {
   id: string;
   project_id: string;
   kind: ChatSessionKind;
   task_id: string | null;
+  release_id: string | null;
   title: string;
   runtime: ChatRuntime;
   model: string;

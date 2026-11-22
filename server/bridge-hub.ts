@@ -91,10 +91,25 @@ const cliRunEventSchema = z.object({
 const taskRpcSchema = z.object({
   run_id: text(160).min(1),
   project_id: text(64).min(1),
-  action: z.enum(["list_tasks", "get_task", "comment_task", "update_task", "transition_task", "create_task"]),
+  action: z.enum([
+    "list_tasks",
+    "get_task",
+    "comment_task",
+    "update_task",
+    "transition_task",
+    "create_task",
+    "list_releases",
+    "finish_release",
+  ]),
   params: z.record(z.string(), z.unknown()).default({}),
 });
-const MUTATING_TASK_ACTIONS = new Set(["comment_task", "update_task", "transition_task", "create_task"]);
+const MUTATING_TASK_ACTIONS = new Set([
+  "comment_task",
+  "update_task",
+  "transition_task",
+  "create_task",
+  "finish_release",
+]);
 function redact<T>(object: T, secrets: string[]): T {
   return JSON.parse(JSON.stringify(object, (key, value) => typeof value === "string" && key !== "type" && key !== "status"
     ? redactSecrets(value, secrets).replace(/rdbr_[a-f0-9]{48}/gi, "[redacted]") : value));
@@ -362,7 +377,11 @@ export class BridgeHub {
         );
         if (mutated) {
           run.emitTaskUpdated(mutated);
-          if (mutated.action === "create_task") {
+          if (
+            mutated.action === "create_task" ||
+            mutated.action === "transition_task" ||
+            mutated.action === "finish_release"
+          ) {
             this.notifyAvailability([req.project_id]);
           }
         }

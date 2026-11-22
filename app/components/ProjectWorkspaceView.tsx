@@ -21,10 +21,12 @@ import { MarkdownContent } from "./MarkdownContent.tsx";
 import { Select } from "./Select.tsx";
 import { Button, EmptyState, Modal, useToast } from "./ui.tsx";
 
-type WorkspaceTab = "files" | "databases" | "handbook" | "repos";
+export type WorkspaceTab = "files" | "databases" | "handbook" | "deploy" | "repos";
 
 interface ProjectWorkspaceViewProps {
   project: ProjectDetail | null;
+  initialTab?: WorkspaceTab | null;
+  onConsumeInitialTab?: () => void;
   onNewProject: () => void;
   onOpenChatWithContext: (
     ref?: ChatContextRef,
@@ -49,6 +51,27 @@ const HANDBOOK_TEMPLATE = `# 项目空间手册（HANDBOOK）
 ## 文件与数据库约定
 - 项目空间 \`files/\` 目录存放需求文档、接口规范、测试夹具与只读 SQLite 样本库。
 - 涉及数据排查时，优先基于表结构和只读查询给出 SQL 与结论。
+`;
+
+const DEPLOY_DOC_TEMPLATE = `# 生产部署文档（DEPLOY.md）
+
+> 本文件由 Release Agent 在生产发布（Release）会话中自动读取并严格执行。请写明可复现的发布步骤、健康检查方式与回滚方案；切勿直接存放明文密码或私钥。
+
+## 1. 发布前检查
+- 确认当前分支工作区干净，并拉取最新远端代码：\`git pull --ff-only\`
+- 运行必要校验：\`pnpm typecheck && pnpm test && pnpm build\`
+
+## 2. 生产部署步骤
+- 示例（请替换为本项目的实际部署命令或工具）：
+  - 使用 SSH / Pier / Docker Compose / PM2 / Vercel 等发布命令更新生产实例
+  - 若涉及数据库迁移，请注明备份与迁移命令
+
+## 3. 健康检查与冒烟验证
+- 服务重启后等待就绪，检查健康端点：\`curl -fsS https://your-domain.example/api/health\`
+- 核对线上版本 SHA 与容器日志无启动报错
+
+## 4. 回滚策略
+- 若健康检查失败或核心页面异常，说明如何回退到上一个可用镜像 / commit 并恢复服务
 `;
 
 const SAMPLE_SQLITE_INIT = `-- 示例表结构（可按需修改或留空创建空库）
@@ -110,12 +133,22 @@ function findMatchingDbClient(
 
 export function ProjectWorkspaceView({
   project,
+  initialTab,
+  onConsumeInitialTab,
   onNewProject,
   onOpenChatWithContext,
 }: ProjectWorkspaceViewProps) {
   const toast = useToast();
-  const [tab, setTab] = useState<WorkspaceTab>("files");
+  const [tab, setTab] = useState<WorkspaceTab>(initialTab ?? "files");
   const [mobilePane, setMobilePane] = useState<"list" | "detail">("list");
+
+  useEffect(() => {
+    if (initialTab) {
+      setTab(initialTab);
+      setMobilePane("list");
+      onConsumeInitialTab?.();
+    }
+  }, [initialTab, onConsumeInitialTab]);
 
   // Files state
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
@@ -174,6 +207,13 @@ export function ProjectWorkspaceView({
   const [handbookDirty, setHandbookDirty] = useState(false);
   const [handbookSaving, setHandbookSaving] = useState(false);
   const [handbookPreview, setHandbookPreview] = useState(false);
+
+  // Deploy doc (DEPLOY.md) state
+  const [deployDoc, setDeployDoc] = useState<WorkspaceHandbook | null>(null);
+  const [deployDocDraft, setDeployDocDraft] = useState("");
+  const [deployDocDirty, setDeployDocDirty] = useState(false);
+  const [deployDocSaving, setDeployDocSaving] = useState(false);
+  const [deployDocPreview, setDeployDocPreview] = useState(false);
 
   // Repos state
   const [reposStatus, setReposStatus] = useState<ProjectReposSyncStatus | null>(null);
@@ -241,6 +281,18 @@ export function ProjectWorkspaceView({
     }
   }, [projectId, toast]);
 
+  const refreshDeployDoc = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const res = await api.getWorkspaceDeployDoc(projectId);
+      setDeployDoc(res.deploy_doc);
+      setDeployDocDraft(res.deploy_doc.content);
+      setDeployDocDirty(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "加载部署文档失败");
+    }
+  }, [projectId, toast]);
+
   const refreshReposStatus = useCallback(async () => {
     if (!projectId) return;
     try {
@@ -270,8 +322,9 @@ export function ProjectWorkspaceView({
     void refreshFiles();
     void refreshDatabases();
     void refreshHandbook();
+    void refreshDeployDoc();
     void refreshReposStatus();
-  }, [projectId, refreshFiles, refreshDatabases, refreshHandbook, refreshReposStatus]);
+  }, [projectId, refreshFiles, refreshDatabases, refreshHandbook, refreshDeployDoc, refreshReposStatus]);
 
   const openFile = useCallback(
     async (relPath: string) => {
@@ -570,6 +623,21 @@ export function ProjectWorkspaceView({
     }
   };
 
+  const handleSaveDeployDoc = async () => {
+    if (!projectId || deployDocSaving) return;
+    setDeployDocSaving(true);
+    try {
+      const res = await api.saveWorkspaceDeployDoc(projectId, deployDocDraft);
+      setDeployDoc(res.deploy_doc);
+      setDeployDocDirty(false);
+      toast.success("部署文档 DEPLOY.md 已保存，Release Agent 将按此执行发版");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "保存部署文档失败");
+    } finally {
+      setDeployDocSaving(false);
+    }
+  };
+
   // Repo browsing
   const loadRepoDir = useCallback(
     async (repo: string, subpath: string) => {
@@ -744,6 +812,14 @@ export function ProjectWorkspaceView({
                 label: "项目手册",
                 icon: "book-open",
                 badge: handbook?.exists ? "已配置" : "未填写",
+                badgeReady: Boolean(handbook?.exists),
+              },
+              {
+                id: "deploy",
+                label: "部署文档",
+                icon: "rocket",
+                badge: deployDoc?.exists ? "已配置" : "未填写",
+                badgeReady: Boolean(deployDoc?.exists),
               },
               {
                 id: "repos",
@@ -778,7 +854,7 @@ export function ProjectWorkspaceView({
                 {"badge" in item && (
                   <span
                     className={`text-[10.5px] px-1.5 py-0.2 rounded-full ${
-                      handbook?.exists
+                      item.badgeReady
                         ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
                         : "bg-[var(--surface-subtle)] text-[var(--text-muted)]"
                     }`}
@@ -1914,6 +1990,83 @@ export function ProjectWorkspaceView({
                 }
               }}
               placeholder="在这里记录项目的目录结构、构建测试命令、数据库说明与排查约定…"
+              className="flex-1 w-full rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 font-mono text-[13px] leading-relaxed text-[var(--text-primary)] resize-none focus:outline-none focus:border-indigo-500"
+            />
+          )}
+        </div>
+      )}
+
+      {/* TAB 3.5: DEPLOY.md */}
+      {tab === "deploy" && (
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden p-4 gap-3">
+          <div className="shrink-0 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-[12.5px] text-[var(--text-secondary)]">
+              保存为项目空间根目录下{" "}
+              <code className="font-mono text-[var(--text-primary)]">DEPLOY.md</code>
+              ，生产发布时 Release Agent 会同步读取并按此执行部署与验收。
+              {deployDoc?.updated_at && (
+                <span className="text-[var(--text-muted)] ml-2">
+                  上次更新：{formatRelativeTime(deployDoc.updated_at)}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {!deployDocDraft.trim() && (
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  icon="file-text"
+                  onClick={() => {
+                    setDeployDocDraft(DEPLOY_DOC_TEMPLATE);
+                    setDeployDocDirty(true);
+                  }}
+                >
+                  填入推荐模板
+                </Button>
+              )}
+              <Button
+                size="xs"
+                variant={deployDocPreview ? "secondary" : "ghost"}
+                icon={deployDocPreview ? "pen-line" : "eye"}
+                onClick={() => setDeployDocPreview((v) => !v)}
+              >
+                {deployDocPreview ? "返回编辑" : "Markdown 预览"}
+              </Button>
+              <Button
+                size="xs"
+                variant="primary"
+                icon="save"
+                loading={deployDocSaving}
+                disabled={!deployDocDirty}
+                onClick={() => void handleSaveDeployDoc()}
+              >
+                保存部署文档 (⌘S)
+              </Button>
+            </div>
+          </div>
+
+          {deployDocPreview ? (
+            <div className="flex-1 overflow-y-auto rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-6">
+              {deployDocDraft.trim() ? (
+                <MarkdownContent content={deployDocDraft} />
+              ) : (
+                <p className="text-[13px] text-[var(--text-muted)]">部署文档内容为空</p>
+              )}
+            </div>
+          ) : (
+            <textarea
+              value={deployDocDraft}
+              onChange={(e) => {
+                setDeployDocDraft(e.target.value);
+                setDeployDocDirty(true);
+              }}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+                  e.preventDefault();
+                  void handleSaveDeployDoc();
+                }
+              }}
+              placeholder="在这里编写生产环境的发布命令、SSH / Docker / Pier 步骤、健康检查与回滚方式…"
               className="flex-1 w-full rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 font-mono text-[13px] leading-relaxed text-[var(--text-primary)] resize-none focus:outline-none focus:border-indigo-500"
             />
           )}

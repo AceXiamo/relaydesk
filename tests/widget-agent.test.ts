@@ -273,6 +273,14 @@ const repoToken = "fixture-github-token";
 const projectInfo: AgentProjectInfo = {
   id: projectId, name: "Demo", repo: "fixture/demo", repos: [], widget_code_context: false,
   agent_instructions: "", delivery_mode: "review_only", automation_paused: true,
+  deploy_policy: {
+    mode: "none",
+    window_start: "02:00",
+    window_end: "06:00",
+    timezone: "Asia/Shanghai",
+    allow_urgent_override: true,
+    doc_path: "",
+  },
 };
 
 function configureModel(dbPath: string, id = projectId, runtime: "claude" | "codex" = "claude") {
@@ -553,7 +561,9 @@ describe("Project public model protocols and fallback", () => {
   const task: TaskRecord = {
     id: "task", project_id: projectId, title: "Export", body: "Export failed", source: "widget", source_url: "",
     number: 1, requirements: "", priority: "normal", status: "triage", owner: "none", version: 1, attempts: 0,
-    resolution: null, delivery_ref: "", triaged_by: "", merged_into: null, created_at: "", updated_at: "", last_seen: null,
+    resolution: null, delivery_ref: "", triaged_by: "", merged_into: null,
+    deploy_status: "not_required", deployed_at: null, release_id: null,
+    created_at: "", updated_at: "", last_seen: null,
   };
 
   it.each(["codex", "claude"] as const)("uses the project's %s protocol for intake and prescreen without forwarding its settings", async (runtime) => {

@@ -29,10 +29,12 @@ import type {
   GithubReposPayload,
   GithubStatusPayload,
   ProjectDetail,
+  ProjectDeployPolicy,
   ProjectReposSyncStatus,
   ProjectSummary,
   R2ConfigStatus,
   R2TestResult,
+  ReleaseRecord,
   TaskDetailPayload,
   TaskMessage,
   TaskPriority,
@@ -68,7 +70,7 @@ export class ClientApiError extends Error {
 
 async function request<T>(
   path: string,
-  method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" = "GET",
   body?: unknown,
 ): Promise<T> {
   const response = await fetch(path, {
@@ -433,6 +435,60 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/workspace/handbook`,
       "POST",
       { content },
+    ),
+  getWorkspaceDeployDoc: (projectId: string) =>
+    request<{ deploy_doc: WorkspaceHandbook }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/deploy-doc`,
+    ),
+  saveWorkspaceDeployDoc: (projectId: string, content: string) =>
+    request<{ deploy_doc: WorkspaceHandbook }>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/deploy-doc`,
+      "PUT",
+      { content },
+    ),
+  getProjectDeployPolicy: (projectId: string) =>
+    request<{ deploy_policy: ProjectDeployPolicy; deploy_doc_exists: boolean }>(
+      `/api/projects/${encodeURIComponent(projectId)}/deploy-policy`,
+    ),
+  updateProjectDeployPolicy: (
+    projectId: string,
+    patch: Partial<ProjectDeployPolicy>,
+  ) =>
+    request<{ deploy_policy: ProjectDeployPolicy; deploy_doc_exists: boolean }>(
+      `/api/projects/${encodeURIComponent(projectId)}/deploy-policy`,
+      "PUT",
+      patch,
+    ),
+  listProjectReleases: (projectId: string, limit = 50) =>
+    request<{
+      releases: ReleaseRecord[];
+      pending_tasks: TaskRecord[];
+      failed_tasks: TaskRecord[];
+      active_release: ReleaseRecord | null;
+      deploy_policy: ProjectDeployPolicy;
+      deploy_doc_exists: boolean;
+    }>(
+      `/api/projects/${encodeURIComponent(projectId)}/releases?limit=${encodeURIComponent(String(limit))}`,
+    ),
+  getProjectRelease: (projectId: string, releaseId: string) =>
+    request<{ release: ReleaseRecord; session: ChatSessionRecord | null }>(
+      `/api/projects/${encodeURIComponent(projectId)}/releases/${encodeURIComponent(releaseId)}`,
+    ),
+  triggerProjectRelease: (
+    projectId: string,
+    payload?: {
+      force?: boolean;
+      prompt?: string;
+      runtime?: ChatRuntime;
+      model?: string;
+      reasoning_effort?: ChatReasoningEffort;
+      execution_target?: string;
+    },
+  ) =>
+    request<{ release: ReleaseRecord; session: ChatSessionRecord; run_id: string }>(
+      `/api/projects/${encodeURIComponent(projectId)}/releases/trigger`,
+      "POST",
+      payload ?? {},
     ),
   listWorkspaceDatabases: (projectId: string, refreshClients = false) =>
     request<{ databases: WorkspaceDatabaseEntry[]; clients: WorkspaceDbClientInfo[] }>(

@@ -401,6 +401,7 @@ describe("ProjectChatStreams task_updated callback", () => {
       project_id: "p1",
       kind: "chat",
       task_id: null,
+      release_id: null,
       title: "Test",
       runtime: "claude",
       model: "",

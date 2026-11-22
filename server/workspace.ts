@@ -660,6 +660,69 @@ export function writeWorkspaceHandbook(
 }
 
 /* -------------------------------------------------------------------------- */
+/* Project Deploy Runbook (DEPLOY.md)                                         */
+/* -------------------------------------------------------------------------- */
+
+export function readWorkspaceDeployDoc(
+  dbPath: string,
+  projectId: string,
+): WorkspaceHandbook {
+  if (dbPath === ":memory:") {
+    return { content: "", exists: false, size: 0, updated_at: null };
+  }
+  const root = getProjectWorkspaceRoot(dbPath, projectId, false);
+  const deployPath = join(root, "DEPLOY.md");
+  if (!existsSync(deployPath)) {
+    return { content: "", exists: false, size: 0, updated_at: null };
+  }
+  const st = lstatSync(deployPath);
+  if (!st.isFile()) {
+    throw new ApiError(500, "Deploy doc file is invalid");
+  }
+  const content = readFileSync(deployPath, "utf8");
+  return {
+    content,
+    exists: true,
+    size: st.size,
+    updated_at: st.mtime.toISOString(),
+  };
+}
+
+export function writeWorkspaceDeployDoc(
+  dbPath: string,
+  projectId: string,
+  content: string,
+): WorkspaceHandbook {
+  if (typeof content !== "string") {
+    throw new ApiError(400, "部署文档内容必须为文本");
+  }
+  const buf = Buffer.from(content, "utf8");
+  if (buf.length > MAX_HANDBOOK_BYTES) {
+    throw new ApiError(413, "部署文档超出 64 KiB 限制");
+  }
+  const root = getProjectWorkspaceRoot(dbPath, projectId, true);
+  const deployPath = join(root, "DEPLOY.md");
+  const tmp = join(root, `.deploy-doc-${randomUUID()}.tmp`);
+  try {
+    writeFileSync(tmp, buf, { mode: 0o600 });
+    renameSync(tmp, deployPath);
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+  }
+  const st = statSync(deployPath);
+  return {
+    content,
+    exists: true,
+    size: st.size,
+    updated_at: st.mtime.toISOString(),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Project Databases & Data Sources                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -1422,12 +1485,16 @@ export function queryWorkspaceSqlite(
 }
 
 /* Bridge paths are wire paths relative to the space, never host filesystem paths. */
+function isRootSpaceDoc(path: string): boolean {
+  return path === "HANDBOOK.md" || path === "DEPLOY.md";
+}
+
 function bridgeFilePath(dbPath: string, projectId: string, path: string) {
   const root = getProjectWorkspaceRoot(dbPath, projectId);
-  if (typeof path !== "string" || (path !== "HANDBOOK.md" && !path.startsWith("files/"))) {
-    throw new ApiError(400, "仅允许访问 HANDBOOK.md 或 files/ 中的文件");
+  if (typeof path !== "string" || (!isRootSpaceDoc(path) && !path.startsWith("files/"))) {
+    throw new ApiError(400, "仅允许访问 HANDBOOK.md、DEPLOY.md 或 files/ 中的文件");
   }
-  if (path !== "HANDBOOK.md") {
+  if (!isRootSpaceDoc(path)) {
     const rel = path.slice(6);
     if (normalizeWorkspaceRelPath(rel) !== rel || /[:\\]/.test(rel) ||
         rel.split("/").some(part => part.startsWith(".") || /^(?:auth|datasources)\.json$/i.test(part)) ||
@@ -1465,7 +1532,7 @@ function openBridgeFile(dbPath: string, projectId: string, path: string, maxByte
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1) throw new ApiError(403, "不允许访问链接或特殊文件");
-    const limit = path === "HANDBOOK.md" ? Math.min(maxBytes, MAX_HANDBOOK_BYTES) : maxBytes;
+    const limit = isRootSpaceDoc(path) ? Math.min(maxBytes, MAX_HANDBOOK_BYTES) : maxBytes;
     if (st.size > limit) throw new ApiError(413, "文件超出传输大小限制");
     return { file, fd, size: st.size, updated_at: st.mtime.toISOString() };
   } catch (err) { closeSync(fd); throw err; }
@@ -1519,12 +1586,17 @@ export function writeBridgeWorkspaceFile(dbPath: string, projectId: string, path
 export function buildWorkspaceManifest(dbPath: string, projectId: string) {
   const files: Array<{ path: string; size: number; updated_at: string; mtime: string; sha256: string }> = [];
   let handbook: { size: number; sha256: string; updated_at: string } | null = null;
+  let deployDoc: { size: number; sha256: string; updated_at: string } | null = null;
   const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
-  if (dbPath === ":memory:") return { handbook, handbook_sha256: null, files, databases: [] };
+  if (dbPath === ":memory:") return { handbook, handbook_sha256: null, deploy_doc: null, deploy_doc_sha256: null, files, databases: [] };
   const root = getProjectWorkspaceRoot(dbPath, projectId);
   try {
     const bytes = readBridgeWorkspaceFile(dbPath, projectId, "HANDBOOK.md");
     handbook = { size: bytes.length, sha256: digest(bytes), updated_at: lstatSync(join(root, "HANDBOOK.md")).mtime.toISOString() };
+  } catch (error) { if (!(error instanceof ApiError && error.status === 404)) throw error; }
+  try {
+    const bytes = readBridgeWorkspaceFile(dbPath, projectId, "DEPLOY.md");
+    deployDoc = { size: bytes.length, sha256: digest(bytes), updated_at: lstatSync(join(root, "DEPLOY.md")).mtime.toISOString() };
   } catch (error) { if (!(error instanceof ApiError && error.status === 404)) throw error; }
   // Check the files root before the generic listing (which resolves its realpath).
   const filesDir = join(root, "files");
@@ -1548,7 +1620,14 @@ export function buildWorkspaceManifest(dbPath: string, projectId: string) {
     ...db, name: redactSecrets(db.name, secrets), notes: redactSecrets(db.notes, secrets),
     host_preview: db.kind === "sqlite" && db.source === "external" ? "" : redactSecrets(db.host_preview, secrets),
   }));
-  return { handbook, handbook_sha256: handbook?.sha256 ?? null, files, databases };
+  return {
+    handbook,
+    handbook_sha256: handbook?.sha256 ?? null,
+    deploy_doc: deployDoc,
+    deploy_doc_sha256: deployDoc?.sha256 ?? null,
+    files,
+    databases,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1688,6 +1767,7 @@ export function getWorkspaceSummary(
 ): WorkspaceSummary {
   const { total_bytes, file_count } = listWorkspaceFiles(dbPath, project.id);
   const handbook = readWorkspaceHandbook(dbPath, project.id);
+  const deployDoc = readWorkspaceDeployDoc(dbPath, project.id);
   const databases = listWorkspaceDatabases(dbPath, project.id);
   const reposStatus = getProjectReposStatus(dbPath, project);
   return {
@@ -1696,6 +1776,9 @@ export function getWorkspaceSummary(
     handbook_exists: handbook.exists,
     handbook_size: handbook.size,
     handbook_updated_at: handbook.updated_at,
+    deploy_doc_exists: deployDoc.exists,
+    deploy_doc_size: deployDoc.size,
+    deploy_doc_updated_at: deployDoc.updated_at,
     databases_count: databases.length,
     sqlite_count: databases.filter((d) => d.source === "workspace_file").length,
     repos_status: reposStatus,

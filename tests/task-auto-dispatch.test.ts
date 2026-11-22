@@ -345,7 +345,7 @@ describe("event-driven task auto-dispatch to local agents", () => {
     recoveryStore.claimTaskForSession(t.id, s.id, "laptop", "auto");
     recoveryStore.updateChatSession(p.id, s.id, { status: "running" });
     const recovered = recoveryStore.recoverInterruptedSessionRuns();
-    expect(recovered).toEqual({ recoveredSessions: 1, recoveredTasks: 1 });
+    expect(recovered).toEqual({ recoveredSessions: 1, recoveredTasks: 1, recoveredReleases: 0 });
     expect(recoveryStore.getTaskView(t.id).status).toBe("waiting");
     expect(recoveryStore.getTaskView(t.id).owner).toBe("none");
     expect(recoveryStore.getChatSession(p.id, s.id).status).toBe("idle");

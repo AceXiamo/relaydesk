@@ -13,7 +13,9 @@ export type RelaydeskTaskAction =
   | "comment_task"
   | "update_task"
   | "transition_task"
-  | "create_task";
+  | "create_task"
+  | "list_releases"
+  | "finish_release";
 
 export interface RelaydeskMcpTaskClient {
   call(action: RelaydeskTaskAction, params: Record<string, unknown>): Promise<unknown>;
@@ -758,6 +760,11 @@ function buildToolDefinitions(hasTasks: boolean) {
                 enum: ["low", "normal", "high", "urgent"],
                 description: "Optional priority filter",
               },
+              deploy_status: {
+                type: "string",
+                enum: ["not_required", "pending", "deploying", "deployed", "failed"],
+                description: "Optional deploy status filter",
+              },
               search: { type: "string", description: "Optional substring search against code, title, or body" },
               include_done: { type: "boolean", description: "Include completed tasks (default true)" },
               limit: { type: "integer", minimum: 1, maximum: 100, description: "Max tasks to return (default 30)" },
@@ -834,6 +841,11 @@ function buildToolDefinitions(hasTasks: boolean) {
                 description: "Optional resolution when transitioning to done (defaults to shipped)",
               },
               delivery_ref: { type: "string", description: "Optional PR URL or commit/branch reference" },
+              needs_deploy: {
+                type: "boolean",
+                description:
+                  "Optional flag when transitioning to done(shipped): set false for docs/tests/config-only changes that do not require production deployment",
+              },
               comment: { type: "string", description: "Optional agent comment recorded along with the transition" },
               merge_into: {
                 type: ["string", "integer"],
@@ -856,6 +868,63 @@ function buildToolDefinitions(hasTasks: boolean) {
               requirements: { type: "string", description: "Optional acceptance criteria" },
               priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
               status: { type: "string", enum: ["triage", "ready"], description: "Initial status (default triage)" },
+            },
+          },
+        },
+        {
+          name: "list_releases",
+          description:
+            "List recent production release records (REL-xxx) for the current Relaydesk project.",
+          annotations: readOnlyAnnotations,
+          inputSchema: {
+            type: "object",
+            properties: {
+              status: {
+                type: "string",
+                enum: ["running", "succeeded", "failed", "blocked"],
+                description: "Optional release status filter",
+              },
+              limit: {
+                type: "integer",
+                minimum: 1,
+                maximum: 50,
+                description: "Max releases to return (default 20)",
+              },
+            },
+          },
+        },
+        {
+          name: "finish_release",
+          description:
+            "Complete the active Release session (REL-xxx), recording its final status (succeeded, failed, or blocked), summary, and optional deploy_ref / deployed_task_ids.",
+          annotations: taskWriteAnnotations,
+          inputSchema: {
+            type: "object",
+            required: ["release_id", "status", "summary"],
+            properties: {
+              release_id: {
+                type: ["string", "integer"],
+                description: "Release ID, number (e.g. 3), or code (e.g. REL-3)",
+              },
+              status: {
+                type: "string",
+                enum: ["succeeded", "failed", "blocked"],
+                description: "Final release outcome",
+              },
+              summary: {
+                type: "string",
+                description: "Concise Markdown summary of deployment steps, verification results, or failure/block reasons",
+              },
+              deploy_ref: {
+                type: "string",
+                description: "Optional deployed commit SHA, image tag, or release identifier",
+              },
+              deployed_task_ids: {
+                type: "array",
+                items: { type: "string" },
+                description:
+                  "Optional subset of task IDs or codes (e.g. RD-12) actually deployed when status is succeeded; defaults to all tasks in this release",
+              },
             },
           },
         },
@@ -1286,7 +1355,9 @@ export async function startRelaydeskMcpServer(options: RelaydeskMcpOptions): Pro
       name === "comment_task" ||
       name === "update_task" ||
       name === "transition_task" ||
-      name === "create_task"
+      name === "create_task" ||
+      name === "list_releases" ||
+      name === "finish_release"
     ) {
       if (!options.taskClient) {
         throw new Error("Task tools are not available in this session");

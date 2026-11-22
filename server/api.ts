@@ -5,6 +5,7 @@ import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { BridgeHub } from "./bridge-hub.ts";
 import { ChatRunManager } from "./chat-run-manager.ts";
+import { ReleaseDispatcher } from "./release-dispatcher.ts";
 import { TaskDispatcher } from "./task-dispatcher.ts";
 
 import {
@@ -104,10 +105,12 @@ import {
   readProjectRepoFileContent,
   readWorkspaceFile,
   readWorkspaceFileDownload,
+  readWorkspaceDeployDoc,
   readWorkspaceHandbook,
   updateWorkspaceExternalDatasource,
   uploadWorkspaceFile,
   writeBridgeWorkspaceFile,
+  writeWorkspaceDeployDoc,
   writeWorkspaceHandbook,
   writeWorkspaceTextFile,
 } from "./workspace.ts";
@@ -176,6 +179,7 @@ export interface ApiContextOptions {
   adminToken?: string;
   wallet?: WalletAuth | null;
   bindHost?: string;
+  releasePollIntervalMs?: number;
 }
 
 export class ApiRouter {
@@ -186,6 +190,7 @@ export class ApiRouter {
   readonly bindHost: string;
   readonly chatRuns: ChatRunManager;
   readonly taskDispatcher: TaskDispatcher;
+  readonly releaseDispatcher: ReleaseDispatcher;
   private traffic = new Map<string, number[]>();
   private cliPresence = new Map<string, { seen: number; runtime: string; ready: boolean; managed: boolean; runId?: string }>();
   private assistantInFlight = 0;
@@ -200,10 +205,16 @@ export class ApiRouter {
     this.bindHost = options.bindHost ?? "127.0.0.1";
     this.chatRuns = new ChatRunManager(this.store, this.bridgeHub);
     this.taskDispatcher = new TaskDispatcher(this.store, this.bridgeHub, this.chatRuns);
+    this.releaseDispatcher = new ReleaseDispatcher(this.store, this.bridgeHub, this.chatRuns, {
+      ...(options.releasePollIntervalMs !== undefined
+        ? { pollIntervalMs: options.releasePollIntervalMs }
+        : {}),
+    });
   }
 
   close(): void {
     this.taskDispatcher.close();
+    this.releaseDispatcher.close();
   }
 
   getAuthMode(): AuthMode {
@@ -529,6 +540,99 @@ export class ApiRouter {
         const result = await this.handleProjectExecutionRouting(req, method, parts[1]);
         this.sendJson(req, res, 200, result, meta);
         return;
+      }
+
+      // Operator Project deploy policy endpoints
+      if (parts.length === 3 && parts[0] === "projects" && parts[2] === "deploy-policy") {
+        const projectId = parts[1];
+        if (method === "GET") {
+          const deploy_policy = this.store.getProjectDeployPolicy(projectId);
+          const deployDoc = readWorkspaceDeployDoc(this.store.dbPath, projectId);
+          this.sendJson(req, res, 200, { deploy_policy, deploy_doc_exists: deployDoc.exists }, meta);
+          return;
+        }
+        if (method === "PUT" || method === "PATCH") {
+          const body = await this.readJson(req, 32 * 1024);
+          const deploy_policy = this.store.transaction(true, () =>
+            this.store.updateProjectDeployPolicy(projectId, body),
+          );
+          const deployDoc = readWorkspaceDeployDoc(this.store.dbPath, projectId);
+          this.releaseDispatcher.schedule(projectId);
+          this.sendJson(req, res, 200, { deploy_policy, deploy_doc_exists: deployDoc.exists }, meta);
+          return;
+        }
+        throw new ApiError(405, "Method not allowed");
+      }
+
+      // Operator Project releases endpoints
+      if (parts.length >= 3 && parts[0] === "projects" && parts[2] === "releases") {
+        const projectId = parts[1];
+        this.store.getProjectRow(projectId);
+        if (parts.length === 3 && method === "GET") {
+          const urlObj = new URL(req.url ?? "/", "http://127.0.0.1");
+          const rawLimit = Number(urlObj.searchParams.get("limit") || 50);
+          const releases = this.store.listReleases(projectId, Number.isFinite(rawLimit) ? rawLimit : 50);
+          const pending_tasks = this.store.listTasksByDeployStatus(projectId, ["pending"]);
+          const failed_tasks = this.store.listTasksByDeployStatus(projectId, ["failed"]);
+          const active_release = this.store.getActiveRelease(projectId);
+          const deploy_policy = this.store.getProjectDeployPolicy(projectId);
+          const deployDoc = readWorkspaceDeployDoc(this.store.dbPath, projectId);
+          this.sendJson(
+            req,
+            res,
+            200,
+            {
+              releases,
+              pending_tasks,
+              failed_tasks,
+              active_release,
+              deploy_policy,
+              deploy_doc_exists: deployDoc.exists,
+            },
+            meta,
+          );
+          return;
+        }
+        if (parts.length === 4 && parts[3] === "trigger" && method === "POST") {
+          const hasBody =
+            Number(req.headers["content-length"]) > 0 ||
+            req.headers["transfer-encoding"] !== undefined;
+          const body = hasBody ? await this.readJson(req, 32 * 1024) : {};
+          const selection = chatModelSelection(body);
+          const prompt =
+            typeof body.prompt === "string" ? body.prompt.trim().slice(0, 8000) : undefined;
+          const force = body.force === true;
+          const result = this.releaseDispatcher.triggerReleaseManually(projectId, {
+            force,
+            prompt,
+            ...selection,
+          });
+          this.sendJson(
+            req,
+            res,
+            200,
+            {
+              release: result.release,
+              session: result.session,
+              run_id: result.runId,
+            },
+            meta,
+          );
+          return;
+        }
+        if (parts.length === 4 && method === "GET") {
+          const release = this.store.getRelease(projectId, parts[3]);
+          let session = release.session_id
+            ? this.store.getReleaseChatSession(release.id)
+            : null;
+          if (session) {
+            const activeRunId = this.chatRuns.getActiveRunId(session.id);
+            if (activeRunId) session = { ...session, active_run_id: activeRunId };
+          }
+          this.sendJson(req, res, 200, { release, session }, meta);
+          return;
+        }
+        throw new ApiError(405, "Method not allowed");
       }
 
       if (parts.length === 4 && parts[0] === "projects" && parts[2] === "cli-config" && parts[3] === "discover-models" && method === "POST") {
@@ -1775,6 +1879,19 @@ export class ApiRouter {
       throw new ApiError(405, "Method not allowed");
     }
 
+    // GET / PUT / POST / PATCH /api/projects/:id/workspace/deploy-doc
+    if (subparts.length === 1 && subparts[0] === "deploy-doc") {
+      if (method === "GET") {
+        return { deploy_doc: readWorkspaceDeployDoc(this.store.dbPath, projectInfo.id) };
+      }
+      if (method === "PUT" || method === "POST" || method === "PATCH") {
+        const data = await this.readJson(req, 128 * 1024);
+        const content = typeof data.content === "string" ? data.content : "";
+        return { deploy_doc: writeWorkspaceDeployDoc(this.store.dbPath, projectInfo.id, content) };
+      }
+      throw new ApiError(405, "Method not allowed");
+    }
+
     // GET / POST /api/projects/:id/workspace/databases
     if (subparts.length === 1 && subparts[0] === "databases") {
       if (method === "GET") {
@@ -1920,7 +2037,7 @@ export class ApiRouter {
         const urlObj = new URL(req.url ?? "/", "http://127.0.0.1");
         const rawKind = urlObj.searchParams.get("kind");
         const kind: ChatSessionKind | "all" =
-          rawKind === "task" || rawKind === "all" ? rawKind : "chat";
+          rawKind === "task" || rawKind === "release" || rawKind === "all" ? rawKind : "chat";
         const sessions = this.store.transaction(false, () =>
           this.store.listChatSessions(projectInfo.id, kind).map((s) => {
             const activeRunId = this.chatRuns.getActiveRunId(s.id);
@@ -2629,12 +2746,15 @@ export class ApiRouter {
 
       if (parts.length === 2) {
         if (method === "GET") {
-          return { project: toProjectView(project) };
+          return { project: this.store.getProjectDetail(projectId) };
         }
         if (method === "PATCH") {
           const updated = this.store.updateProject(projectId, data);
           if (!updated.automation_paused) {
-            postCommit.push(() => this.taskDispatcher.schedule(projectId));
+            postCommit.push(() => {
+              this.taskDispatcher.schedule(projectId);
+              this.releaseDispatcher.schedule(projectId);
+            });
           }
           return { project: updated };
         }
@@ -2695,7 +2815,11 @@ export class ApiRouter {
           };
         }
         if (method === "POST") {
-          return this.store.agentCall(project, agentParts, data);
+          const agentRes = this.store.agentCall(project, agentParts, data);
+          if (agentParts.length === 2 && agentParts[1] === "finish" && data.complete === true) {
+            postCommit.push(() => this.releaseDispatcher.schedule(projectId));
+          }
+          return agentRes;
         }
       }
     }
