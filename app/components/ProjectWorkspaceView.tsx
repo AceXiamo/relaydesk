@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "~/lib/api.ts";
 import { formatRelativeTime } from "~/lib/format.ts";
 import type {
@@ -16,9 +16,16 @@ import type {
   WorkspaceRepoFileEntry,
   WorkspaceSqliteSchema,
 } from "~/lib/types.ts";
+import {
+  buildWorkspaceFileUrl,
+  getWorkspaceInlineMime,
+  getWorkspaceMediaKind,
+  isWorkspaceChatImageExt,
+} from "~/lib/workspace-media.ts";
 import { Icon } from "./Icon.tsx";
 import { MarkdownContent } from "./MarkdownContent.tsx";
 import { Select } from "./Select.tsx";
+import { WorkspaceMediaPreview } from "./WorkspaceMediaPreview.tsx";
 import { Button, EmptyState, Modal, useToast } from "./ui.tsx";
 
 export type WorkspaceTab = "files" | "databases" | "handbook" | "deploy" | "repos";
@@ -97,14 +104,97 @@ function formatBytes(bytes: number): string {
 function fileIconName(entry: WorkspaceFileEntry): string {
   if (entry.type === "dir") return "folder";
   if (entry.is_sqlite) return "database";
+  const mediaKind = getWorkspaceMediaKind(entry.ext);
+  if (mediaKind === "image") return "image";
+  if (mediaKind === "video") return "film";
+  if (mediaKind === "audio") return "music";
+  if (mediaKind === "pdf") return "file-text";
   if (entry.ext === ".md" || entry.ext === ".txt") return "file-text";
   if (entry.ext === ".csv" || entry.ext === ".tsv") return "file-spreadsheet";
   if ([".ts", ".tsx", ".js", ".jsx", ".py", ".sql", ".json", ".yml", ".yaml", ".sh"].includes(entry.ext)) {
     return "file-code-2";
   }
-  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"].includes(entry.ext)) return "image";
   return "file";
 }
+
+const WorkspaceFileRow = memo(function WorkspaceFileRow({
+  entry,
+  active,
+  collapsed,
+  onSelectFile,
+  onToggleDir,
+  onDelete,
+}: {
+  entry: WorkspaceFileEntry;
+  active: boolean;
+  collapsed: boolean;
+  onSelectFile: (path: string) => void;
+  onToggleDir: (path: string) => void;
+  onDelete: (entry: WorkspaceFileEntry) => void;
+}) {
+  const depth = entry.path.split("/").length - 1;
+  const isDir = entry.type === "dir";
+  return (
+    <div
+      style={{ paddingLeft: `${8 + depth * 14}px` }}
+      className={`group flex items-center justify-between gap-1.5 pr-1.5 py-1.5 rounded-lg text-[12.5px] transition-colors ${
+        active
+          ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 font-medium"
+          : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={() => {
+          if (isDir) {
+            onToggleDir(entry.path);
+          } else {
+            onSelectFile(entry.path);
+          }
+        }}
+        className="flex items-center gap-1.5 min-w-0 flex-1 text-left cursor-pointer"
+      >
+        {isDir && (
+          <Icon
+            name={collapsed ? "chevron-right" : "chevron-down"}
+            size={12}
+            className="text-[var(--text-muted)] shrink-0"
+          />
+        )}
+        <Icon
+          name={fileIconName(entry)}
+          size={14}
+          className={
+            entry.is_sqlite
+              ? "text-emerald-500"
+              : isDir
+                ? "text-amber-500"
+                : active
+                  ? "text-indigo-500"
+                  : "text-[var(--text-muted)]"
+          }
+        />
+        <span className="truncate font-mono text-[12px]">{entry.name}</span>
+      </button>
+      <div className="flex items-center gap-1 shrink-0">
+        {!isDir && (
+          <span className="text-[10.5px] font-mono text-[var(--text-muted)] md:group-hover:hidden">
+            {formatBytes(entry.size)}
+          </span>
+        )}
+        <button
+          type="button"
+          title="删除"
+          aria-label={`删除 ${entry.name}`}
+          onClick={() => onDelete(entry)}
+          className="inline-flex md:hidden md:group-hover:inline-flex p-1.5 md:p-1 rounded text-[var(--text-muted)] hover:text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+        >
+          <Icon name="trash-2" size={12} />
+        </button>
+      </div>
+    </div>
+  );
+});
 
 function buildDatasourceCliExample(db: WorkspaceDatabaseEntry): string {
   const envRef = db.env_var ? `$${db.env_var}` : "$RELAYDESK_DB_MAIN";
@@ -155,6 +245,8 @@ export function ProjectWorkspaceView({
   const [filesTotalBytes, setFilesTotalBytes] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
   const [fileSearch, setFileSearch] = useState("");
+  const deferredFileSearch = useDeferredValue(fileSearch);
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(() => new Set());
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [fileDetail, setFileDetail] = useState<WorkspaceFileDetail | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
@@ -164,6 +256,11 @@ export function ProjectWorkspaceView({
   const [mdPreview, setMdPreview] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+
+  const openFileSeqRef = useRef(0);
+  const openFileAbortRef = useRef<AbortController | null>(null);
+  const fileDetailCacheRef = useRef<Map<string, WorkspaceFileDetail>>(new Map());
+  const filesByPathRef = useRef<Map<string, WorkspaceFileEntry>>(new Map());
 
   // Create file / dir modal
   const [createModal, setCreateModal] = useState<null | "file" | "dir">(null);
@@ -235,6 +332,12 @@ export function ProjectWorkspaceView({
     setFilesLoading(true);
     try {
       const res = await api.listWorkspaceFiles(projectId);
+      fileDetailCacheRef.current.clear();
+      const map = new Map<string, WorkspaceFileEntry>();
+      for (const entry of res.files) {
+        map.set(entry.path, entry);
+      }
+      filesByPathRef.current = map;
       setFiles(res.files);
       setFilesTotalBytes(res.total_bytes);
     } catch (err) {
@@ -308,8 +411,15 @@ export function ProjectWorkspaceView({
   }, [projectId]);
 
   useEffect(() => {
+    openFileAbortRef.current?.abort();
+    openFileAbortRef.current = null;
+    openFileSeqRef.current += 1;
+    fileDetailCacheRef.current.clear();
+    filesByPathRef.current = new Map();
+    setCollapsedDirs(new Set());
     setSelectedFilePath(null);
     setFileDetail(null);
+    setFileLoading(false);
     setFileDraft("");
     setFileDirty(false);
     setSelectedDbId(null);
@@ -324,27 +434,93 @@ export function ProjectWorkspaceView({
     void refreshHandbook();
     void refreshDeployDoc();
     void refreshReposStatus();
+    return () => {
+      openFileAbortRef.current?.abort();
+    };
   }, [projectId, refreshFiles, refreshDatabases, refreshHandbook, refreshDeployDoc, refreshReposStatus]);
 
   const openFile = useCallback(
     async (relPath: string) => {
       if (!projectId) return;
+      openFileAbortRef.current?.abort();
+      const seq = ++openFileSeqRef.current;
       setSelectedFilePath(relPath);
+
+      const entry = filesByPathRef.current.get(relPath);
+      const defaultPreview = entry?.ext === ".svg";
+
+      // Fast path: non-text media / SQLite files already have complete metadata in the file list.
+      if (entry && entry.type === "file" && !entry.is_text && (entry.is_sqlite || getWorkspaceMediaKind(entry.ext))) {
+        setFileLoading(false);
+        setMdPreview(false);
+        setFileDetail({ ...entry });
+        setFileDraft("");
+        setFileDirty(false);
+        return;
+      }
+
+      const cacheKey = `${projectId}:${relPath}:${entry?.updated_at ?? ""}`;
+      const cached = fileDetailCacheRef.current.get(cacheKey);
+      if (cached) {
+        setFileLoading(false);
+        setMdPreview(cached.ext === ".svg");
+        setFileDetail(cached);
+        setFileDraft(cached.content ?? "");
+        setFileDirty(false);
+        return;
+      }
+
+      const controller = new AbortController();
+      openFileAbortRef.current = controller;
       setFileLoading(true);
-      setMdPreview(false);
+      setMdPreview(defaultPreview);
       try {
-        const res = await api.getWorkspaceFile(projectId, relPath);
+        const res = await api.getWorkspaceFile(projectId, relPath, controller.signal);
+        if (openFileSeqRef.current !== seq) return;
+        const nextKey = `${projectId}:${res.file.path}:${res.file.updated_at}`;
+        if (fileDetailCacheRef.current.size >= 30) {
+          const oldest = fileDetailCacheRef.current.keys().next().value;
+          if (oldest !== undefined) fileDetailCacheRef.current.delete(oldest);
+        }
+        fileDetailCacheRef.current.set(nextKey, res.file);
         setFileDetail(res.file);
         setFileDraft(res.file.content ?? "");
         setFileDirty(false);
+        setMdPreview(res.file.ext === ".svg");
       } catch (err) {
+        if (controller.signal.aborted || openFileSeqRef.current !== seq) return;
         toast.error(err instanceof Error ? err.message : "读取文件失败");
       } finally {
-        setFileLoading(false);
+        if (openFileSeqRef.current === seq) {
+          setFileLoading(false);
+        }
       }
     },
     [projectId, toast],
   );
+
+  const toggleDirCollapsed = useCallback((dirPath: string) => {
+    setCollapsedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(dirPath)) {
+        next.delete(dirPath);
+      } else {
+        next.add(dirPath);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleSelectFileRow = useCallback(
+    (path: string) => {
+      setMobilePane("detail");
+      void openFile(path);
+    },
+    [openFile],
+  );
+
+  const selectedFilePathRef = useRef<string | null>(null);
+  selectedFilePathRef.current = selectedFilePath;
 
   const saveCurrentFile = useCallback(async () => {
     if (!projectId || !fileDetail || !fileDetail.is_text || fileSaving) return;
@@ -354,7 +530,8 @@ export function ProjectWorkspaceView({
       setFileDetail(res.file);
       setFileDirty(false);
       toast.success(`已保存 ${fileDetail.path}`);
-      void refreshFiles();
+      await refreshFiles();
+      fileDetailCacheRef.current.set(`${projectId}:${res.file.path}:${res.file.updated_at}`, res.file);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "保存文件失败");
     } finally {
@@ -362,26 +539,30 @@ export function ProjectWorkspaceView({
     }
   }, [projectId, fileDetail, fileDraft, fileSaving, toast, refreshFiles]);
 
-  const handleDeleteFile = async (entry: WorkspaceFileEntry) => {
-    if (!projectId) return;
-    const kindLabel = entry.type === "dir" ? "文件夹及其内容" : "文件";
-    if (!window.confirm(`确定删除${kindLabel}「${entry.path}」吗？此操作不可撤销。`)) return;
-    try {
-      await api.deleteWorkspaceFile(projectId, entry.path);
-      toast.success(`已删除 ${entry.path}`);
-      if (selectedFilePath === entry.path || selectedFilePath?.startsWith(entry.path + "/")) {
-        setSelectedFilePath(null);
-        setFileDetail(null);
-        setFileDirty(false);
+  const handleDeleteFile = useCallback(
+    async (entry: WorkspaceFileEntry) => {
+      if (!projectId) return;
+      const kindLabel = entry.type === "dir" ? "文件夹及其内容" : "文件";
+      if (!window.confirm(`确定删除${kindLabel}「${entry.path}」吗？此操作不可撤销。`)) return;
+      try {
+        await api.deleteWorkspaceFile(projectId, entry.path);
+        toast.success(`已删除 ${entry.path}`);
+        const currSelected = selectedFilePathRef.current;
+        if (currSelected === entry.path || currSelected?.startsWith(entry.path + "/")) {
+          setSelectedFilePath(null);
+          setFileDetail(null);
+          setFileDirty(false);
+        }
+        await refreshFiles();
+        if (entry.is_sqlite || entry.type === "dir") {
+          await refreshDatabases();
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "删除失败");
       }
-      await refreshFiles();
-      if (entry.is_sqlite || entry.type === "dir") {
-        await refreshDatabases();
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "删除失败");
-    }
-  };
+    },
+    [projectId, toast, refreshFiles, refreshDatabases],
+  );
 
   const handleUploadFiles = async (fileList: FileList | File[], prefixDir = "") => {
     if (!projectId || !fileList.length) return;
@@ -707,10 +888,58 @@ export function ProjectWorkspaceView({
   };
 
   const filteredFiles = useMemo(() => {
-    const q = fileSearch.trim().toLowerCase();
-    if (!q) return files;
-    return files.filter((f) => f.path.toLowerCase().includes(q));
-  }, [files, fileSearch]);
+    const q = deferredFileSearch.trim().toLowerCase();
+    if (q) {
+      return files.filter((f) => f.path.toLowerCase().includes(q));
+    }
+    if (collapsedDirs.size === 0) return files;
+    return files.filter((entry) => {
+      if (!entry.path.includes("/")) return true;
+      const parts = entry.path.split("/");
+      for (let i = 1; i < parts.length; i++) {
+        if (collapsedDirs.has(parts.slice(0, i).join("/"))) return false;
+      }
+      return true;
+    });
+  }, [files, deferredFileSearch, collapsedDirs]);
+
+  const previewableMediaFiles = useMemo(
+    () =>
+      filteredFiles.filter(
+        (entry) => entry.type === "file" && getWorkspaceMediaKind(entry.ext) !== null,
+      ),
+    [filteredFiles],
+  );
+
+  const currentMediaIndex = useMemo(() => {
+    if (!fileDetail) return -1;
+    return previewableMediaFiles.findIndex((entry) => entry.path === fileDetail.path);
+  }, [previewableMediaFiles, fileDetail]);
+
+  const handlePrevMedia = useMemo(() => {
+    if (currentMediaIndex <= 0) return undefined;
+    const prev = previewableMediaFiles[currentMediaIndex - 1];
+    return prev ? () => void openFile(prev.path) : undefined;
+  }, [currentMediaIndex, previewableMediaFiles, openFile]);
+
+  const handleNextMedia = useMemo(() => {
+    if (currentMediaIndex < 0 || currentMediaIndex >= previewableMediaFiles.length - 1) {
+      return undefined;
+    }
+    const next = previewableMediaFiles[currentMediaIndex + 1];
+    return next ? () => void openFile(next.path) : undefined;
+  }, [currentMediaIndex, previewableMediaFiles, openFile]);
+
+  const mediaPositionLabel =
+    currentMediaIndex >= 0 && previewableMediaFiles.length > 1
+      ? `${currentMediaIndex + 1} / ${previewableMediaFiles.length}`
+      : undefined;
+
+  const fileCountOnly = useMemo(
+    () => files.reduce((acc, f) => (f.type === "file" ? acc + 1 : acc), 0),
+    [files],
+  );
+  const readyRepoCount = reposStatus?.repos.filter((r) => r.ready).length ?? 0;
 
   if (!project) {
     return (
@@ -728,9 +957,6 @@ export function ProjectWorkspaceView({
       </div>
     );
   }
-
-  const fileCountOnly = files.filter((f) => f.type === "file").length;
-  const readyRepoCount = reposStatus?.repos.filter((r) => r.ready).length ?? 0;
 
   return (
     <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-[var(--surface-canvas)]">
@@ -968,70 +1194,22 @@ export function ProjectWorkspaceView({
                   </p>
                   {!fileSearch && (
                     <p className="text-[11.5px] text-[var(--text-muted)] leading-relaxed">
-                      可拖拽上传文档、CSV、JSON、SQLite 文件，或点击上方「新建文件」。
+                      可拖拽上传文档、图片/音视频/PDF、CSV、JSON、SQLite 文件，或点击上方「新建文件」。
                     </p>
                   )}
                 </div>
               ) : (
-                filteredFiles.map((entry) => {
-                  const active = selectedFilePath === entry.path;
-                  const depth = entry.path.split("/").length - 1;
-                  return (
-                    <div
-                      key={entry.path}
-                      style={{ paddingLeft: `${8 + depth * 14}px` }}
-                      className={`group flex items-center justify-between gap-1.5 pr-1.5 py-1.5 rounded-lg text-[12.5px] transition-colors ${
-                        active
-                          ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 font-medium"
-                          : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (entry.type === "file") {
-                            setMobilePane("detail");
-                            void openFile(entry.path);
-                          }
-                        }}
-                        className={`flex items-center gap-2 min-w-0 flex-1 text-left ${
-                          entry.type === "file" ? "cursor-pointer" : "cursor-default"
-                        }`}
-                      >
-                        <Icon
-                          name={fileIconName(entry)}
-                          size={14}
-                          className={
-                            entry.is_sqlite
-                              ? "text-emerald-500"
-                              : entry.type === "dir"
-                                ? "text-amber-500"
-                                : active
-                                  ? "text-indigo-500"
-                                  : "text-[var(--text-muted)]"
-                          }
-                        />
-                        <span className="truncate font-mono text-[12px]">{entry.name}</span>
-                      </button>
-                      <div className="flex items-center gap-1 shrink-0">
-                        {entry.type === "file" && (
-                          <span className="text-[10.5px] font-mono text-[var(--text-muted)] md:group-hover:hidden">
-                            {formatBytes(entry.size)}
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          title="删除"
-                          aria-label={`删除 ${entry.name}`}
-                          onClick={() => void handleDeleteFile(entry)}
-                          className="inline-flex md:hidden md:group-hover:inline-flex p-1.5 md:p-1 rounded text-[var(--text-muted)] hover:text-rose-500 hover:bg-rose-500/10 cursor-pointer"
-                        >
-                          <Icon name="trash-2" size={12} />
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })
+                filteredFiles.map((entry) => (
+                  <WorkspaceFileRow
+                    key={entry.path}
+                    entry={entry}
+                    active={selectedFilePath === entry.path}
+                    collapsed={entry.type === "dir" && collapsedDirs.has(entry.path)}
+                    onSelectFile={handleSelectFileRow}
+                    onToggleDir={toggleDirCollapsed}
+                    onDelete={handleDeleteFile}
+                  />
+                ))
               )}
             </div>
           </div>
@@ -1054,7 +1232,7 @@ export function ProjectWorkspaceView({
                 <EmptyState
                   icon="file-text"
                   title="选择左侧文件进行查看或编辑"
-                  description="支持在线编辑 Markdown / JSON / SQL / CSV / 代码文件，也支持上传 SQLite 数据库与其他二进制附件。"
+                  description="支持在线编辑 Markdown / SVG / JSON / SQL / CSV / 代码文件，支持图片、音视频、PDF 在线预览与 SQLite 数据库浏览。"
                   action={
                     <div className="flex items-center gap-2">
                       <Button
@@ -1081,7 +1259,21 @@ export function ProjectWorkspaceView({
                   }
                 />
               </div>
-            ) : (
+            ) : (() => {
+              const fileMediaKind = getWorkspaceMediaKind(fileDetail.ext);
+              const inlineUrl = buildWorkspaceFileUrl(
+                project.id,
+                fileDetail.path,
+                "inline",
+                fileDetail.updated_at,
+              );
+              const downloadUrl = buildWorkspaceFileUrl(
+                project.id,
+                fileDetail.path,
+                "download",
+              );
+              const isChatImage = isWorkspaceChatImageExt(fileDetail.ext);
+              return (
               <>
                 <div className="shrink-0 px-3 sm:px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
@@ -1107,7 +1299,7 @@ export function ProjectWorkspaceView({
                     )}
                   </div>
                   <div className="flex items-center gap-1.5">
-                    {fileDetail.ext === ".md" && (
+                    {(fileDetail.ext === ".md" || fileDetail.ext === ".svg") && (
                       <Button
                         size="xs"
                         variant={mdPreview ? "secondary" : "ghost"}
@@ -1123,19 +1315,28 @@ export function ProjectWorkspaceView({
                       icon="sparkles"
                       onClick={() =>
                         onOpenChatWithContext(
-                          {
-                            kind: "file",
-                            label: fileDetail.path,
-                            ref: fileDetail.path,
-                          },
-                          `请阅读并分析项目空间文件 files/${fileDetail.path}：`,
+                          isChatImage
+                            ? {
+                                kind: "image",
+                                label: fileDetail.name,
+                                ref: fileDetail.path,
+                                mime: getWorkspaceInlineMime(fileDetail.ext),
+                              }
+                            : {
+                                kind: "file",
+                                label: fileDetail.path,
+                                ref: fileDetail.path,
+                              },
+                          isChatImage
+                            ? `请查看并分析项目空间图片 files/${fileDetail.path}：`
+                            : `请阅读并分析项目空间文件 files/${fileDetail.path}：`,
                         )
                       }
                     >
                       在 Codex 中讨论
                     </Button>
                     <a
-                      href={`/api/projects/${encodeURIComponent(project.id)}/workspace/file?path=${encodeURIComponent(fileDetail.path)}&download=1`}
+                      href={downloadUrl}
                       className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-xs font-medium border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     >
                       <Icon name="download" size={13} />
@@ -1202,19 +1403,44 @@ export function ProjectWorkspaceView({
                     </div>
                   </div>
                 ) : !fileDetail.is_text ? (
-                  <div className="flex-1 flex items-center justify-center p-8">
-                    <EmptyState
-                      icon="file"
-                      title="二进制文件不支持文本编辑"
-                      description={`文件大小 ${formatBytes(fileDetail.size)}，更新于 ${formatRelativeTime(fileDetail.updated_at)}。你可以下载该文件或在 Codex 对话中引用其路径。`}
+                  fileMediaKind ? (
+                    <WorkspaceMediaPreview
+                      file={fileDetail}
+                      mediaKind={fileMediaKind}
+                      inlineUrl={inlineUrl}
+                      downloadUrl={downloadUrl}
+                      onPrevMedia={handlePrevMedia}
+                      onNextMedia={handleNextMedia}
+                      mediaPositionLabel={mediaPositionLabel}
                     />
-                  </div>
-                ) : mdPreview ? (
-                  <div className="flex-1 overflow-y-auto p-6">
-                    <div className="max-w-3xl mx-auto rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-6">
-                      <MarkdownContent content={fileDraft} />
+                  ) : (
+                    <div className="flex-1 flex items-center justify-center p-8">
+                      <EmptyState
+                        icon="file"
+                        title="二进制文件不支持文本编辑"
+                        description={`文件大小 ${formatBytes(fileDetail.size)}，更新于 ${formatRelativeTime(fileDetail.updated_at)}。你可以下载该文件或在 Codex 对话中引用其路径。`}
+                      />
                     </div>
-                  </div>
+                  )
+                ) : mdPreview ? (
+                  fileDetail.ext === ".svg" ? (
+                    <WorkspaceMediaPreview
+                      file={fileDetail}
+                      mediaKind="image"
+                      inlineUrl={inlineUrl}
+                      downloadUrl={downloadUrl}
+                      svgDraft={fileDirty ? fileDraft : undefined}
+                      onPrevMedia={handlePrevMedia}
+                      onNextMedia={handleNextMedia}
+                      mediaPositionLabel={mediaPositionLabel}
+                    />
+                  ) : (
+                    <div className="flex-1 overflow-y-auto p-6">
+                      <div className="max-w-3xl mx-auto rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-6">
+                        <MarkdownContent content={fileDraft} projectId={project.id} />
+                      </div>
+                    </div>
+                  )
                 ) : (
                   <div className="flex-1 flex flex-col min-h-0 p-3">
                     {fileDetail.truncated && (
@@ -1240,7 +1466,8 @@ export function ProjectWorkspaceView({
                   </div>
                 )}
               </>
-            )}
+              );
+            })()}
           </div>
         </div>
       )}

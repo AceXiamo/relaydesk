@@ -86,6 +86,7 @@ import {
   testUtilityAiConnection,
 } from "./utility-ai.ts";
 import { getProjectReposStatus, syncProjectRepos } from "./repo-workspace.ts";
+import { getWorkspaceInlineMime } from "../app/lib/workspace-media.ts";
 import {
   addWorkspaceExternalDatasource,
   browseProjectRepoFiles,
@@ -100,11 +101,11 @@ import {
   inspectWorkspaceSqliteSchema,
   listWorkspaceDatabases,
   listWorkspaceFiles,
+  openWorkspaceFileForServing,
   queryWorkspaceSqlite,
   streamBridgeWorkspaceFile,
   readProjectRepoFileContent,
   readWorkspaceFile,
-  readWorkspaceFileDownload,
   readWorkspaceDeployDoc,
   readWorkspaceHandbook,
   updateWorkspaceExternalDatasource,
@@ -1825,40 +1826,155 @@ export class ApiRouter {
       return listWorkspaceFiles(this.store.dbPath, projectInfo.id);
     }
 
-    // GET / POST / DELETE /api/projects/:id/workspace/file
+    // GET / HEAD / POST / DELETE /api/projects/:id/workspace/file
     if (subparts.length === 1 && subparts[0] === "file") {
-      if (method === "GET") {
+      if (method === "GET" || method === "HEAD") {
         const relPath = query.get("path") ?? "";
-        if (query.get("download") === "1" || query.get("inline") === "1") {
-          const { buffer, name } = readWorkspaceFileDownload(
+        const isDownload = query.get("download") === "1";
+        const isInline = query.get("inline") === "1";
+        if (isDownload || isInline) {
+          const served = openWorkspaceFileForServing(
             this.store.dbPath,
             projectInfo.id,
             relPath,
           );
-          const safeFilename = name.replace(/["\\\r\n]/g, "_");
-          const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")).toLowerCase() : "";
-          const INLINE_IMAGE_MIMES: Record<string, string> = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".webp": "image/webp",
-            ".gif": "image/gif",
-            ".avif": "image/avif",
-          };
-          const inlineMime = query.get("inline") === "1" ? INLINE_IMAGE_MIMES[ext] : undefined;
-          res.statusCode = 200;
-          res.setHeader("Content-Type", inlineMime ?? "application/octet-stream");
-          res.setHeader(
-            "Content-Disposition",
-            inlineMime
-              ? `inline; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(name)}`
-              : `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(name)}`,
-          );
-          res.setHeader("Content-Length", String(buffer.length));
-          res.setHeader("Cache-Control", inlineMime ? "private, max-age=3600" : "no-store");
-          res.setHeader("X-Content-Type-Options", "nosniff");
-          res.end(buffer);
-          return undefined;
+          try {
+            const safeFilename = served.name.replace(/["\\\r\n]/g, "_");
+            const inlineMime = isInline ? getWorkspaceInlineMime(served.ext) : undefined;
+            const cacheControl = inlineMime ? "private, max-age=3600" : "no-store";
+
+            res.setHeader("ETag", served.etag);
+            res.setHeader("Last-Modified", served.mtime.toUTCString());
+            res.setHeader("Cache-Control", cacheControl);
+            res.setHeader("Accept-Ranges", "bytes");
+            res.setHeader("X-Content-Type-Options", "nosniff");
+            res.setHeader("Referrer-Policy", "no-referrer");
+            res.setHeader("X-Frame-Options", inlineMime ? "SAMEORIGIN" : "DENY");
+            if (inlineMime === "image/svg+xml") {
+              res.setHeader(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+              );
+            }
+
+            const ifNoneMatch = req.headers["if-none-match"];
+            if (typeof ifNoneMatch === "string" && !req.headers.range) {
+              const normalizedTarget = served.etag;
+              const matches =
+                ifNoneMatch.trim() === "*" ||
+                ifNoneMatch
+                  .split(",")
+                  .some((tag) => tag.trim().replace(/^W\//i, "") === normalizedTarget);
+              if (matches) {
+                res.statusCode = 304;
+                served.close();
+                res.end();
+                return undefined;
+              }
+            }
+
+            res.setHeader("Content-Type", inlineMime ?? "application/octet-stream");
+            res.setHeader(
+              "Content-Disposition",
+              inlineMime
+                ? `inline; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(served.name)}`
+                : `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(served.name)}`,
+            );
+
+            let start = 0;
+            let end = Math.max(0, served.size - 1);
+            let isPartial = false;
+            const rawRange = req.headers.range;
+            if (typeof rawRange === "string" && rawRange.startsWith("bytes=")) {
+              const rangeSpec = rawRange.slice(6).trim();
+              if (!rangeSpec.includes(",")) {
+                const match = /^(\d*)-(\d*)$/.exec(rangeSpec);
+                if (match && (match[1] || match[2])) {
+                  if (!match[1]) {
+                    const suffix = Number(match[2]);
+                    if (!Number.isSafeInteger(suffix) || suffix <= 0 || served.size === 0) {
+                      res.statusCode = 416;
+                      res.setHeader("Content-Range", `bytes */${served.size}`);
+                      served.close();
+                      res.end();
+                      return undefined;
+                    }
+                    start = Math.max(0, served.size - suffix);
+                    end = served.size - 1;
+                    isPartial = true;
+                  } else {
+                    const parsedStart = Number(match[1]);
+                    const parsedEnd = match[2]
+                      ? Math.min(served.size - 1, Number(match[2]))
+                      : served.size - 1;
+                    if (
+                      !Number.isSafeInteger(parsedStart) ||
+                      !Number.isSafeInteger(parsedEnd) ||
+                      parsedStart < 0 ||
+                      parsedStart >= served.size ||
+                      parsedStart > parsedEnd
+                    ) {
+                      res.statusCode = 416;
+                      res.setHeader("Content-Range", `bytes */${served.size}`);
+                      served.close();
+                      res.end();
+                      return undefined;
+                    }
+                    start = parsedStart;
+                    end = parsedEnd;
+                    isPartial = true;
+                  }
+                }
+              }
+            }
+
+            const chunkLength = served.size === 0 ? 0 : end - start + 1;
+            if (isPartial) {
+              res.statusCode = 206;
+              res.setHeader("Content-Range", `bytes ${start}-${end}/${served.size}`);
+            } else {
+              res.statusCode = 200;
+            }
+            res.setHeader("Content-Length", String(chunkLength));
+
+            if (method === "HEAD" || chunkLength === 0) {
+              served.close();
+              res.end();
+              return undefined;
+            }
+
+            const stream = served.createStream(start, end);
+            await new Promise<void>((resolveStream) => {
+              const cleanup = () => {
+                res.off("close", onClose);
+                stream.destroy();
+                resolveStream();
+              };
+              const onClose = () => {
+                cleanup();
+              };
+              res.once("close", onClose);
+              stream.on("error", () => {
+                if (!res.headersSent) {
+                  res.statusCode = 500;
+                }
+                if (!res.writableEnded) res.end();
+                cleanup();
+              });
+              stream.on("end", () => {
+                res.off("close", onClose);
+                resolveStream();
+              });
+              stream.pipe(res);
+            });
+            return undefined;
+          } catch (err) {
+            served.close();
+            throw err;
+          }
+        }
+        if (method === "HEAD") {
+          throw new ApiError(405, "Method not allowed");
         }
         return { file: readWorkspaceFile(this.store.dbPath, projectInfo.id, relPath) };
       }

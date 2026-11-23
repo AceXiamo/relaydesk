@@ -73,11 +73,13 @@ async function request<T>(
   path: string,
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" = "GET",
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const response = await fetch(path, {
     method,
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   });
 
   if (
@@ -381,9 +383,12 @@ export const api = {
     request<{ files: WorkspaceFileEntry[]; total_bytes: number; file_count: number }>(
       `/api/projects/${encodeURIComponent(projectId)}/workspace/files`,
     ),
-  getWorkspaceFile: (projectId: string, path: string) =>
+  getWorkspaceFile: (projectId: string, path: string, signal?: AbortSignal) =>
     request<{ file: WorkspaceFileDetail }>(
       `/api/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(path)}`,
+      "GET",
+      undefined,
+      signal,
     ),
   saveWorkspaceFile: (projectId: string, path: string, content: string) =>
     request<{ file: WorkspaceFileDetail }>(

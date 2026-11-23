@@ -62,8 +62,11 @@ const BINARY_EXTENSIONS = new Set([
   ".jpeg",
   ".gif",
   ".webp",
+  ".avif",
   ".ico",
   ".bmp",
+  ".heic",
+  ".heif",
   ".pdf",
   ".zip",
   ".tar",
@@ -75,10 +78,20 @@ const BINARY_EXTENSIONS = new Set([
   ".ttf",
   ".otf",
   ".mp3",
+  ".wav",
+  ".ogg",
+  ".m4a",
+  ".aac",
+  ".flac",
+  ".weba",
+  ".opus",
   ".mp4",
+  ".m4v",
   ".mov",
   ".avi",
   ".webm",
+  ".ogv",
+  ".mkv",
   ".wasm",
   ".exe",
   ".dll",
@@ -390,51 +403,163 @@ export function listWorkspaceFiles(
   return { files: entries, total_bytes: totalBytes, file_count: fileCount };
 }
 
+function openWorkspaceRegularFile(
+  dbPath: string,
+  projectId: string,
+  relPath: string,
+): { absPath: string; relPath: string; fd: number; size: number; mtime: Date } {
+  const filesDir = getProjectFilesDir(dbPath, projectId, false);
+  const { absPath, relPath: cleanRel } = resolveInsideFilesDir(filesDir, relPath);
+  let fd: number;
+  try {
+    fd = openSync(absPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if (isMissing(error)) {
+      throw new ApiError(404, "文件不存在");
+    }
+    throw error;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      throw new ApiError(400, "目标不是文件");
+    }
+    return { absPath, relPath: cleanRel, fd, size: st.size, mtime: st.mtime };
+  } catch (err) {
+    closeSync(fd);
+    throw err;
+  }
+}
+
+function readFdSlice(fd: number, offset: number, maxBytes: number): Buffer {
+  if (maxBytes <= 0) return Buffer.alloc(0);
+  const buf = Buffer.allocUnsafe(maxBytes);
+  let filled = 0;
+  while (filled < maxBytes) {
+    const n = readSync(fd, buf, filled, maxBytes - filled, offset + filled);
+    if (n === 0) break;
+    filled += n;
+  }
+  return filled === maxBytes ? buf : buf.subarray(0, filled);
+}
+
 export function readWorkspaceFile(
   dbPath: string,
   projectId: string,
   relPath: string,
 ): WorkspaceFileDetail {
-  const filesDir = getProjectFilesDir(dbPath, projectId, false);
-  const { absPath, relPath: cleanRel } = resolveInsideFilesDir(filesDir, relPath);
-  if (!existsSync(absPath)) {
-    throw new ApiError(404, "文件不存在");
-  }
-  const st = lstatSync(absPath);
-  if (!st.isFile()) {
-    throw new ApiError(400, "目标不是文件");
-  }
-  const name = basename(cleanRel);
-  const ext = extname(name).toLowerCase();
-  const isSqlite = isSqliteFileName(name);
-  const raw = readFileSync(absPath);
-  const sample = raw.subarray(0, Math.min(raw.length, 4096));
-  const isText = isProbablyTextFile(name, sample);
-  if (!isText) {
+  const { relPath: cleanRel, fd, size, mtime } = openWorkspaceRegularFile(dbPath, projectId, relPath);
+  try {
+    const name = basename(cleanRel);
+    const ext = extname(name).toLowerCase();
+    const isSqlite = isSqliteFileName(name);
+    const updatedAt = mtime.toISOString();
+
+    // Skip reading disk bytes altogether for known binary extensions.
+    if (!isProbablyTextFile(name)) {
+      return {
+        path: cleanRel,
+        name,
+        type: "file",
+        size,
+        updated_at: updatedAt,
+        ext,
+        is_text: false,
+        is_sqlite: isSqlite,
+      };
+    }
+
+    // Read only a 4 KiB probe first so unknown binary files don't pull 512 KiB.
+    const probeLen = Math.min(size, 4096);
+    const probe = readFdSlice(fd, 0, probeLen);
+    if (!isProbablyTextFile(name, probe)) {
+      return {
+        path: cleanRel,
+        name,
+        type: "file",
+        size,
+        updated_at: updatedAt,
+        ext,
+        is_text: false,
+        is_sqlite: isSqlite,
+      };
+    }
+
+    const previewCap = Math.min(size, MAX_TEXT_PREVIEW_BYTES);
+    const contentBuf =
+      previewCap <= probe.length
+        ? probe
+        : Buffer.concat([probe, readFdSlice(fd, probe.length, previewCap - probe.length)]);
+    const truncated = size > MAX_TEXT_PREVIEW_BYTES;
     return {
       path: cleanRel,
       name,
       type: "file",
-      size: st.size,
-      updated_at: st.mtime.toISOString(),
+      size,
+      updated_at: updatedAt,
       ext,
-      is_text: false,
-      is_sqlite: isSqlite,
+      is_text: true,
+      is_sqlite: false,
+      content: contentBuf.toString("utf8"),
+      truncated,
     };
+  } finally {
+    closeSync(fd);
   }
-  const truncated = raw.length > MAX_TEXT_PREVIEW_BYTES;
-  const slice = truncated ? raw.subarray(0, MAX_TEXT_PREVIEW_BYTES) : raw;
+}
+
+export interface WorkspaceServedFile {
+  absPath: string;
+  size: number;
+  mtime: Date;
+  etag: string;
+  name: string;
+  ext: string;
+  createStream: (start?: number, end?: number) => ReturnType<typeof createReadStream>;
+  close: () => void;
+}
+
+export function openWorkspaceFileForServing(
+  dbPath: string,
+  projectId: string,
+  relPath: string,
+): WorkspaceServedFile {
+  const { absPath, relPath: cleanRel, fd, size, mtime } = openWorkspaceRegularFile(
+    dbPath,
+    projectId,
+    relPath,
+  );
+  let consumed = false;
+  const close = () => {
+    if (consumed) return;
+    consumed = true;
+    try {
+      closeSync(fd);
+    } catch {
+      // ignore
+    }
+  };
+  const etag = `"${size.toString(16)}-${Math.trunc(mtime.getTime()).toString(16)}"`;
   return {
-    path: cleanRel,
-    name,
-    type: "file",
-    size: st.size,
-    updated_at: st.mtime.toISOString(),
-    ext,
-    is_text: true,
-    is_sqlite: false,
-    content: slice.toString("utf8"),
-    truncated,
+    absPath,
+    size,
+    mtime,
+    etag,
+    name: basename(cleanRel),
+    ext: extname(cleanRel).toLowerCase(),
+    createStream: (start = 0, end = Math.max(0, size - 1)) => {
+      if (consumed) {
+        throw new Error("Workspace file descriptor already consumed");
+      }
+      consumed = true;
+      return createReadStream(absPath, {
+        fd,
+        autoClose: true,
+        start,
+        ...(size > 0 ? { end } : {}),
+      });
+    },
+    close,
   };
 }
 
@@ -443,20 +568,16 @@ export function readWorkspaceFileDownload(
   projectId: string,
   relPath: string,
 ): { buffer: Buffer; name: string; ext: string } {
-  const filesDir = getProjectFilesDir(dbPath, projectId, false);
-  const { absPath, relPath: cleanRel } = resolveInsideFilesDir(filesDir, relPath);
-  if (!existsSync(absPath)) {
-    throw new ApiError(404, "文件不存在");
+  const { relPath: cleanRel, fd, size } = openWorkspaceRegularFile(dbPath, projectId, relPath);
+  try {
+    return {
+      buffer: readFdSlice(fd, 0, size),
+      name: basename(cleanRel),
+      ext: extname(cleanRel).toLowerCase(),
+    };
+  } finally {
+    closeSync(fd);
   }
-  const st = lstatSync(absPath);
-  if (!st.isFile()) {
-    throw new ApiError(400, "目标不是文件");
-  }
-  return {
-    buffer: readFileSync(absPath),
-    name: basename(cleanRel),
-    ext: extname(cleanRel).toLowerCase(),
-  };
 }
 
 function assertWorkspaceQuota(filesDir: string, incomingBytes: number, existingPath?: string, requireCompleteScan = false) {

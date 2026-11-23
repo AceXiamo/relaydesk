@@ -2,6 +2,12 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  buildWorkspaceFileUrl,
+  formatMediaDuration,
+  getWorkspaceInlineMime,
+  getWorkspaceMediaKind,
+} from "../app/lib/workspace-media.ts";
 import { startRelaydeskServer, type RunningRelaydeskServer } from "../server.ts";
 
 describe("Project Space & Web Codex Chat API", () => {
@@ -491,5 +497,130 @@ emit({
     };
     expect(restrictedSession.sandbox_mode).toBe("read-only");
     expect(restrictedSession.network_access).toBe(false);
+  });
+
+  it("streams inline media with MIME/CSP headers, Range 206/416, ETag 304, HEAD, and caps large text reads", async () => {
+    expect(getWorkspaceMediaKind(".png")).toBe("image");
+    expect(getWorkspaceMediaKind("MP4")).toBe("video");
+    expect(getWorkspaceMediaKind(".m4a")).toBe("audio");
+    expect(getWorkspaceMediaKind(".pdf")).toBe("pdf");
+    expect(getWorkspaceMediaKind(".txt")).toBeNull();
+    expect(getWorkspaceInlineMime(".html")).toBeUndefined();
+    expect(formatMediaDuration(3665)).toBe("1:01:05");
+    expect(buildWorkspaceFileUrl("proj_1", "a/b.png", "inline", "v1")).toContain("&inline=1&v=v1");
+
+    // Upload a 16-byte video stub
+    const videoBytes = Buffer.from("0123456789abcdef", "utf8");
+    const upVid = await fetch(
+      `${srv.url}/api/projects/${projectId}/workspace/upload?path=${encodeURIComponent("media/demo.mp4")}`,
+      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: videoBytes },
+    );
+    expect(upVid.status).toBe(200);
+    const upVidJson = (await upVid.json()) as { file: { is_text: boolean; size: number } };
+    expect(upVidJson.file.is_text).toBe(false);
+    expect(upVidJson.file.size).toBe(16);
+
+    // Inline full fetch with ETag & Range capability headers
+    const inlineUrl = `${srv.url}/api/projects/${projectId}/workspace/file?path=${encodeURIComponent("media/demo.mp4")}&inline=1`;
+    const fullRes = await fetch(inlineUrl);
+    expect(fullRes.status).toBe(200);
+    expect(fullRes.headers.get("content-type")).toBe("video/mp4");
+    expect(fullRes.headers.get("accept-ranges")).toBe("bytes");
+    expect(fullRes.headers.get("content-disposition")).toContain("inline;");
+    const etag = fullRes.headers.get("etag");
+    expect(etag).toBeTruthy();
+    expect(await fullRes.text()).toBe("0123456789abcdef");
+
+    // Conditional ETag -> 304 Not Modified
+    const cachedRes = await fetch(inlineUrl, { headers: { "If-None-Match": etag! } });
+    expect(cachedRes.status).toBe(304);
+    expect(await cachedRes.text()).toBe("");
+
+    // HEAD request
+    const headRes = await fetch(inlineUrl, { method: "HEAD" });
+    expect(headRes.status).toBe(200);
+    expect(headRes.headers.get("content-length")).toBe("16");
+    expect(await headRes.text()).toBe("");
+
+    // Range requests: explicit, open-ended, suffix, and out-of-range
+    const r1 = await fetch(inlineUrl, { headers: { Range: "bytes=2-5" } });
+    expect(r1.status).toBe(206);
+    expect(r1.headers.get("content-range")).toBe("bytes 2-5/16");
+    expect(r1.headers.get("content-length")).toBe("4");
+    expect(await r1.text()).toBe("2345");
+
+    const r2 = await fetch(inlineUrl, { headers: { Range: "bytes=12-" } });
+    expect(r2.status).toBe(206);
+    expect(r2.headers.get("content-range")).toBe("bytes 12-15/16");
+    expect(await r2.text()).toBe("cdef");
+
+    const r3 = await fetch(inlineUrl, { headers: { Range: "bytes=-3" } });
+    expect(r3.status).toBe(206);
+    expect(r3.headers.get("content-range")).toBe("bytes 13-15/16");
+    expect(await r3.text()).toBe("def");
+
+    const rBad = await fetch(inlineUrl, { headers: { Range: "bytes=99-120" } });
+    expect(rBad.status).toBe(416);
+    expect(rBad.headers.get("content-range")).toBe("bytes */16");
+
+    // Audio, PDF, and SVG security headers; HTML must never be served inline
+    await fetch(
+      `${srv.url}/api/projects/${projectId}/workspace/upload?path=${encodeURIComponent("media/clip.mp3")}`,
+      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: Buffer.from("ID3test") },
+    );
+    const audioRes = await fetch(
+      `${srv.url}/api/projects/${projectId}/workspace/file?path=${encodeURIComponent("media/clip.mp3")}&inline=1`,
+    );
+    expect(audioRes.headers.get("content-type")).toBe("audio/mpeg");
+
+    await fetch(
+      `${srv.url}/api/projects/${projectId}/workspace/upload?path=${encodeURIComponent("media/doc.pdf")}`,
+      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: Buffer.from("%PDF-1.4") },
+    );
+    const pdfRes = await fetch(
+      `${srv.url}/api/projects/${projectId}/workspace/file?path=${encodeURIComponent("media/doc.pdf")}&inline=1`,
+    );
+    expect(pdfRes.headers.get("content-type")).toBe("application/pdf");
+    expect(pdfRes.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+
+    const svgSave = await fetch(`${srv.url}/api/projects/${projectId}/workspace/file`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "media/icon.svg", content: "<svg xmlns='http://www.w3.org/2000/svg'/>" }),
+    });
+    expect(svgSave.status).toBe(200);
+    expect(((await svgSave.json()) as { file: { is_text: boolean } }).file.is_text).toBe(true);
+    const svgRes = await fetch(
+      `${srv.url}/api/projects/${projectId}/workspace/file?path=${encodeURIComponent("media/icon.svg")}&inline=1`,
+    );
+    expect(svgRes.headers.get("content-type")).toBe("image/svg+xml");
+    expect(svgRes.headers.get("content-security-policy")).toContain("sandbox");
+
+    await fetch(`${srv.url}/api/projects/${projectId}/workspace/file`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "notes/page.html", content: "<script>alert(1)</script>" }),
+    });
+    const htmlRes = await fetch(
+      `${srv.url}/api/projects/${projectId}/workspace/file?path=${encodeURIComponent("notes/page.html")}&inline=1`,
+    );
+    expect(htmlRes.headers.get("content-type")).toBe("application/octet-stream");
+    expect(htmlRes.headers.get("content-disposition")).toContain("attachment;");
+
+    // Large text file is truncated to 512 KiB
+    const bigText = "A".repeat(600 * 1024);
+    const bigRes = await fetch(`${srv.url}/api/projects/${projectId}/workspace/file`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "notes/large.txt", content: bigText }),
+    });
+    expect(bigRes.status).toBe(200);
+    const bigJson = (await bigRes.json()) as {
+      file: { is_text: boolean; truncated: boolean; size: number; content: string };
+    };
+    expect(bigJson.file.is_text).toBe(true);
+    expect(bigJson.file.truncated).toBe(true);
+    expect(bigJson.file.size).toBe(600 * 1024);
+    expect(bigJson.file.content.length).toBe(512 * 1024);
   });
 });

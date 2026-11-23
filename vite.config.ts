@@ -54,6 +54,7 @@ const LUCIDE_ICONS = [
   "file-plus-2",
   "file-spreadsheet",
   "file-text",
+  "film",
   "filter",
   "folder",
   "folder-git-2",
@@ -76,12 +77,15 @@ const LUCIDE_ICONS = [
   "loader-2",
   "lock",
   "log-out",
+  "maximize-2",
   "menu",
   "message-square",
   "message-square-plus",
+  "minus",
   "monitor",
   "moon",
   "more-horizontal",
+  "music",
   "panel-left-close",
   "panel-left-open",
   "panel-right-close",
@@ -124,6 +128,8 @@ const LUCIDE_ICONS = [
   "x",
   "x-circle",
   "zap",
+  "zoom-in",
+  "zoom-out",
 ];
 
 function lucideSubsetPlugin(): Plugin {
