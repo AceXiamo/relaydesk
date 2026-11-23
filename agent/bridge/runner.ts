@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, isAbsolute, join, resolve, sep } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { chatImageAttachments } from "../../server/chat-image-attachments.ts";
 import { buildCliInvocation, createCliStreamParser, redactSecrets } from "../../server/cli-stream-parser.ts";
 import type { RunChatTurnResult } from "../../server/codex-chat.ts";
 import {
@@ -192,13 +193,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   }
   try {
   const spaceFilesRoot = resolve(join(o.spaceDir, "files"));
-  const resolvedImagePaths: string[] = [];
-  for (const rel of p.image_paths ?? []) {
-    const abs = resolve(spaceFilesRoot, rel);
-    if ((abs === spaceFilesRoot || abs.startsWith(spaceFilesRoot + sep)) && existsSync(abs)) {
-      resolvedImagePaths.push(abs);
-    }
-  }
+  const attachedImages = chatImageAttachments(p.project_id, o.spaceDir, o.cwd, p.image_paths ?? []);
   const { args, env } = buildCliInvocation({
     dbPath: ":memory:",
     runtime,
@@ -211,7 +206,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     // Fresh turns mount the shadow dir; Claude also accepts --add-dir on resume.
     reposDir: runtime === "claude" && p.resume_session_id ? o.spaceDir : null,
     extraAddDirs: [o.spaceDir],
-    imagePaths: resolvedImagePaths,
+    imagePaths: attachedImages.paths,
     resumeSessionId: p.resume_session_id || "",
     projectSettings: null,
     ...(mcpHandle
@@ -328,6 +323,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
       else o.onEvent(redactObject(ev));
     },
     saveToolImage,
+    attachedImages.lookup,
   );
   if (o.signal.aborted) return { status: "aborted", content: "", events: [], externalSessionId: p.resume_session_id || "" };
   const child = spawn(bin, args, { cwd: o.cwd, env, detached: true, stdio: "pipe" });

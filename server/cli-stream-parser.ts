@@ -299,6 +299,7 @@ export interface StreamParseState {
   text: string;
   hadIncrementalDelta: boolean;
   toolEvents: Map<string, ChatToolEvent>;
+  readAttachments: Map<string, ChatToolImage>;
   errorMessage: string;
 }
 
@@ -603,6 +604,7 @@ export function handleClaudeJsonLine(
   secrets: string[],
   emit: (ev: ChatStreamEvent) => void,
   onImage?: CliStreamImageHandler,
+  lookupAttachment?: (path: string) => ChatToolImage | undefined,
 ) {
   const type = String(obj.type ?? "");
   if (typeof obj.session_id === "string" && obj.session_id && !state.externalSessionId) {
@@ -648,6 +650,10 @@ export function handleClaudeJsonLine(
           const id = String(b.id ?? `tool-${state.toolEvents.size + 1}`);
           const name = String(b.name ?? "tool");
           const input = b.input && typeof b.input === "object" ? (b.input as Record<string, unknown>) : {};
+          if (name === "Read" && typeof input.file_path === "string") {
+            const image = lookupAttachment?.(input.file_path);
+            if (image) state.readAttachments.set(id, image);
+          }
           const agentLabel =
             name === "Agent" && typeof input.subagent_type === "string" && input.subagent_type.trim()
               ? `[${input.subagent_type.trim()}]${typeof input.description === "string" && input.description.trim() ? ` ${input.description.trim()}` : ""}`
@@ -700,10 +706,11 @@ export function handleClaudeJsonLine(
           const existing = state.toolEvents.get(b.tool_use_id);
           if (existing) {
             const rawOut = extractTextFromContentArray(b.content);
-            const toolImages = collectToolImages(b.content, onImage, {
-              toolUseId: b.tool_use_id,
-              toolName: existing.tool,
-            });
+            const attachment = state.readAttachments.get(b.tool_use_id);
+            state.readAttachments.delete(b.tool_use_id);
+            const toolImages = attachment && !b.is_error && extractImagesFromContentArray(b.content).length === 1
+              ? [attachment]
+              : collectToolImages(b.content, onImage, { toolUseId: b.tool_use_id, toolName: existing.tool });
             upsertToolEvent(
               state,
               {
@@ -743,12 +750,14 @@ export function createCliStreamParser(
   secrets: string[],
   onEvent: (event: ChatStreamEvent) => void,
   onImage?: CliStreamImageHandler,
+  lookupAttachment?: (path: string) => ChatToolImage | undefined,
 ) {
   const state: StreamParseState = {
     externalSessionId: "",
     text: "",
     hadIncrementalDelta: false,
     toolEvents: new Map(),
+    readAttachments: new Map(),
     errorMessage: "",
   };
   let remainder = "";
@@ -761,7 +770,7 @@ export function createCliStreamParser(
         if (runtime === "codex") {
           handleCodexJsonLine(parsed as Record<string, unknown>, state, secrets, onEvent, onImage);
         } else {
-          handleClaudeJsonLine(parsed as Record<string, unknown>, state, secrets, onEvent, onImage);
+          handleClaudeJsonLine(parsed as Record<string, unknown>, state, secrets, onEvent, onImage, lookupAttachment);
         }
         return;
       }

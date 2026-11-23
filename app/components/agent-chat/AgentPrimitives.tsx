@@ -301,6 +301,18 @@ function renderOutputLines(output: string) {
   );
 }
 
+function ToolImagePreview({ url, alt }: { url: string; alt: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <span className="text-[12px] text-[var(--text-muted)]">图片预览不可用</span>;
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" className="block group">
+      <img src={url} alt={alt} loading="lazy" onError={() => setFailed(true)}
+        className="max-h-64 w-auto max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] object-contain shadow-2xs group-hover:border-indigo-500/50 transition-colors"
+      />
+    </a>
+  );
+}
+
 export function ToolChipsGroup({
   events,
   isStreaming = false,
@@ -470,20 +482,7 @@ export function ToolChipsGroup({
                 {ev.images && ev.images.length > 0 && (
                   <div className="px-3 pb-2.5 pt-1 flex flex-wrap gap-2">
                     {ev.images.map((img, idx) => (
-                      <a
-                        key={`${ev.id}-img-${idx}`}
-                        href={img.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block group"
-                      >
-                        <img
-                          src={img.url}
-                          alt={img.alt || `${ev.tool} 图片`}
-                          loading="lazy"
-                          className="max-h-64 w-auto max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] object-contain shadow-2xs group-hover:border-indigo-500/50 transition-colors"
-                        />
-                      </a>
+                      <ToolImagePreview key={`${idx}:${img.url}`} url={img.url} alt={img.alt || `${ev.tool} 图片`} />
                     ))}
                   </div>
                 )}

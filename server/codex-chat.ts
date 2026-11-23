@@ -2,7 +2,8 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve as resolvePath, sep } from "node:path";
+import { join } from "node:path";
+import { chatImageAttachments } from "./chat-image-attachments.ts";
 import {
   buildCliInvocation,
   createCliStreamParser,
@@ -431,6 +432,7 @@ function runSingleCliAttempt(params: {
   signal: AbortSignal;
   onEvent: (event: ChatStreamEvent) => void;
   onImage?: CliStreamImageHandler;
+  lookupAttachment?: ReturnType<typeof chatImageAttachments>["lookup"];
 }): Promise<{
   exitCode: number | null;
   aborted: boolean;
@@ -439,7 +441,7 @@ function runSingleCliAttempt(params: {
 }> {
   const { sessionId, runtime, bin, args, cwd, env, stdinPrompt, secrets, signal, onEvent, onImage } = params;
   return new Promise((resolve) => {
-    const parser = createCliStreamParser(runtime, secrets, onEvent, onImage);
+    const parser = createCliStreamParser(runtime, secrets, onEvent, onImage, params.lookupAttachment);
     const { state } = parser;
     if (signal.aborted) {
       resolve({ exitCode: null, aborted: true, stderr: "", state });
@@ -622,15 +624,9 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
     mcpHandle = null;
   }
 
-  const spaceFilesRoot = resolvePath(join(workspace.workspaceDir, "files"));
-  const resolvedImagePaths: string[] = [];
-  for (const att of attachments) {
-    if (att.kind !== "image") continue;
-    const abs = resolvePath(spaceFilesRoot, att.ref);
-    if ((abs === spaceFilesRoot || abs.startsWith(spaceFilesRoot + sep)) && existsSync(abs)) {
-      resolvedImagePaths.push(abs);
-    }
-  }
+  const spaceFilesRoot = join(workspace.workspaceDir, "files");
+  const attachedImages = chatImageAttachments(project.id, workspace.workspaceDir, workspace.workspaceDir,
+    attachments.filter(att => att.kind === "image").map(att => att.ref));
   const CLOUD_IMAGE_MIME_EXT: Record<string, string> = {
     "image/png": "png",
     "image/jpeg": "jpg",
@@ -688,7 +684,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       networkAccess: session.network_access,
       workspaceDir: workspace.workspaceDir,
       reposDir: workspace.reposDir,
-      imagePaths: resolvedImagePaths,
+      imagePaths: attachedImages.paths,
       resumeSessionId: resumeId,
       projectSettings,
       datasourceEnv: datasourceRuntime.env,
@@ -719,6 +715,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       signal,
       onEvent: event => { clock.progress(); onEvent(event); },
       onImage: saveToolImage,
+      lookupAttachment: attachedImages.lookup,
     });
   };
 

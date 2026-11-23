@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatReasoningEffort, ChatRuntime, ChatStreamEvent } from "../app/lib/types.ts";
+import { chatImageAttachments } from "../server/chat-image-attachments.ts";
 import { buildCliInvocation, createCliStreamParser, detectClaudeSupportsEffort, redactSecrets } from "../server/cli-stream-parser.ts";
 import { getChatRuntimeInfo, runWebCliChatTurn } from "../server/codex-chat.ts";
 import { projectCliConfiguration } from "../server/project-cli-config.ts";
@@ -148,6 +149,32 @@ function stream(runtime: ChatRuntime) {
 }
 
 describe("shared CLI stream parser", () => {
+  it("reuses only the matching Read attachment in live and terminal events, even without a writable mirror", () => {
+    const space = mkdtempSync(join(tmpdir(), "relaydesk-read-"));
+    try {
+      mkdirSync(join(space, "files"));
+      const ref = "a #1.png";
+      const path = join(space, "files", ref);
+      writeFileSync(path, "fixture");
+      const attachments = chatImageAttachments("p1", space, space, [ref]);
+      const received: ChatStreamEvent[] = [];
+      const parser = createCliStreamParser("claude", [], ev => received.push(ev), undefined, attachments.lookup);
+      const emit = (type: string, content: unknown[]) => parser.write(JSON.stringify({ type, message: { content } }) + "\n");
+      const use = (id: string, file_path: string) => ({ type: "tool_use", id, name: "Read", input: { file_path } });
+      emit("assistant", [use("a", `./files/${ref}`), use("b", join(space, ref)), use("c", path)]);
+      const result = (id: string, is_error = false) => ({ type: "tool_result", tool_use_id: id, is_error,
+        content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } }] });
+      emit("user", [result("b"), result("c", true), result("a")]);
+      const expected = { id: "a", status: "done", images: [{ url: "/api/projects/p1/workspace/file?path=a%20%231.png&inline=1", alt: ref }] };
+      expect(received.at(-1)).toMatchObject({ type: "tool", event: expected });
+      parser.finish(true);
+      expect(parser.state.toolEvents.get("a")).toMatchObject(expected);
+      expect(parser.state.toolEvents.get("b")?.images).toBeUndefined();
+      expect(parser.state.toolEvents.get("c")?.images).toBeUndefined();
+    } finally {
+      rmSync(space, { recursive: true, force: true });
+    }
+  });
   it("parses fragmented Codex JSONL, preserves the final line, and redacts tool output and errors", () => {
     const { parser, events, line } = stream("codex");
     parser.write('{"type":"thread.st');
