@@ -1474,12 +1474,8 @@ export function CodexChatView({
 
                       {/* Thinking / Live Loading Trace */}
                       <ThinkingTrace
-                        active={
-                          isStreamingMsg &&
-                          (hasOpenThink ||
-                            !visibleContent ||
-                            msg.events.some((e) => e.status === "running"))
-                        }
+                        active={isStreamingMsg}
+                        autoExpand={hasOpenThink || !visibleContent || msg.events.some((e) => e.status === "running")}
                         statusLabel={hasOpenThink ? "正在深度推理" : statusLine || "正在思考"}
                         entries={mergedTraceEntries}
                         startedAt={trace?.startedAt}

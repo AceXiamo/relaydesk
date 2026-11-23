@@ -137,12 +137,14 @@ export interface TraceEntry {
 
 export function ThinkingTrace({
   active,
+  autoExpand = true,
   statusLabel,
   entries,
   startedAt,
   durationMs,
 }: {
   active: boolean;
+  autoExpand?: boolean;
   statusLabel: string;
   entries: TraceEntry[];
   startedAt?: number;
@@ -156,7 +158,7 @@ export function ThinkingTrace({
   const hasReasoning = entries.some((e) => e.kind === "reasoning");
   if (!active && !hasEntries) return null;
 
-  const isOpen = hasEntries && (userPref !== null ? userPref === "expanded" : active && hasReasoning);
+  const isOpen = hasEntries && (userPref !== null ? userPref === "expanded" : active && autoExpand && hasReasoning);
 
   const settledSummary = durationMs
     ? `已思考 ${formatElapsed(durationMs)}`
