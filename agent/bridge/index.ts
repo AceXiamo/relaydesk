@@ -527,12 +527,12 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
             const modeNote =
               p.sandbox_mode === "read-only"
                 ? "Read-only turn for local code and workspace files; do not modify either workspace."
-                : "Only changes under $RELAYDESK_SPACE_DIR/files/ sync back to the cloud; treat HANDBOOK.md as read-only. Embed generated images in Markdown as ![description](files/...).";
+                : "Changes under $RELAYDESK_SPACE_DIR/files/, $RELAYDESK_SPACE_DIR/HANDBOOK.md, and $RELAYDESK_SPACE_DIR/DEPLOY.md sync back to the cloud (HANDBOOK.md and DEPLOY.md are writable up to 64 KiB each). Embed generated images in Markdown as ![description](files/...).";
             const mcpFallbackNote = hasMcpContext
               ? ""
               : "You have access to the `relaydesk` MCP server for project tasks and read-only database inspection/queries.";
             return [
-              "./ is the bound local project workdir. $RELAYDESK_SPACE_DIR/HANDBOOK.md is the project handbook; $RELAYDESK_SPACE_DIR/files/ contains cloud workspace files and SQLite databases. Never disclose credentials or database connection strings.",
+              "./ is the bound local project workdir. $RELAYDESK_SPACE_DIR/HANDBOOK.md is the project handbook; $RELAYDESK_SPACE_DIR/DEPLOY.md is the project deployment runbook; $RELAYDESK_SPACE_DIR/files/ contains cloud workspace files and SQLite databases. Never disclose credentials or database connection strings.",
               [modeNote, mcpFallbackNote].filter(Boolean).join(" "),
               mirror.handbook,
               hasDbContext ? "" : databaseContext(p.workspace_manifest.databases),

@@ -174,8 +174,8 @@ export function CodexChatView({
   const [draftEffort, setDraftEffort] = useState<ChatReasoningEffort>("default");
   const [draftTarget, setDraftTarget] = useState<ChatSessionRecord["execution_target"]>("auto");
   const [savingSettings, setSavingSettings] = useState(false);
-  const [draftSandboxMode, setDraftSandboxMode] = useState<ChatSandboxMode>("read-only");
-  const [draftNetworkAccess, setDraftNetworkAccess] = useState(false);
+  const [draftSandboxMode, setDraftSandboxMode] = useState<ChatSandboxMode>("workspace-write");
+  const [draftNetworkAccess, setDraftNetworkAccess] = useState(true);
 
   // Streaming & trace state
   const streaming = turn ? turn.running : activeSession?.status === "running";
@@ -476,8 +476,8 @@ export function CodexChatView({
     setDraftModel(currentModel);
     setDraftEffort(currentEffort);
     setDraftTarget(activeSession?.execution_target ?? draftTarget);
-    setDraftSandboxMode(currentSandboxMode);
-    setDraftNetworkAccess(currentNetworkAccess);
+    setDraftSandboxMode("workspace-write");
+    setDraftNetworkAccess(true);
     setActiveSessionId(null);
     setActiveSession(null);
     setMessages([]);

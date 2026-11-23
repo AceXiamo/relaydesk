@@ -1570,10 +1570,18 @@ export function streamBridgeWorkspaceFile(dbPath: string, projectId: string, pat
 
 export function writeBridgeWorkspaceFile(dbPath: string, projectId: string, path: string, bytes: Buffer) {
   if (!Buffer.isBuffer(bytes)) throw new ApiError(400, "文件内容无效");
-  if (!path.startsWith("files/")) throw new ApiError(403, "本机节点只能写入 files/ 下的文件");
-  if (bytes.length > MAX_UPLOAD_BYTES) throw new ApiError(413, "文件超出传输大小限制");
+  const isDoc = isRootSpaceDoc(path);
+  if (!isDoc && !path.startsWith("files/")) {
+    throw new ApiError(403, "本机节点只能写入 HANDBOOK.md、DEPLOY.md 或 files/ 下的文件");
+  }
+  const limit = isDoc ? MAX_HANDBOOK_BYTES : MAX_UPLOAD_BYTES;
+  if (bytes.length > limit) {
+    throw new ApiError(413, isDoc ? "项目文档超出 64 KiB 限制" : "文件超出传输大小限制");
+  }
   const file = bridgeFilePath(dbPath, projectId, path);
-  assertWorkspaceQuota(getProjectFilesDir(dbPath, projectId), bytes.length, file, true);
+  if (!isDoc) {
+    assertWorkspaceQuota(getProjectFilesDir(dbPath, projectId), bytes.length, file, true);
+  }
   const root = getProjectWorkspaceRoot(dbPath, projectId);
   checkBridgeDirs(dirname(root), dirname(file), true);
   const tmp = join(dirname(file), `.relaydesk-${randomUUID()}.tmp`);
@@ -1714,6 +1722,7 @@ export function prepareProjectChatWorkspace(
   reposDir: string | null;
   readyRepos: Array<{ repo: string; dirName: string; commit: string }>;
   handbook: WorkspaceHandbook;
+  deployDoc: WorkspaceHandbook;
   databases: WorkspaceDatabaseEntry[];
   dbClients: WorkspaceDbClientInfo[];
   files: WorkspaceFileEntry[];
@@ -1740,6 +1749,7 @@ export function prepareProjectChatWorkspace(
   }
 
   const handbook = readWorkspaceHandbook(dbPath, project.id);
+  const deployDoc = readWorkspaceDeployDoc(dbPath, project.id);
   const databases = listWorkspaceDatabases(dbPath, project.id);
   const dbClients = detectLocalDbClients();
   const { files } = listWorkspaceFiles(dbPath, project.id);
@@ -1754,6 +1764,7 @@ export function prepareProjectChatWorkspace(
       commit: r.commit,
     })),
     handbook,
+    deployDoc,
     databases,
     dbClients,
     files,

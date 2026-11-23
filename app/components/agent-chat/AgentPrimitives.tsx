@@ -1622,7 +1622,7 @@ export function PromptBar({
             }
             title={
               sandboxMode === "workspace-write"
-                ? "当前允许编辑项目空间文件；点击切回只读探索"
+                ? "当前允许编辑项目空间文件、HANDBOOK.md 与 DEPLOY.md；点击切回只读探索"
                 : "当前为只读探索模式；点击切为可写项目空间"
             }
             className={cn(
@@ -1647,8 +1647,8 @@ export function PromptBar({
               onClick={onToggleNetworkAccess}
               title={
                 networkAccess
-                  ? "已放开 Codex 沙箱联网，可直连外部数据库或网络；点击关闭"
-                  : "Codex 沙箱默认断网；点击允许联网"
+                  ? "已开启 Codex 沙箱联网，可直连外部数据库或网络；点击关闭"
+                  : "Codex 沙箱当前断网；点击开启联网"
               }
               className={cn(
                 "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-colors cursor-pointer disabled:opacity-50",

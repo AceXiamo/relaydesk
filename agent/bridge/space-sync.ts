@@ -18,9 +18,14 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { isSensitivePath } from "../../server/repo-workspace.ts";
 
 const RPC_LIMIT = 2 * 1024 * 1024;
+const DOC_LIMIT = 64 * 1024;
 const FILE_LIMIT = 20 * 1024 * 1024;
 const TOTAL_LIMIT = 200 * 1024 * 1024;
+const ROOT_DOCS = ["HANDBOOK.md", "DEPLOY.md"] as const;
 const HASH = /^[a-f0-9]{64}$/;
+function isRootDoc(path: string): boolean {
+  return path === "HANDBOOK.md" || path === "DEPLOY.md";
+}
 export interface SpaceManifest {
   handbook_sha256?: string | null;
   handbook?: { size: number; sha256: string } | null;
@@ -126,6 +131,10 @@ const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 function scan(root: string): string[] {
   directory(root, false);
   const found: string[] = [];
+  for (const doc of ROOT_DOCS) {
+    const s = stat(join(root, doc));
+    if (s?.isFile() && s.nlink === 1 && s.size <= FILE_LIMIT) found.push(doc);
+  }
   let visited = 0;
   function walk(rel: string) {
     const dir = join(root, rel);
@@ -294,18 +303,20 @@ export async function syncSpace(o: SyncOptions, manifest: SpaceManifest) {
 }
 // syncSpace already verified these hashes against the local bytes; do not re-read the mirror.
 export function snapshotShadowFiles(mirror: Awaited<ReturnType<typeof syncSpace>>): Map<string, string> {
-  return new Map([...mirror.baseline].filter(([path]) => path.startsWith("files/")));
+  return new Map([...mirror.baseline].filter(([path]) => isRootDoc(path) || path.startsWith("files/")));
 }
 export async function pushChangedShadowFiles(o: SyncOptions, mirror: Awaited<ReturnType<typeof syncSpace>>, before: Map<string, string>, secrets: string[]) {
   let count = 0,
     total = 0;
   for (const path of scan(mirror.root)) {
     o.signal.throwIfAborted();
+    const doc = isRootDoc(path);
     const data = readChecked(mirror.root, path);
     if (!data) continue;
     if ((total += data.length) > TOTAL_LIMIT) throw new Error("Workspace exceeds size limit");
     const hash = sha(data);
-    if (before.get(path) === hash || mirror.skipped.includes(path.slice(6))) continue;
+    if (before.get(path) === hash || (path.startsWith("files/") && mirror.skipped.includes(path.slice(6)))) continue;
+    if (doc && data.length > DOC_LIMIT) throw new Error(`${path} exceeds 64 KiB limit`);
     if (secrets.some((s) => s && (path.includes(s) || data.includes(Buffer.from(s)))))
       throw new Error("Workspace change contains a protected credential");
     if (data.length <= RPC_LIMIT) {

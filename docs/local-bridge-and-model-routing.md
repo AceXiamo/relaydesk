@@ -93,7 +93,7 @@ The web server and local bridge each enforce the following chat timeouts. Set th
      - `$RELAYDESK_SPACE_DIR/files/` 是云端项目空间文件与 SQLite 数据库。
      - 对话里 `@引用` 的文件、工单内容继续内联进提示词，与云端体验完全一致。
 3. **可写模式回写（`workspace-write`）**：
-   - 当会话为 `workspace-write` 时，Bridge 在本轮 CLI 结束前扫描 `$RELAYDESK_SPACE_DIR` 中相对于启动快照的新增/修改文件（限制在 `HANDBOOK.md` 与 `files/` 下，单文件 ≤ 20 MiB，自动过滤敏感路径）。
+   - 当会话为 `workspace-write` 时，Bridge 在本轮 CLI 结束前扫描 `$RELAYDESK_SPACE_DIR` 中相对于启动快照的新增/修改文件（限制在 `HANDBOOK.md`、`DEPLOY.md` 与 `files/` 下，`HANDBOOK.md` / `DEPLOY.md` 单文件 ≤ 64 KiB、`files/` 单文件 ≤ 20 MiB，自动过滤敏感路径）。
    - 将变更通过 `workspace.push`（或 HTTPS `PUT /api/bridge/projects/:id/workspace/file`）回写到云端项目空间，并在流事件中附带一条工具摘要（例如「已同步 2 个项目空间文件到云端」），使 Web 端的项目空间视图立即可见。
 4. **外部数据源凭据边界**：
    - 外部数据源的**元信息**（名称、类型、`host_preview`、只读策略、`notes` Schema 说明）始终开放给本机 Agent。

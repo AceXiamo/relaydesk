@@ -17,7 +17,7 @@ describe("Project Space & Web Codex Chat API", () => {
     writeFileSync(
       fakeCodexPath,
       `#!/usr/bin/env node
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 const chunks = [];
@@ -31,6 +31,10 @@ const dbEnvKeys = Object.keys(process.env).filter((k) => k.startsWith("RELAYDESK
 const pgOptions = process.env.PGOPTIONS || "";
 const codexHome = process.env.CODEX_HOME || "";
 const leakedUrl = dbEnvKeys.length > 0 ? process.env[dbEnvKeys[0]] : "";
+if (prompt.includes("EDIT_PROJECT_DOCS")) {
+  writeFileSync("HANDBOOK.md", "# Cloud Edited Handbook\\n");
+  writeFileSync("DEPLOY.md", "# Cloud Edited Deploy Doc\\n");
+}
 
 const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");
 emit({ type: "thread.started", thread_id: threadId });
@@ -59,6 +63,9 @@ emit({
         hasSpec +
         ", promptHasRef=" +
         prompt.includes("spec.md") +
+        ", promptAllowsDocs=" +
+        (prompt.includes("create or edit ./HANDBOOK.md, ./DEPLOY.md, and files under ./files/") &&
+          prompt.includes("./DEPLOY.md")) +
         ", dbEnvs=" +
         dbEnvKeys.join(",") +
         ", pgOptions=" +
@@ -433,5 +440,56 @@ emit({
       if (prevLegacy === undefined) delete process.env.RELAYDESK_CODEX_LEGACY_LANDLOCK;
       else process.env.RELAYDESK_CODEX_LEGACY_LANDLOCK = prevLegacy;
     }
+  });
+
+  it("defaults new chat sessions to workspace-write with network enabled and persists HANDBOOK.md/DEPLOY.md edits", async () => {
+    const defaultRes = await fetch(`${srv.url}/api/projects/${projectId}/codex-chat/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runtime: "codex" }),
+    });
+    expect(defaultRes.status).toBe(200);
+    const { session: defaultSession } = (await defaultRes.json()) as {
+      session: { id: string; sandbox_mode: string; network_access: boolean };
+    };
+    expect(defaultSession.sandbox_mode).toBe("workspace-write");
+    expect(defaultSession.network_access).toBe(true);
+
+    const turnRes = await fetch(
+      `${srv.url}/api/projects/${projectId}/codex-chat/sessions/${defaultSession.id}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "EDIT_PROJECT_DOCS" }),
+      },
+    );
+    expect(turnRes.status).toBe(200);
+    const sseText = await turnRes.text();
+    expect(sseText).toContain("promptAllowsDocs=true");
+    expect(sseText).toContain("--sandbox workspace-write");
+    expect(sseText).toContain("sandbox_workspace_write.network_access=true");
+
+    const handbookRes = await fetch(`${srv.url}/api/projects/${projectId}/workspace/handbook`).then(
+      (r) => r.json() as Promise<{ handbook: { exists: boolean; content: string } }>,
+    );
+    expect(handbookRes.handbook).toMatchObject({ exists: true, content: "# Cloud Edited Handbook\n" });
+
+    const deployRes = await fetch(`${srv.url}/api/projects/${projectId}/workspace/deploy-doc`).then(
+      (r) => r.json() as Promise<{ deploy_doc: { exists: boolean; content: string } }>,
+    );
+    expect(deployRes.deploy_doc).toMatchObject({ exists: true, content: "# Cloud Edited Deploy Doc\n" });
+
+    // Explicit read-only and offline overrides remain honored
+    const restrictedRes = await fetch(`${srv.url}/api/projects/${projectId}/codex-chat/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runtime: "codex", sandbox_mode: "read-only", network_access: false }),
+    });
+    expect(restrictedRes.status).toBe(200);
+    const { session: restrictedSession } = (await restrictedRes.json()) as {
+      session: { sandbox_mode: string; network_access: boolean };
+    };
+    expect(restrictedSession.sandbox_mode).toBe("read-only");
+    expect(restrictedSession.network_access).toBe(false);
   });
 });

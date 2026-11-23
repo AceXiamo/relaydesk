@@ -250,9 +250,18 @@ describe("BridgeHub workspace access", () => {
     expect((await put(p, "files/allowed.txt", token)).ok).toBe(true);
     expect(f.srv.bridgeHub.hasActiveWriteLease(id, p)).toBe(true);
     expect((await fetch(fileUrl(p, "files/implicit.txt"), { method: "PUT", headers: bearer(token), body: "bound write" })).ok).toBe(true);
-    expect((await put(p, "HANDBOOK.md", token)).status).toBe(403);
-    const handbookPush = conn.send("workspace.push", { project_id: p, run_id, path: "HANDBOOK.md", data: "YQ==" });
-    expect((await conn.next("workspace.push.result", handbookPush)).payload.status).toBe(403);
+    expect((await put(p, "HANDBOOK.md", token)).ok).toBe(true);
+    const handbookPush = conn.send("workspace.push", { project_id: p, run_id, path: "HANDBOOK.md", data: Buffer.from("# Updated handbook").toString("base64") });
+    expect((await conn.next("workspace.push.result", handbookPush)).payload).toMatchObject({ ok: true });
+    const deployPush = conn.send("workspace.push", { project_id: p, run_id, path: "DEPLOY.md", data: Buffer.from("# Updated deploy doc").toString("base64") });
+    expect((await conn.next("workspace.push.result", deployPush)).payload).toMatchObject({ ok: true });
+    expect((await f.ok(`/projects/${p}/workspace/handbook`)).handbook.content).toBe("# Updated handbook");
+    expect((await f.ok(`/projects/${p}/workspace/deploy-doc`)).deploy_doc.content).toBe("# Updated deploy doc");
+    const oversizedDoc = Buffer.alloc(64 * 1024 + 1, "a");
+    expect((await fetch(fileUrl(p, "HANDBOOK.md"), {
+      method: "PUT", headers: { ...bearer(token), "X-Relaydesk-Run-Id": run_id }, body: oversizedDoc,
+    })).status).toBe(413);
+    expect((await put(p, "datasources.json", token)).status).toBe(403);
     expect((await put(q, "files/forbidden.txt", token)).status).toBe(403);
     expect((await put(p, "files/forbidden.txt", other.token)).status).toBe(403);
     for (const path of ["files/../outside.txt", "files/.env", "files/symlink.txt"]) {
@@ -279,6 +288,10 @@ describe("BridgeHub workspace access", () => {
     const readRun = (await reconnected.next("chat.start")).payload.run_id;
     const denied = reconnected.send("workspace.push", { project_id: p, run_id: readRun, path: "files/allowed.txt", data: Buffer.from("readonly").toString("base64"), sha256: sha256("readonly") });
     expect((await reconnected.next("workspace.push.result", denied)).payload).toMatchObject({ ok: false, status: 403 });
+    const deniedHandbook = reconnected.send("workspace.push", { project_id: p, run_id: readRun, path: "HANDBOOK.md", data: Buffer.from("readonly").toString("base64"), sha256: sha256("readonly") });
+    expect((await reconnected.next("workspace.push.result", deniedHandbook)).payload).toMatchObject({ ok: false, status: 403 });
+    const deniedDeploy = reconnected.send("workspace.push", { project_id: p, run_id: readRun, path: "DEPLOY.md", data: Buffer.from("readonly").toString("base64"), sha256: sha256("readonly") });
+    expect((await reconnected.next("workspace.push.result", deniedDeploy)).payload).toMatchObject({ ok: false, status: 403 });
     reconnected.ws.terminate();
     await readResponse.text();
     expect(readFileSync(join(getProjectFilesDir(f.dbPath, p), "allowed.txt"), "utf8")).toBe("new content");

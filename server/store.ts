@@ -370,8 +370,8 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     reasoning_effort TEXT NOT NULL DEFAULT 'default',
     execution_target TEXT NOT NULL DEFAULT 'auto',
     resolved_target TEXT NOT NULL DEFAULT '',
-    sandbox_mode TEXT NOT NULL DEFAULT 'read-only' CHECK(sandbox_mode IN ('read-only','workspace-write')),
-    network_access INTEGER NOT NULL DEFAULT 0,
+    sandbox_mode TEXT NOT NULL DEFAULT 'workspace-write' CHECK(sandbox_mode IN ('read-only','workspace-write')),
+    network_access INTEGER NOT NULL DEFAULT 1,
     external_session_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'idle' CHECK(status IN ('idle','running','error')),
     created_at TEXT NOT NULL,
@@ -962,7 +962,7 @@ export class Store {
       .all() as Array<{ name: string }>;
     if (!chatSessionCols.some((c) => c.name === "network_access")) {
       this.db.exec(
-        "ALTER TABLE chat_sessions ADD COLUMN network_access INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE chat_sessions ADD COLUMN network_access INTEGER NOT NULL DEFAULT 1",
       );
     }
     if (!chatSessionCols.some((c) => c.name === "reasoning_effort")) {
@@ -3162,8 +3162,8 @@ export class Store {
     const model =
       typeof data.model === "string" ? data.model.trim().slice(0, 160) : "";
     const sandboxMode: ChatSandboxMode =
-      data.sandbox_mode === "workspace-write" ? "workspace-write" : "read-only";
-    const networkAccess = data.network_access === true ? 1 : 0;
+      data.sandbox_mode === "read-only" ? "read-only" : "workspace-write";
+    const networkAccess = data.network_access === false ? 0 : 1;
     const id = uuidHex();
     const now = nowIso();
     this.db

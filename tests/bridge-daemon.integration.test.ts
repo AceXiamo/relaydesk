@@ -42,7 +42,9 @@ else emit({ type: 'thread.started', thread_id: 'local-fixture-thread' });
 const dbUrl = process.env.RELAYDESK_DB_FIXTURE ?? '';
 const facts = { cwd: process.cwd(), space, args, hasHistory: prompt.includes('historical-fixture'),
   hasRef: prompt.includes('workspace reference marker'), hasDbEnv: Boolean(dbUrl), pg: process.env.PGOPTIONS,
-  handbook: existsSync(join(space,'HANDBOOK.md')) ? readFileSync(join(space,'HANDBOOK.md'),'utf8') : null };
+  promptAllowsDocs: prompt.includes('$RELAYDESK_SPACE_DIR/HANDBOOK.md') && prompt.includes('$RELAYDESK_SPACE_DIR/DEPLOY.md') && !prompt.includes('treat HANDBOOK.md as read-only'),
+  handbook: existsSync(join(space,'HANDBOOK.md')) ? readFileSync(join(space,'HANDBOOK.md'),'utf8') : null,
+  deployDoc: existsSync(join(space,'DEPLOY.md')) ? readFileSync(join(space,'DEPLOY.md'),'utf8') : null };
 if (existsSync('pids.json')) {
   const [previousPid] = JSON.parse(readFileSync('pids.json','utf8'));
   try { process.kill(previousPid, 0); facts.previousCliAlive = true; } catch { facts.previousCliAlive = false; }
@@ -56,6 +58,7 @@ if (existsSync(join(space,'files','sample.sqlite'))) {
 writeFileSync('facts.json', JSON.stringify(facts));
 if (prompt.includes('MAKE_CHANGES')) {
   writeFileSync(join(space, 'HANDBOOK.md'), 'updated handbook');
+  writeFileSync(join(space, 'DEPLOY.md'), 'updated deploy doc');
   writeFileSync(join(space, 'files', 'output.txt'), 'result from local workspace');
   writeFileSync(join(space, 'files', 'large.bin'), Buffer.alloc(2 * 1024 * 1024 + 1, 0xa5));
   writeFileSync(join(space, 'files', '.env'), 'do not publish');
@@ -252,10 +255,13 @@ describe("real bridge daemon + HTTP chat", () => {
     // A misbehaving CLI can write its own cache, but read-only turns must never publish it.
     expect(await (await s.turn("MAKE_CHANGES")).text()).toContain("event: done");
     expect((await f.ok(`${w}/handbook`)).handbook.content).toBe("new cloud handbook");
+    expect((await f.ok(`${w}/deploy-doc`)).deploy_doc.exists).toBe(false);
     expect((await f.api(`${w}/file?path=output.txt`)).status).toBe(404);
     const write = await f.session(p, id, "workspace-write");
     expect(await (await write.turn("MAKE_CHANGES")).text()).toContain("event: done");
-    expect((await f.ok(`${w}/handbook`)).handbook.content).toBe("new cloud handbook");
+    expect(facts(repo).promptAllowsDocs).toBe(true);
+    expect((await f.ok(`${w}/handbook`)).handbook.content).toBe("updated handbook");
+    expect((await f.ok(`${w}/deploy-doc`)).deploy_doc.content).toBe("updated deploy doc");
     expect((await f.ok(`${w}/file?path=output.txt`)).file.content).toBe("result from local workspace");
     const uploaded = await fetch(`${f.srv.url}/api/bridge/projects/${p}/workspace/file?path=files/large.bin`, { headers: bearer(token) });
     expect(sha256(Buffer.from(await uploaded.arrayBuffer()))).toBe(sha256(Buffer.alloc(large.length, 0xa5)));

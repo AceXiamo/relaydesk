@@ -2102,8 +2102,8 @@ export class ApiRouter {
             ? ""
             : resolveDefaultModelForTarget(runtime, null, runtimeInfo.project_cli));
         const sandboxMode: ChatSandboxMode =
-          data.sandbox_mode === "workspace-write" ? "workspace-write" : "read-only";
-        const networkAccess = data.network_access === true;
+          data.sandbox_mode === "read-only" ? "read-only" : "workspace-write";
+        const networkAccess = data.network_access !== false;
         const session = this.store.transaction(true, () =>
           this.store.createChatSession(projectInfo.id, {
             ...selection,
