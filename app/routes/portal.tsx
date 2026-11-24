@@ -1461,8 +1461,12 @@ function PortalContent() {
           {/* Main Content Canvas */}
           <main className="min-w-0 w-full flex flex-col">
             {/* ── TAB 1: EXPRESS FEEDBACK (TRADITIONAL CHAT + COMPACT PROGRESS DOCK) ── */}
-            {tab === "submit" && (
-              <div className="flex-1 flex flex-col px-4 sm:px-5 py-4 space-y-4 animate-rd-portal-in">
+            <div
+              className={cn(
+                "flex-1 flex flex-col px-4 sm:px-5 py-4 space-y-4 animate-rd-portal-in",
+                tab !== "submit" && "hidden",
+              )}
+            >
               {submittedDetail ? (
                 <section className="rounded-[10px] bg-[var(--p-surface)] p-4 sm:p-5 shadow-[var(--p-shadow-card)] space-y-4 animate-rd-portal-in">
                   <div className="flex items-start gap-3">
@@ -1519,6 +1523,7 @@ function PortalContent() {
                 </section>
               ) : agentOnline && submitMode === "agent" ? (
                 <PortalFeedbackConversation
+                  projectId={projectId}
                   config={config}
                   stagedImages={images}
                   onUploadFiles={uploadFiles}
@@ -1924,7 +1929,6 @@ function PortalContent() {
                 </section>
               )}
             </div>
-          )}
 
           {/* ── TAB 2 & 3: COMPACT PROGRESS LIST -> FOCUSED DETAIL VIEW ── */}
           {tab !== "submit" && (

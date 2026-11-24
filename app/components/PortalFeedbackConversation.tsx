@@ -9,15 +9,27 @@ import {
 } from "react";
 import { Icon } from "./Icon.tsx";
 import { MarkdownContent } from "./MarkdownContent.tsx";
+import { PortalThinkingTrace } from "./PortalThinkingTrace.tsx";
 import { Button, LivePulseDot, Switch, cn, useToast } from "./ui.tsx";
+import { formatRelativeTime } from "~/lib/format.ts";
 import { PortalApiError } from "~/lib/portal-api.ts";
+import {
+  clearPortalConversations,
+  deletePortalConversation,
+  deriveConversationTitle,
+  loadPortalConversationStore,
+  setActivePortalConversation,
+  upsertPortalConversation,
+  type PortalConversationTurn,
+  type PortalEditableDraftState,
+  type StoredPortalConversation,
+} from "~/lib/portal-conversation-storage.ts";
 import {
   DIAGNOSE_MAX_MESSAGE_CHARS,
   normalizeDiagnosePayload,
 } from "~/lib/feedback-diagnose.ts";
 import type {
   FeedbackDiagnoseMessage,
-  FeedbackDiagnoseOutcome,
   FeedbackDiagnoseResponse,
   FeedbackDiagnoseStreamEvent,
   FeedbackReleasePreference,
@@ -32,26 +44,11 @@ export interface PortalUploadedImage {
   uploading: boolean;
 }
 
-interface ConversationTurn {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  images?: string[];
-  outcome?: FeedbackDiagnoseOutcome;
-  streaming?: boolean;
-}
-
-interface EditableDraftState {
-  turnId: string;
-  title: string;
-  body: string;
-  images: string[];
-  releasePreference: FeedbackReleasePreference;
-  expanded: boolean;
-  dismissed: boolean;
-}
+type ConversationTurn = PortalConversationTurn;
+type EditableDraftState = PortalEditableDraftState;
 
 interface PortalFeedbackConversationProps {
+  projectId?: string;
   config: PortalConfig;
   stagedImages: PortalUploadedImage[];
   onUploadFiles: (files: FileList | File[]) => Promise<void>;
@@ -96,6 +93,7 @@ function dedupeUrls(urls: string[]): string[] {
 }
 
 export function PortalFeedbackConversation({
+  projectId = "",
   config,
   stagedImages,
   onUploadFiles,
@@ -110,17 +108,51 @@ export function PortalFeedbackConversation({
   onConversationActiveChange,
 }: PortalFeedbackConversationProps) {
   const toast = useToast();
-  const [turns, setTurns] = useState<ConversationTurn[]>([]);
+  const initialStore = useMemo(
+    () => (projectId ? loadPortalConversationStore(projectId) : { activeId: null, sessions: [] }),
+    // Only compute initial snapshot once per projectId; subsequent updates go through state + storage helpers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectId],
+  );
+  const initialActive = useMemo(
+    () =>
+      initialStore.activeId
+        ? initialStore.sessions.find((s) => s.id === initialStore.activeId) ?? null
+        : null,
+    [initialStore],
+  );
+
+  const [sessionId, setSessionId] = useState<string | null>(
+    () => initialActive?.id ?? null,
+  );
+  const [sessionCreatedAt, setSessionCreatedAt] = useState<number>(
+    () => initialActive?.createdAt ?? Date.now(),
+  );
+  const [submittedTaskCode, setSubmittedTaskCode] = useState<string | undefined>(
+    () => initialActive?.submittedTaskCode,
+  );
+  const [historySessions, setHistorySessions] = useState<StoredPortalConversation[]>(
+    () => initialStore.sessions,
+  );
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  const [turns, setTurns] = useState<ConversationTurn[]>(
+    () => initialActive?.turns ?? [],
+  );
   const [input, setInput] = useState("");
   const [diagnosing, setDiagnosing] = useState(false);
   const [statusLabel, setStatusLabel] = useState("正在排查问题…");
+  const [liveSteps, setLiveSteps] = useState<string[]>([]);
+  const [liveReasoning, setLiveReasoning] = useState("");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [diagnoseError, setDiagnoseError] = useState<{
     message: string;
     offline?: boolean;
   } | null>(null);
   const [historyTrimmedHint, setHistoryTrimmedHint] = useState(false);
-  const [draft, setDraft] = useState<EditableDraftState | null>(null);
+  const [draft, setDraft] = useState<EditableDraftState | null>(
+    () => initialActive?.draft ?? null,
+  );
   const [confirming, setConfirming] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
@@ -128,6 +160,77 @@ export function PortalFeedbackConversation({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
+  const historyPopoverRef = useRef<HTMLDivElement | null>(null);
+  const hydratedProjectRef = useRef(projectId);
+
+  // Re-hydrate if projectId changes while mounted
+  useEffect(() => {
+    if (hydratedProjectRef.current === projectId) return;
+    hydratedProjectRef.current = projectId;
+    abortRef.current?.abort();
+    const loaded = projectId
+      ? loadPortalConversationStore(projectId)
+      : { activeId: null, sessions: [] };
+    const active = loaded.activeId
+      ? loaded.sessions.find((s) => s.id === loaded.activeId) ?? null
+      : null;
+    setHistorySessions(loaded.sessions);
+    setSessionId(active?.id ?? null);
+    setSessionCreatedAt(active?.createdAt ?? Date.now());
+    setSubmittedTaskCode(active?.submittedTaskCode);
+    setTurns(active?.turns ?? []);
+    setDraft(active?.draft ?? null);
+    setDiagnoseError(null);
+    setHistoryTrimmedHint(false);
+    setHistoryOpen(false);
+  }, [projectId]);
+
+  // Persist active conversation whenever turns or draft change
+  useEffect(() => {
+    if (!projectId) return;
+    if (turns.length === 0) return;
+    const id = sessionId ?? makeTurnId();
+    if (!sessionId) {
+      setSessionId(id);
+      setSessionCreatedAt(Date.now());
+    }
+    const updated = upsertPortalConversation(
+      projectId,
+      {
+        id,
+        title: deriveConversationTitle(turns),
+        turns,
+        draft,
+        ...(submittedTaskCode ? { submittedTaskCode } : {}),
+        createdAt: sessionCreatedAt,
+        updatedAt: Date.now(),
+      },
+      true,
+    );
+    setHistorySessions(updated.sessions);
+  }, [projectId, sessionId, sessionCreatedAt, submittedTaskCode, turns, draft]);
+
+  // Close history popover on outside click or Escape
+  useEffect(() => {
+    if (!historyOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (
+        historyPopoverRef.current &&
+        !historyPopoverRef.current.contains(e.target as Node)
+      ) {
+        setHistoryOpen(false);
+      }
+    };
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setHistoryOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [historyOpen]);
 
   useEffect(() => {
     if (!diagnosing) {
@@ -193,13 +296,28 @@ export function PortalFeedbackConversation({
       if (normalized.messages.length === 0) return;
 
       const assistantTurnId = makeTurnId();
+      const thinkingStartedAt = Date.now();
       setHistoryTrimmedHint(normalized.trimmedHistory);
       setDiagnosing(true);
       setStatusLabel("正在分析问题与上下文…");
+      setLiveSteps(["正在分析问题与上下文…"]);
+      setLiveReasoning("");
       setDiagnoseError(null);
 
       let streamed = "";
+      let streamedReasoning = "";
+      let collectedSteps: string[] = ["正在分析问题与上下文…"];
+      let thinkingDurationMs: number | undefined;
       let streamStarted = false;
+
+      const pushStep = (label: string) => {
+        const clean = label.trim();
+        if (!clean) return;
+        if (collectedSteps[collectedSteps.length - 1] !== clean) {
+          collectedSteps = [...collectedSteps, clean].slice(-20);
+          setLiveSteps(collectedSteps);
+        }
+      };
 
       try {
         const res = await onDiagnose(
@@ -211,17 +329,51 @@ export function PortalFeedbackConversation({
           (ev) => {
             if (controller.signal.aborted) return;
             if (ev.type === "status") {
-              setStatusLabel(ev.label || "正在排查问题…");
+              const nextLabel = ev.label || "正在排查问题…";
+              setStatusLabel(nextLabel);
+              pushStep(nextLabel);
+              if (streamStarted) {
+                const stepsSnapshot = collectedSteps;
+                setTurns((prev) =>
+                  prev.map((item) =>
+                    item.id === assistantTurnId
+                      ? { ...item, traceSteps: stepsSnapshot }
+                      : item,
+                  ),
+                );
+              }
+            } else if (ev.type === "reasoning" && ev.text) {
+              streamedReasoning += ev.text;
+              setLiveReasoning(streamedReasoning);
+              setStatusLabel("正在深度推理…");
+              if (streamStarted) {
+                const currentReasoning = streamedReasoning;
+                setTurns((prev) =>
+                  prev.map((item) =>
+                    item.id === assistantTurnId
+                      ? { ...item, reasoning: currentReasoning }
+                      : item,
+                  ),
+                );
+              }
+              scrollToLatest("auto");
             } else if (ev.type === "delta" && ev.text) {
               streamed += ev.text;
               if (!streamStarted) {
                 streamStarted = true;
+                thinkingDurationMs = Math.max(100, Date.now() - thinkingStartedAt);
+                const stepsSnapshot = collectedSteps;
+                const reasoningSnapshot = streamedReasoning.trim() || undefined;
+                const durationSnapshot = thinkingDurationMs;
                 setTurns((prev) => [
                   ...prev,
                   {
                     id: assistantTurnId,
                     role: "assistant",
                     text: streamed,
+                    ...(reasoningSnapshot ? { reasoning: reasoningSnapshot } : {}),
+                    ...(stepsSnapshot.length ? { traceSteps: stepsSnapshot } : {}),
+                    thinkingDurationMs: durationSnapshot,
                     streaming: true,
                   },
                 ]);
@@ -242,6 +394,11 @@ export function PortalFeedbackConversation({
         if (controller.signal.aborted) return;
 
         const finalText = (res.reply || streamed).trim();
+        const finalReasoning = (res.reasoning || streamedReasoning).trim() || undefined;
+        const finalDuration =
+          thinkingDurationMs ?? Math.max(100, Date.now() - thinkingStartedAt);
+        const finalSteps = collectedSteps.length ? collectedSteps : undefined;
+
         setTurns((prev) => {
           const exists = prev.some((t) => t.id === assistantTurnId);
           if (exists) {
@@ -251,6 +408,9 @@ export function PortalFeedbackConversation({
                     ...item,
                     text: finalText,
                     outcome: res.outcome,
+                    ...(finalReasoning ? { reasoning: finalReasoning } : {}),
+                    ...(finalSteps ? { traceSteps: finalSteps } : {}),
+                    thinkingDurationMs: finalDuration,
                     streaming: false,
                   }
                 : item,
@@ -263,6 +423,9 @@ export function PortalFeedbackConversation({
               role: "assistant",
               text: finalText,
               outcome: res.outcome,
+              ...(finalReasoning ? { reasoning: finalReasoning } : {}),
+              ...(finalSteps ? { traceSteps: finalSteps } : {}),
+              thinkingDurationMs: finalDuration,
               streaming: false,
             },
           ];
@@ -314,6 +477,8 @@ export function PortalFeedbackConversation({
           abortRef.current = null;
         }
         setDiagnosing(false);
+        setLiveReasoning("");
+        setLiveSteps([]);
       }
     },
     [onDiagnose, onPossibleAuthError, scrollToLatest],
@@ -384,13 +549,67 @@ export function PortalFeedbackConversation({
 
   const handleResetConversation = () => {
     abortRef.current?.abort();
+    setSessionId(null);
+    setSessionCreatedAt(Date.now());
+    setSubmittedTaskCode(undefined);
     setTurns([]);
     setDraft(null);
     setDiagnoseError(null);
     setHistoryTrimmedHint(false);
+    setHistoryOpen(false);
     setInput("");
     onClearStagedImages();
+    if (projectId) {
+      const updated = setActivePortalConversation(projectId, null);
+      setHistorySessions(updated.sessions);
+    }
     requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const handleSelectHistorySession = (session: StoredPortalConversation) => {
+    abortRef.current?.abort();
+    setSessionId(session.id);
+    setSessionCreatedAt(session.createdAt);
+    setSubmittedTaskCode(session.submittedTaskCode);
+    setTurns(session.turns);
+    setDraft(session.draft);
+    setDiagnoseError(null);
+    setHistoryTrimmedHint(false);
+    setHistoryOpen(false);
+    if (projectId) {
+      const updated = setActivePortalConversation(projectId, session.id);
+      setHistorySessions(updated.sessions);
+    }
+    scrollToLatest("auto");
+  };
+
+  const handleDeleteHistorySession = (targetId: string) => {
+    if (!projectId) return;
+    const updated = deletePortalConversation(projectId, targetId);
+    setHistorySessions(updated.sessions);
+    if (sessionId === targetId) {
+      abortRef.current?.abort();
+      setSessionId(null);
+      setSessionCreatedAt(Date.now());
+      setSubmittedTaskCode(undefined);
+      setTurns([]);
+      setDraft(null);
+      setDiagnoseError(null);
+    }
+  };
+
+  const handleClearAllHistory = () => {
+    if (!projectId) return;
+    abortRef.current?.abort();
+    clearPortalConversations(projectId);
+    setHistorySessions([]);
+    setSessionId(null);
+    setSessionCreatedAt(Date.now());
+    setSubmittedTaskCode(undefined);
+    setTurns([]);
+    setDraft(null);
+    setDiagnoseError(null);
+    setHistoryOpen(false);
   };
 
   const handleSwitchManualClick = () => {
@@ -427,13 +646,36 @@ export function PortalFeedbackConversation({
 
     setConfirming(true);
     try {
-      await onCreateTask({
+      const created = await onCreateTask({
         title: cleanTitle,
         body: cleanBody,
         type: "功能异常",
         images: draft.images,
         release_preference: draft.releasePreference,
       });
+      if (projectId && turns.length > 0) {
+        const archiveId = sessionId ?? makeTurnId();
+        upsertPortalConversation(
+          projectId,
+          {
+            id: archiveId,
+            title: deriveConversationTitle(turns),
+            turns,
+            draft: { ...draft, dismissed: true },
+            submittedTaskCode: created.task.code,
+            createdAt: sessionCreatedAt,
+            updatedAt: Date.now(),
+          },
+          false,
+        );
+        const updated = setActivePortalConversation(projectId, null);
+        setHistorySessions(updated.sessions);
+        setSessionId(null);
+        setSessionCreatedAt(Date.now());
+        setSubmittedTaskCode(undefined);
+        setTurns([]);
+        setDraft(null);
+      }
     } catch (err) {
       if (onPossibleAuthError(err)) return;
       toast.error(err instanceof Error ? err.message : "提交工单失败，请重试");
@@ -450,7 +692,6 @@ export function PortalFeedbackConversation({
   };
 
   const uploadingCount = stagedImages.filter((i) => i.uploading).length;
-  const elapsedSeconds = (elapsedMs / 1000).toFixed(1);
   const canSend =
     Boolean(input.trim()) && !diagnosing && !confirming && uploadingCount === 0;
   const nearCharLimit = input.length >= Math.floor(DIAGNOSE_MAX_MESSAGE_CHARS * 0.75);
@@ -665,9 +906,133 @@ export function PortalFeedbackConversation({
             )}
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            {projectId && historySessions.length > 0 && (
+              <div ref={historyPopoverRef} className="relative">
+                <button
+                  type="button"
+                  data-testid="portal-history-toggle"
+                  aria-expanded={historyOpen}
+                  onClick={() => setHistoryOpen((prev) => !prev)}
+                  disabled={confirming}
+                  className={cn(
+                    "inline-flex items-center gap-1 h-6 px-2 rounded-[5px] text-[11px] font-medium transition-colors disabled:opacity-50 cursor-pointer",
+                    historyOpen
+                      ? "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)]"
+                      : "text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)]",
+                  )}
+                >
+                  <Icon name="history" size={11} />
+                  <span>历史</span>
+                  <span className="text-[10px] font-mono tabular-nums opacity-75">
+                    {historySessions.length}
+                  </span>
+                </button>
+
+                {historyOpen && (
+                  <div
+                    data-testid="portal-history-popover"
+                    className="absolute right-0 top-full mt-1.5 w-72 sm:w-80 rounded-[9px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] border border-[var(--p-line)] overflow-hidden z-30 animate-popover-in"
+                  >
+                    <div className="px-3 py-2 border-b border-[var(--p-line)] bg-[var(--p-page)]/80 flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-[var(--p-ink)]">
+                        历史对话（{historySessions.length}）
+                      </span>
+                      <button
+                        type="button"
+                        data-testid="portal-history-clear"
+                        onClick={handleClearAllHistory}
+                        className="text-[10.5px] text-[var(--p-ink-3)] hover:text-[var(--p-vermilion)] transition-colors cursor-pointer"
+                      >
+                        清空
+                      </button>
+                    </div>
+                    <div className="max-h-72 overflow-y-auto rd-scroll divide-y divide-[var(--p-line)]/60">
+                      {historySessions.map((session) => {
+                        const isActive = session.id === sessionId;
+                        const lastAssistant = [...session.turns]
+                          .reverse()
+                          .find((t) => t.role === "assistant");
+                        const hasOpenDraft = Boolean(
+                          session.draft && !session.draft.dismissed,
+                        );
+                        return (
+                          <div
+                            key={session.id}
+                            data-testid="portal-history-item"
+                            data-active={isActive ? "true" : "false"}
+                            className={cn(
+                              "group flex items-start gap-2 px-3 py-2 transition-colors",
+                              isActive
+                                ? "bg-[var(--p-cobalt-tint)]/60"
+                                : "hover:bg-[var(--p-hover)]/70",
+                            )}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => handleSelectHistorySession(session)}
+                              className="flex-1 min-w-0 text-left space-y-1 cursor-pointer"
+                            >
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span
+                                  className={cn(
+                                    "text-[11.5px] font-medium truncate",
+                                    isActive
+                                      ? "text-[var(--p-cobalt)]"
+                                      : "text-[var(--p-ink)]",
+                                  )}
+                                >
+                                  {session.title}
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--p-ink-3)]">
+                                <span className="tabular-nums">
+                                  {formatRelativeTime(
+                                    new Date(session.updatedAt).toISOString(),
+                                  )}
+                                </span>
+                                <span>·</span>
+                                <span className="tabular-nums">
+                                  {session.turns.length} 条消息
+                                </span>
+                                {session.submittedTaskCode ? (
+                                  <span className="px-1 py-0.2 rounded-[3px] bg-[var(--p-forest-tint)] text-[var(--p-forest)] font-mono">
+                                    已提单 {session.submittedTaskCode}
+                                  </span>
+                                ) : hasOpenDraft ? (
+                                  <span className="px-1 py-0.2 rounded-[3px] bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]">
+                                    待确认草稿
+                                  </span>
+                                ) : lastAssistant?.outcome === "usage" ? (
+                                  <span className="px-1 py-0.2 rounded-[3px] bg-[var(--p-forest-tint)] text-[var(--p-forest)]">
+                                    使用解答
+                                  </span>
+                                ) : null}
+                              </div>
+                            </button>
+                            <button
+                              type="button"
+                              aria-label="删除对话"
+                              data-testid="portal-history-delete"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteHistorySession(session.id);
+                              }}
+                              className="w-5 h-5 rounded-[4px] inline-flex items-center justify-center text-[var(--p-ink-3)] opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-[var(--p-vermilion)] hover:bg-[var(--p-vermilion-tint)] transition-all shrink-0 mt-0.5 cursor-pointer"
+                            >
+                              <Icon name="x" size={11} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             {hasConversation && (
               <button
                 type="button"
+                data-testid="portal-new-conversation"
                 onClick={handleResetConversation}
                 disabled={confirming}
                 className="inline-flex items-center gap-1 h-6 px-2 rounded-[5px] text-[11px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors disabled:opacity-50 cursor-pointer"
@@ -759,6 +1124,16 @@ export function PortalFeedbackConversation({
                       <Icon name="sparkles" size={12} />
                     </div>
                     <div className="flex-1 min-w-0 space-y-2">
+                      {(turn.reasoning || (turn.traceSteps && turn.traceSteps.length > 0)) && (
+                        <PortalThinkingTrace
+                          active={Boolean(turn.streaming && !turn.text)}
+                          statusLabel={statusLabel}
+                          elapsedMs={elapsedMs}
+                          durationMs={turn.thinkingDurationMs}
+                          reasoning={turn.reasoning}
+                          steps={turn.traceSteps}
+                        />
+                      )}
                       <div className="text-[12.5px] leading-[1.6] text-[var(--p-ink)]">
                         <MarkdownContent content={turn.text} />
                         {turn.streaming && (
@@ -1051,23 +1426,47 @@ export function PortalFeedbackConversation({
               );
             })}
 
-            {/* Live Honest Status Indicator (while waiting before first text delta) */}
+            {/* Live Honest Status & Thinking Trace (while waiting before first text delta) */}
             {diagnosing && !activeStreamingTurn && (
               <div
                 data-testid="portal-diagnosing-indicator"
-                className="flex items-center gap-2.5 animate-rd-msg-in"
+                className="flex items-start gap-2.5 animate-rd-msg-in"
               >
-                <div className="w-6 h-6 rounded-[6px] bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] flex items-center justify-center shrink-0">
+                <div className="w-6 h-6 rounded-[6px] bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] flex items-center justify-center shrink-0 mt-0.5">
                   <Icon name="sparkles" size={12} className="animate-pulse" />
                 </div>
-                <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-[6px] bg-[var(--p-canvas)] shadow-[var(--p-shadow-hairline)]">
-                  <span className="rd-shimmer-text text-[11.5px] font-medium">
-                    {statusLabel}
-                  </span>
-                  <span className="text-[10.5px] font-mono tabular-nums text-[var(--p-ink-3)]">
-                    {elapsedSeconds}s
-                  </span>
+                <div className="flex-1 min-w-0 pt-0.5">
+                  <PortalThinkingTrace
+                    active
+                    statusLabel={statusLabel}
+                    elapsedMs={elapsedMs}
+                    reasoning={liveReasoning}
+                    steps={liveSteps}
+                  />
                 </div>
+              </div>
+            )}
+
+            {/* Archived Submitted Conversation Indicator */}
+            {submittedTaskCode && !diagnosing && (
+              <div
+                data-testid="portal-submitted-session-banner"
+                className="rounded-[7px] bg-[var(--p-forest-tint)] px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--p-forest)]"
+              >
+                <span className="inline-flex items-center gap-1.5 font-medium">
+                  <Icon name="check-circle-2" size={12} />
+                  <span>
+                    此对话已提交工单{" "}
+                    <span className="font-mono">{submittedTaskCode}</span>
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleResetConversation}
+                  className="font-medium hover:underline cursor-pointer"
+                >
+                  开启新对话
+                </button>
               </div>
             )}
 

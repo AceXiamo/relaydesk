@@ -56,6 +56,7 @@ export interface FeedbackAgentAvailability {
 
 export type FeedbackStreamEvent =
   | { type: "status"; label: string }
+  | { type: "reasoning"; text: string }
   | { type: "delta"; text: string };
 
 export interface FeedbackDiagnosisDraft {
@@ -67,6 +68,7 @@ export interface FeedbackDiagnosisResult {
   reply: string;
   outcome: "clarify" | "usage" | "suspected_bug";
   draft?: FeedbackDiagnosisDraft;
+  reasoning?: string;
 }
 
 export interface FeedbackDiagnosePayload {
@@ -128,6 +130,7 @@ const MAX_MESSAGE_CHARS = 6000;
 const MAX_TOTAL_CHARS = 32000;
 const MAX_IMAGES = 8;
 const MAX_IMAGE_URL_CHARS = 2048;
+const MAX_REASONING_CHARS = 12_000;
 const IMAGE_FETCH_TIMEOUT_MS = 10_000;
 const TRIAGE_TAG_PREFIX = "<relaydesk-triage";
 
@@ -729,18 +732,29 @@ function buildFeedbackUserPrompt(
   return lines.join("\n");
 }
 
-function buildSensitivePaths(workdir: string, turnId: string): string[] {
+function buildSensitivePaths(
+  workdir: string,
+  turnId: string,
+  secrets: string[] = [],
+): string[] {
   const paths = new Set<string>();
-  const trimmed = workdir.trim();
-  if (trimmed) {
+  const addPath = (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
     paths.add(trimmed);
     paths.add(trimmed.replace(/\/+$/, ""));
+    const redacted = redactSecrets(trimmed, secrets);
+    if (redacted && redacted !== trimmed) {
+      paths.add(redacted);
+      paths.add(redacted.replace(/\/+$/, ""));
+    }
+  };
+  const trimmed = workdir.trim();
+  if (trimmed) {
+    addPath(trimmed);
     try {
       const real = realpathSync(trimmed);
-      if (real) {
-        paths.add(real);
-        paths.add(real.replace(/\/+$/, ""));
-      }
+      if (real) addPath(real);
     } catch {
       // workdir may be virtual in unit tests
     }
@@ -756,17 +770,18 @@ function sanitizePublicFeedbackText(
   secrets: string[],
   sensitivePaths: string[],
 ): string {
-  let out = redactSecrets(text, secrets);
+  let out = text;
+  for (const p of sensitivePaths) {
+    out = out.split(p).join("[项目路径]");
+  }
+  out = out.replace(/\$RELAYDESK_SPACE_DIR(?:\/[^\s`"'）)]*)?/g, "[附件]");
+  out = redactSecrets(out, secrets);
   out = out
     .replace(/rdbr_[a-zA-Z0-9_-]{12,}/gi, "[redacted]")
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted]")
     .replace(/\bBearer\s+[\w.+/=-]{12,}/gi, "Bearer [redacted]")
     .replace(/\b(?:AKIA|ASIA)[A-Z\d]{16}\b/g, "[redacted]")
     .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+/g, "[redacted]");
-  for (const p of sensitivePaths) {
-    out = out.split(p).join("[项目路径]");
-  }
-  out = out.replace(/\$RELAYDESK_SPACE_DIR(?:\/[^\s`"'）)]*)?/g, "[附件]");
   return out;
 }
 
@@ -928,7 +943,11 @@ export async function diagnoseFeedback(
 
   const turnId = randomUUID().replace(/-/g, "").slice(0, 24);
   const secrets = collectProjectSecrets(store, projectId);
-  const sensitivePaths = buildSensitivePaths(resolved.binding.workdir, turnId);
+  const sensitivePaths = buildSensitivePaths(
+    resolved.binding.workdir,
+    turnId,
+    secrets,
+  );
   const holdTokens = [...secrets, ...sensitivePaths];
 
   let lastStatus = "";
@@ -988,6 +1007,64 @@ export async function diagnoseFeedback(
 
     let rawAccumulated = "";
     let emittedText = "";
+    let rawReasoning = "";
+    let emittedReasoning = "";
+    let lastCodexReasoningChunk = "";
+
+    const sanitizeReasoning = (raw: string): string => {
+      const stripped = raw
+        .replace(/<relaydesk-triage>[\s\S]*?<\/relaydesk-triage>/gi, "")
+        .replace(/<relaydesk-triage[\s\S]*$/i, "");
+      return sanitizePublicFeedbackText(stripped, secrets, sensitivePaths);
+    };
+
+    const flushReasoningDelta = () => {
+      const lower = rawReasoning.toLowerCase();
+      const tagIdx = lower.indexOf(TRIAGE_TAG_PREFIX);
+      let visibleRaw: string;
+      if (tagIdx !== -1) {
+        visibleRaw = rawReasoning.slice(0, tagIdx);
+      } else {
+        const holdTag = trailingPrefixHoldLength(rawReasoning, TRIAGE_TAG_PREFIX);
+        const holdSecret = trailingSecretsHoldLength(rawReasoning, holdTokens);
+        const hold = Math.max(holdTag, holdSecret);
+        visibleRaw = hold > 0 ? rawReasoning.slice(0, -hold) : rawReasoning;
+      }
+      const safeVisible = sanitizeReasoning(visibleRaw);
+      if (
+        safeVisible.length > emittedReasoning.length &&
+        safeVisible.startsWith(emittedReasoning)
+      ) {
+        const delta = safeVisible.slice(emittedReasoning.length);
+        emittedReasoning = safeVisible;
+        onEvent?.({ type: "reasoning", text: delta });
+      }
+    };
+
+    const appendReasoning = (chunk: string) => {
+      if (!chunk || rawReasoning.length >= MAX_REASONING_CHARS) return;
+      if (cfg.runtime === "codex") {
+        const trimmed = chunk.trim();
+        if (!trimmed) return;
+        if (trimmed === lastCodexReasoningChunk) return;
+        if (
+          lastCodexReasoningChunk &&
+          trimmed.startsWith(lastCodexReasoningChunk)
+        ) {
+          const suffix = trimmed.slice(lastCodexReasoningChunk.length);
+          lastCodexReasoningChunk = trimmed;
+          rawReasoning = (rawReasoning + suffix).slice(0, MAX_REASONING_CHARS);
+        } else {
+          lastCodexReasoningChunk = trimmed;
+          rawReasoning = (
+            rawReasoning ? `${rawReasoning}\n\n${trimmed}` : trimmed
+          ).slice(0, MAX_REASONING_CHARS);
+        }
+      } else {
+        rawReasoning = (rawReasoning + chunk).slice(0, MAX_REASONING_CHARS);
+      }
+      flushReasoningDelta();
+    };
 
     const flushVisibleDelta = () => {
       const lower = rawAccumulated.toLowerCase();
@@ -1021,6 +1098,8 @@ export async function diagnoseFeedback(
         emitStatus(
           mapToolEventToPublicStatus(ev.event.tool, ev.event.summary),
         );
+      } else if (ev.type === "reasoning") {
+        appendReasoning(ev.text);
       } else if (ev.type === "text_delta") {
         rawAccumulated = (rawAccumulated + ev.delta).slice(0, 120_000);
         flushVisibleDelta();
@@ -1086,6 +1165,17 @@ export async function diagnoseFeedback(
 
     const finalRaw = turnResult.content || rawAccumulated;
     const parsed = parseFeedbackTriageOutput(finalRaw, secrets, sensitivePaths);
+    const finalReasoning = sanitizeReasoning(rawReasoning).trim();
+
+    if (
+      finalReasoning.length > emittedReasoning.length &&
+      finalReasoning.startsWith(emittedReasoning)
+    ) {
+      onEvent?.({
+        type: "reasoning",
+        text: finalReasoning.slice(emittedReasoning.length),
+      });
+    }
 
     if (
       parsed.reply.length > emittedText.length &&
@@ -1097,7 +1187,10 @@ export async function diagnoseFeedback(
       });
     }
 
-    return parsed;
+    return {
+      ...parsed,
+      ...(finalReasoning ? { reasoning: finalReasoning } : {}),
+    };
   } finally {
     cleanupFeedbackImagesDir(store.dbPath, projectId, turnId);
   }

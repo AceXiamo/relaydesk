@@ -679,6 +679,102 @@ console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_messag
     expect(observed.hasMcpToken).toBe(false);
     expect(observed.hasDbEnv).toBe(false);
   });
+
+  it("streams sanitized reasoning deltas and returns final reasoning while redacting secrets and paths", async () => {
+    const node = await fx.register("Mac Reasoning");
+    const conn = await fx.connect(node.token);
+    await conn.hello(
+      [{ project_id: projectId, workdir, path_ok: true, path_error: "" }],
+      {
+        runtimes: {
+          codex: { available: true, version: "1.0.0", default_model: "gpt-5.4" },
+          claude: { available: false, version: "" },
+        },
+        models: [],
+      },
+    );
+    patchFeedbackAgent(fx.srv.store, projectId, {
+      execution_target: `local:${node.id}`,
+      runtime: "codex",
+      enabled: true,
+    });
+
+    const projectRow = fx.srv.store.getProjectRow(projectId);
+    const events: FeedbackStreamEvent[] = [];
+    const diagnosis = diagnoseFeedback(
+      fx.srv.store,
+      fx.srv.bridgeHub,
+      projectId,
+      { messages: [user("切换标签后对话消失了")], images: [] },
+      { onEvent: (ev) => events.push(ev) },
+    );
+
+    const { payload } = await conn.next("chat.start");
+    const runId = payload.run_id as string;
+    const sessionId = payload.session_id as string;
+
+    conn.send("chat.event", {
+      run_id: runId,
+      session_id: sessionId,
+      event: {
+        type: "reasoning",
+        text: `正在检查 ${workdir}/app/routes/portal.tsx，确认密钥 ${projectRow.agent_key} 不会泄露`,
+      },
+    });
+    // Duplicate Codex item should be ignored
+    conn.send("chat.event", {
+      run_id: runId,
+      session_id: sessionId,
+      event: {
+        type: "reasoning",
+        text: `正在检查 ${workdir}/app/routes/portal.tsx，确认密钥 ${projectRow.agent_key} 不会泄露`,
+      },
+    });
+    conn.send("chat.event", {
+      run_id: runId,
+      session_id: sessionId,
+      event: {
+        type: "reasoning",
+        text: "确认前端未做持久化存储。<relaydesk-triage>{\"outcome\":\"clarify\"}</relaydesk-triage>",
+      },
+    });
+    conn.send("chat.event", {
+      run_id: runId,
+      session_id: sessionId,
+      event: {
+        type: "text_delta",
+        delta:
+          '已定位原因：当前仅保存在页面内存中。\n<relaydesk-triage>{"outcome":"usage"}</relaydesk-triage>',
+      },
+    });
+    conn.send("chat.event", {
+      run_id: runId,
+      session_id: sessionId,
+      event: { type: "done" },
+      result: {
+        status: "done",
+        content:
+          '已定位原因：当前仅保存在页面内存中。\n<relaydesk-triage>{"outcome":"usage"}</relaydesk-triage>',
+        events: [],
+        externalSessionId: "",
+      },
+    });
+
+    const result = await diagnosis;
+    const streamedReasoning = events
+      .filter((e): e is { type: "reasoning"; text: string } => e.type === "reasoning")
+      .map((e) => e.text)
+      .join("");
+
+    expect(streamedReasoning).toContain("[项目路径]");
+    expect(streamedReasoning).toContain("[redacted]");
+    expect(streamedReasoning).toContain("确认前端未做持久化存储。");
+    expect(streamedReasoning).not.toContain(workdir);
+    expect(streamedReasoning).not.toContain(projectRow.agent_key);
+    expect(streamedReasoning).not.toContain("<relaydesk-triage");
+    expect(result.reasoning).toBe(streamedReasoning.trim());
+    expect(result.outcome).toBe("usage");
+  });
 });
 
 describe("parseFeedbackTriageOutput tolerance", () => {

@@ -98,6 +98,7 @@ async function portalDiagnoseStream(
   const decoder = new TextDecoder();
   let buffer = "";
   let accumulatedText = "";
+  let accumulatedReasoning = "";
   let finalResult: FeedbackDiagnoseResponse | null = null;
 
   const processFrame = (rawFrame: string) => {
@@ -122,6 +123,9 @@ async function portalDiagnoseStream(
 
     if (eventName === "status" && typeof parsed.label === "string") {
       onEvent?.({ type: "status", label: parsed.label });
+    } else if (eventName === "reasoning" && typeof parsed.text === "string") {
+      accumulatedReasoning += parsed.text;
+      onEvent?.({ type: "reasoning", text: parsed.text });
     } else if (eventName === "delta" && typeof parsed.text === "string") {
       accumulatedText += parsed.text;
       onEvent?.({ type: "delta", text: parsed.text });
@@ -163,7 +167,13 @@ async function portalDiagnoseStream(
 
   if (finalResult) return finalResult;
   if (accumulatedText.trim()) {
-    return { reply: accumulatedText.trim(), outcome: "clarify" };
+    return {
+      reply: accumulatedText.trim(),
+      outcome: "clarify",
+      ...(accumulatedReasoning.trim()
+        ? { reasoning: accumulatedReasoning.trim() }
+        : {}),
+    };
   }
   throw new PortalApiError(502, "诊断流意外结束，请重试或直接提交反馈。");
 }

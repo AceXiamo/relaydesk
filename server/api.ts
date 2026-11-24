@@ -2696,6 +2696,7 @@ export class ApiRouter {
               signal: abort.signal,
               onEvent: (ev) => {
                 if (ev.type === "status") writeSse("status", { label: ev.label });
+                else if (ev.type === "reasoning") writeSse("reasoning", { text: ev.text });
                 else if (ev.type === "delta") writeSse("delta", { text: ev.text });
               },
             },

@@ -417,6 +417,229 @@ describe("PortalFeedbackConversation UI", () => {
       container.querySelector('[data-testid="portal-turn-assistant"][data-outcome="clarify"]'),
     ).not.toBeNull();
   });
+
+  it("renders streaming and settled thinking trace and toggles reasoning visibility", async () => {
+    let resolveDiagnose!: (res: {
+      reply: string;
+      outcome: "usage";
+      reasoning: string;
+    }) => void;
+    let emitStream!: (ev: { type: "status"; label: string } | { type: "reasoning"; text: string } | { type: "delta"; text: string }) => void;
+
+    const onDiagnose = vi.fn().mockImplementation(
+      (
+        _payload: unknown,
+        _signal?: AbortSignal,
+        onEvent?: typeof emitStream,
+      ) => {
+        emitStream = onEvent!;
+        return new Promise((resolve) => {
+          resolveDiagnose = resolve;
+        });
+      },
+    );
+
+    await act(async () => {
+      root.render(
+        createElement(
+          ToastProvider,
+          null,
+          createElement(PortalFeedbackConversation, {
+            projectId: "proj-trace-test",
+            config: baseConfig,
+            stagedImages: [],
+            onUploadFiles: vi.fn(),
+            onRemoveStagedImage: vi.fn(),
+            onClearStagedImages: vi.fn(),
+            onOpenLightbox: vi.fn(),
+            onDiagnose,
+            onCreateTask: vi.fn(),
+            onSwitchToManual: vi.fn(),
+            onPossibleAuthError: () => false,
+          }),
+        ),
+      );
+    });
+
+    const input = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="portal-agent-input"]',
+    )!;
+    await act(async () => {
+      setReactValue(input, "为什么无法保存设置？");
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-agent-send"]')!
+        .click();
+    });
+
+    // Stream status & reasoning: trace auto-expands during active reasoning
+    await act(async () => {
+      emitStream({ type: "status", label: "正在查阅产品实现…" });
+      emitStream({ type: "reasoning", text: "先检查设置表单的提交状态和权限校验。" });
+    });
+
+    expect(
+      container.querySelector('[data-testid="portal-thinking-reasoning"]')?.textContent,
+    ).toContain("先检查设置表单的提交状态和权限校验。");
+
+    // Stream answer & finish: trace settles and auto-collapses
+    await act(async () => {
+      emitStream({ type: "delta", text: "请先在右上角点击保存按钮。" });
+      resolveDiagnose({
+        reply: "请先在右上角点击保存按钮。",
+        outcome: "usage",
+        reasoning: "先检查设置表单的提交状态和权限校验。",
+      });
+    });
+
+    const trace = container.querySelector('[data-testid="portal-thinking-trace"]')!;
+    expect(trace.getAttribute("data-state")).toBe("settled");
+    expect(
+      container.querySelector('[data-testid="portal-thinking-content"]'),
+    ).toBeNull();
+
+    // Clicking toggle expands the saved reasoning and steps
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-thinking-toggle"]')!
+        .click();
+    });
+    expect(
+      container.querySelector('[data-testid="portal-thinking-reasoning"]')?.textContent,
+    ).toContain("先检查设置表单的提交状态和权限校验。");
+  });
+
+  it("persists conversations across remount and supports history switching and deletion", async () => {
+    window.localStorage.clear();
+    const projectId = "proj-persist-test";
+    const onDiagnose = vi
+      .fn()
+      .mockImplementationOnce(async (_p, _s, onEvent) => {
+        onEvent?.({ type: "reasoning", text: "第一段推理链内容" });
+        return {
+          reply: "第一段助手回复",
+          outcome: "clarify" as const,
+          reasoning: "第一段推理链内容",
+        };
+      })
+      .mockImplementationOnce(async (_p, _s, onEvent) => {
+        onEvent?.({ type: "reasoning", text: "第二段推理链内容" });
+        return {
+          reply: "第二段助手回复",
+          outcome: "usage" as const,
+          reasoning: "第二段推理链内容",
+        };
+      });
+
+    const renderPortal = async () => {
+      await act(async () => {
+        root.render(
+          createElement(
+            ToastProvider,
+            null,
+            createElement(PortalFeedbackConversation, {
+              projectId,
+              config: baseConfig,
+              stagedImages: [],
+              onUploadFiles: vi.fn(),
+              onRemoveStagedImage: vi.fn(),
+              onClearStagedImages: vi.fn(),
+              onOpenLightbox: vi.fn(),
+              onDiagnose,
+              onCreateTask: vi.fn(),
+              onSwitchToManual: vi.fn(),
+              onPossibleAuthError: () => false,
+            }),
+          ),
+        );
+      });
+    };
+
+    const sendMsg = async (text: string) => {
+      const input = container.querySelector<HTMLTextAreaElement>(
+        '[data-testid="portal-agent-input"]',
+      )!;
+      await act(async () => {
+        setReactValue(input, text);
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="portal-agent-send"]')!
+          .click();
+      });
+    };
+
+    await renderPortal();
+    await sendMsg("第一次提问：导出失败");
+    expect(container.textContent).toContain("第一段助手回复");
+
+    // Unmount and remount (simulating page reload or returning to feedback center)
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await renderPortal();
+
+    // Previous conversation + thinking trace are automatically restored
+    expect(container.textContent).toContain("第一次提问：导出失败");
+    expect(container.textContent).toContain("第一段助手回复");
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-thinking-toggle"]')!
+        .click();
+    });
+    expect(
+      container.querySelector('[data-testid="portal-thinking-reasoning"]')?.textContent,
+    ).toContain("第一段推理链内容");
+
+    // Start a new conversation (preserves the first one in history)
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-new-conversation"]')!
+        .click();
+    });
+    expect(container.querySelectorAll('[data-testid="portal-turn-user"]')).toHaveLength(0);
+
+    await sendMsg("第二次提问：如何配置通知");
+    expect(container.textContent).toContain("第二段助手回复");
+
+    // Open history popover and switch back to the first conversation
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-history-toggle"]')!
+        .click();
+    });
+    const historyItems = container.querySelectorAll('[data-testid="portal-history-item"]');
+    expect(historyItems).toHaveLength(2);
+
+    const firstHistoryBtn = Array.from(historyItems)
+      .find((el) => el.textContent?.includes("第一次提问：导出失败"))!
+      .querySelector<HTMLButtonElement>("button")!;
+    await act(async () => {
+      firstHistoryBtn.click();
+    });
+
+    expect(container.textContent).toContain("第一段助手回复");
+    expect(container.textContent).not.toContain("第二段助手回复");
+
+    // Delete the active conversation from history
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-history-toggle"]')!
+        .click();
+    });
+    const activeDeleteBtn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="portal-history-item"][data-active="true"] [data-testid="portal-history-delete"]',
+    )!;
+    await act(async () => {
+      activeDeleteBtn.click();
+    });
+
+    expect(container.querySelectorAll('[data-testid="portal-history-item"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-testid="portal-turn-user"]')).toHaveLength(0);
+    window.localStorage.clear();
+  });
 });
 
 describe("FeedbackAgentSettingsCard UI", () => {

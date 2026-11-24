@@ -34,10 +34,12 @@ export interface FeedbackDiagnoseResponse {
   reply: string;
   outcome: FeedbackDiagnoseOutcome;
   draft?: FeedbackDiagnoseDraft;
+  reasoning?: string;
 }
 
 export type FeedbackDiagnoseStreamEvent =
   | { type: "status"; label: string }
+  | { type: "reasoning"; text: string }
   | { type: "delta"; text: string };
 
 export interface PortalTask {
