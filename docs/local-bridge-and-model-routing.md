@@ -55,6 +55,10 @@
 
 ## 2. 执行优先级排序、项目空间访问与工作目录（重点复盘）
 
+### Codex subagent visibility
+
+With Codex v2 collaboration, `exec --json` can report a `wait` without naming a child. Relaydesk shows the wait as a tool call and reads child activity from the current parent thread’s local rollout when available. A missing rollout does not block the chat or turn a successful wait into a successful child task. For local execution, update and restart the bridge after active runs finish: updating the web server alone does not update the parser on the machine running Codex. Earlier saved messages are not backfilled.
+
 ### Chat interruption and timeouts
 
 Sending a follow-up interrupts only the active run. The next turn starts after the previous reply and tool events have been saved. Stopping without a follow-up does not start another turn. A CLI thread is reused only on a compatible runtime, execution target and permission configuration; otherwise the next prompt uses saved conversation history.

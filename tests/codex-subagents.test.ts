@@ -43,10 +43,20 @@ describe("Codex collaboration events", () => {
   it("treats missing snapshots and unaddressed waits conservatively", () => {
     const { parser, call } = stream();
     call("empty", "wait", { receiver_thread_ids: [], agents_states: {}, status: "completed" });
-    expect(parser.state.toolEvents.size).toBe(0);
+    expect([...parser.state.toolEvents.values()]).toEqual([{ id: "empty", tool: "wait", summary: "wait", status: "done" }]);
     call("wait", "wait", { receiver_thread_ids: ["a"], status: "completed" });
     call("close", "close_agent", { agents_states: { a: { status: "interrupted" } } });
-    expect([...parser.state.toolEvents.values()]).toMatchObject([{ subagent: { status: "interrupted" } }]);
+    expect([...parser.state.toolEvents.values()].filter(e => e.subagent)).toMatchObject([{ subagent: { status: "interrupted" } }]);
+  });
+
+  it("closes a visible wait when its target only arrives at completion", () => {
+    const { parser, call } = stream();
+    parser.write('{"type":"item.started","item":{"id":"w","type":"collab_tool_call","tool":"wait","receiver_thread_ids":[]}}\n');
+    expect(parser.state.toolEvents.get("w")).toMatchObject({ tool: "wait", status: "running" });
+    call("w", "wait", { agents_states: { a: { status: "running" } } });
+    expect([...parser.state.toolEvents.values()]).toMatchObject([
+      { tool: "wait", status: "done" }, { subagent: { status: "running" } },
+    ]);
   });
 
   it("bounds task, activity, result, and id before publishing", () => {

@@ -411,7 +411,7 @@ function extractTextFromContentArray(content: unknown): string {
 const codexAgentIds = new WeakMap<StreamParseState, Map<string, string>>();
 
 function handleCodexCollab(
-  item: Record<string, unknown>, state: StreamParseState, secrets: string[],
+  item: Record<string, unknown>, eventType: string, state: StreamParseState, secrets: string[],
   emit: (ev: ChatStreamEvent) => void,
 ) {
   let agents = codexAgentIds.get(state);
@@ -429,6 +429,17 @@ function handleCodexCollab(
     ? item.receiver_thread_ids.filter((id): id is string => typeof id === "string" && !!id) : []);
   for (const id of Object.keys(snapshots)) receivers.add(id);
   if (spawn && !receivers.size && itemId) receivers.add("");
+  // An unaddressed wait is still a real tool call, not evidence of a child.
+  // Keep updating that call even if a later event supplies its targets.
+  const priorCall = state.toolEvents.get(itemId);
+  if (itemId && (!receivers.size || (priorCall && !priorCall.subagent))) {
+    const tool = clean(item.tool, 128) || "collab_tool_call";
+    upsertToolEvent(state, {
+      id: itemId, tool, summary: tool,
+      status: item.status === "failed" || item.status === "interrupted" ? "error"
+        : eventType === "item.completed" ? "done" : "running",
+    }, emit);
+  }
 
   for (const thread of receivers) {
     const id = agents.get(thread) || (spawn ? itemId : clean(`codex-agent-${thread}`, 256));
@@ -514,7 +525,7 @@ export function handleCodexJsonLine(
     const itemId = String(item.id ?? `${itemType}-${state.toolEvents.size + 1}`);
 
     if (itemType === "collab_tool_call") {
-      handleCodexCollab(item, state, secrets, emit);
+      handleCodexCollab(item, type, state, secrets, emit);
       return;
     }
 
@@ -915,7 +926,7 @@ export function createCliStreamParser(
   onEvent: (event: ChatStreamEvent) => void,
   onImage?: CliStreamImageHandler,
   lookupAttachment?: (path: string) => ChatToolImage | undefined,
-  sessionFiles?: { env: NodeJS.ProcessEnv; resumeId: string },
+  sessionFiles?: { env: NodeJS.ProcessEnv; resumeId: string; redact?: (value: string) => string },
 ) {
   let lastUsage: ChatContextUsage | undefined;
   function publish(usage: ChatContextUsage) {
@@ -925,9 +936,6 @@ export function createCliStreamParser(
   }
   const trackClaude = claudeContextTracker(publish);
   let nativeCodexSnapshot = false;
-  const rollout = runtime === "codex" && sessionFiles ? codexRolloutMonitor(sessionFiles.env, sessionFiles.resumeId, usage => {
-    if (!nativeCodexSnapshot) publish(usage);
-  }) : undefined;
   const state: StreamParseState = {
     externalSessionId: "",
     text: "",
@@ -936,6 +944,23 @@ export function createCliStreamParser(
     readAttachments: new Map(),
     errorMessage: "",
   };
+  const rollout = runtime === "codex" && sessionFiles ? codexRolloutMonitor(sessionFiles.env, sessionFiles.resumeId, usage => {
+    if (!nativeCodexSnapshot) publish(usage);
+  }, activity => {
+    const id = codexAgentIds.get(state)?.get(activity.threadId) ?? `codex-agent-${activity.threadId}`;
+    const previous = state.toolEvents.get(id);
+    const previousStatus = previous?.subagent?.status;
+    const terminal = previousStatus === "done" || previousStatus === "error" || previousStatus === "interrupted";
+    const status = terminal ? previousStatus : activity.kind === "completed" ? "done"
+      : activity.kind === "started" ? "running" : previousStatus ?? "unknown";
+    const clean = sessionFiles.redact ?? ((text: string) => redactSecrets(text, secrets));
+    const output = activity.result ? clean(activity.result).slice(0, 32768) : previous?.output;
+    upsertToolEvent(state, {
+      id, tool: "spawn_agent", summary: (activity.task && clean(activity.task).slice(0, 4096)) || previous?.summary || "Codex 子代理",
+      status: status === "done" ? "done" : status === "error" || status === "interrupted" ? "error" : "running",
+      subagent: { ...previous?.subagent, status }, ...(output ? { output } : {}),
+    }, onEvent);
+  }) : undefined;
   let remainder = "";
   const processLine = (rawLine: string) => {
     const line = rawLine.trim();

@@ -104,8 +104,47 @@ function rolloutPath(home: string, id: string): string | undefined {
   } finally { db.close(); }
 }
 
-// exec --json omits last_token_usage. Follow only the rollout identified by this child process.
-export function codexRolloutMonitor(env: NodeJS.ProcessEnv, resumeId: string, publish: (usage: ChatContextUsage) => void) {
+export type CodexRolloutActivity = { threadId: string; kind: "started" | "completed" | "message"; task?: string; result?: string };
+
+// Only decode the collaboration records absent from exec --json. Never forward raw rollout rows.
+function codexActivityTracker(publish: (activity: CodexRolloutActivity) => void) {
+  const tasks = new Map<string, string>();
+  const paths = new Map<string, string>();
+  return (type: unknown, p: Record<string, unknown>) => {
+    if (type === "response_item" && p.type === "function_call" && p.namespace === "collaboration" && p.name === "spawn_agent" &&
+        typeof p.call_id === "string" && typeof p.arguments === "string" && tasks.size < 256) {
+      try {
+        const task = record(JSON.parse(p.arguments))?.message;
+        if (typeof task === "string") tasks.set(p.call_id, task);
+      } catch { /* Unsupported arguments do not invalidate later activity. */ }
+    } else if (type === "event_msg" && p.type === "item_completed") {
+      const i = record(p.item);
+      if (i?.type !== "SubAgentActivity" || typeof i.agent_thread_id !== "string" || !uuid.test(i.agent_thread_id) ||
+          typeof i.agent_path !== "string" || !/^\/root\/[^/\r\n]{1,256}$/.test(i.agent_path)) return;
+      if (i.kind === "started" && paths.size < 256) {
+        paths.set(i.agent_path, i.agent_thread_id);
+        const task = typeof i.id === "string" ? tasks.get(i.id) : undefined;
+        if (typeof i.id === "string") tasks.delete(i.id);
+        publish({ threadId: i.agent_thread_id, kind: "started", ...(task && { task }) });
+      } else if (i.kind === "completed" && paths.get(i.agent_path) === i.agent_thread_id) {
+        publish({ threadId: i.agent_thread_id, kind: "completed" });
+      }
+    } else if (type === "response_item" && p.type === "agent_message" && p.recipient === "/root" && typeof p.author === "string") {
+      const threadId = paths.get(p.author);
+      if (!threadId || !Array.isArray(p.content) || p.content.length !== 1) return;
+      const block = record(p.content[0]);
+      if (block?.type !== "input_text" || typeof block.text !== "string") return;
+      const match = /^Message Type: FINAL_ANSWER\r?\nTask name: [^\r\n]+\r?\nSender: ([^\r\n]+)\r?\nPayload:\s*([\s\S]*)$/.exec(block.text);
+      if (match?.[1] === p.author && match[2].trim()) publish({ threadId, kind: "message", result: match[2].trim() });
+    }
+  };
+}
+
+// Follow only the rollout identified by this child process.
+export function codexRolloutMonitor(env: NodeJS.ProcessEnv, resumeId: string, publish: (usage: ChatContextUsage) => void,
+  onSubagent?: (activity: CodexRolloutActivity) => void) {
+  const activity = onSubagent && codexActivityTracker(onSubagent);
+  let turnId: unknown;
   const home = env.CODEX_HOME || (env.HOME && join(env.HOME, ".codex"));
   const since = Date.now();
   let offset = 0;
@@ -123,14 +162,21 @@ export function codexRolloutMonitor(env: NodeJS.ProcessEnv, resumeId: string, pu
     } catch { /* The CLI may create its index on demand. */ }
   }
   function processLine(line: string) {
-    if (!line.includes('"event_msg"')) return;
+    if (!line.includes('"event_msg"') && !(activity && (line.includes('"spawn_agent"') || line.includes('"agent_message"')))) return;
     let row;
-    try { row = record(JSON.parse(line)); } catch { return; }
-    if (row?.type !== "event_msg" || typeof row.timestamp !== "string" || !(Date.parse(row.timestamp) >= since)) return;
+    try { row = record(JSON.parse(Buffer.from(line, "latin1").toString("utf8"))); } catch { return; }
+    if (!row || typeof row.timestamp !== "string" || !(Date.parse(row.timestamp) >= since)) return;
     const payload = record(row.payload);
-    if (payload?.type === "task_started") turn = turn === "waiting" ? "active" : "ended";
-    if (turn !== "active") return;
-    if (payload?.type === "token_count") {
+    if (!payload) return;
+    if (row.type === "event_msg" && payload.type === "task_started") {
+      turn = turn === "waiting" ? "active" : "ended";
+      turnId = payload.turn_id;
+    }
+    if (turn !== "active" || (payload.thread_id != null && payload.thread_id !== thread) ||
+        (turnId != null && payload.turn_id != null && payload.turn_id !== turnId)) return;
+    activity?.(row.type, payload);
+    if (row.type !== "event_msg") return;
+    if (payload.type === "token_count") {
       const usage = codexContextUsage(payload.info);
       if (usage) publish(usage);
     }
@@ -150,7 +196,7 @@ export function codexRolloutMonitor(env: NodeJS.ProcessEnv, resumeId: string, pu
           const { bytesRead } = await file.read(buf, 0, Math.min(buf.length, stat.size - offset), offset);
           if (!bytesRead) break;
           offset += bytesRead;
-          // All whitelisted keys, event names and numbers are ASCII. Other contents stay local.
+          // Keep a byte-preserving partial line; decode UTF-8 only after its newline arrives.
           const parts = buf.toString("latin1", 0, bytesRead).split("\n");
           for (const [i, part] of parts.entries()) {
             if (pending.length + part.length > buf.length) skippingLine = true;

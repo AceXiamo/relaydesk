@@ -323,7 +323,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     },
     saveToolImage,
     attachedImages.lookup,
-    { env, resumeId: p.resume_session_id || "" },
+    { env, resumeId: p.resume_session_id || "", redact: clean },
   );
   if (o.signal.aborted) return { status: "aborted", content: "", events: [], externalSessionId: p.resume_session_id || "" };
   const child = spawn(bin, args, { cwd: o.cwd, env, detached: true, stdio: "pipe" });

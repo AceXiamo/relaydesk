@@ -1,0 +1,7 @@
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","namespace":"collaboration","call_id":"call-spawn","arguments":"{\"task_name\":\"color\",\"message\":\"检查颜色\"}"}}
+{"type":"event_msg","payload":{"type":"item_completed","thread_id":"c0dec000-0000-4000-8100-000000000001","turn_id":"turn-1","item":{"type":"SubAgentActivity","kind":"started","id":"call-spawn","agent_thread_id":"c0dec000-0000-4000-8100-000000000002","agent_path":"/root/color","model":"test-model","reasoning_effort":"low"}}}
+{"type":"event_msg","payload":{"type":"item_completed","thread_id":"c0dec000-0000-4000-8100-000000000001","turn_id":"turn-1","item":{"type":"SubAgentActivity","kind":"completed","id":"event-end","agent_thread_id":"c0dec000-0000-4000-8100-000000000002","agent_path":"/root/color","model":null,"reasoning_effort":null}}}
+{"type":"event_msg","payload":{"type":"item_completed","thread_id":"c0dec000-0000-4000-8100-000000000001","turn_id":"turn-1","item":{"type":"CollabAgentToolCall","tool":"wait","id":"call-wait","receiver_agents":[],"receiver_thread_ids":[],"agents_states":{},"status":"completed","sender_thread_id":"c0dec000-0000-4000-8100-000000000001"}}}
+{"type":"response_item","payload":{"type":"agent_message","author":"/root/color","recipient":"/root","content":[{"type":"input_text","text":"Message Type: FINAL_ANSWER\nTask name: /root/color\nSender: /root/color\nPayload:\n铜色"}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}

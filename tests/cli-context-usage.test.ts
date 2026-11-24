@@ -1,10 +1,11 @@
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatRuntime, ChatStreamEvent } from "../app/lib/types.ts";
 import { createCliStreamParser } from "../server/cli-stream-parser.ts";
+import { codexRolloutMonitor, type CodexRolloutActivity } from "../server/cli-context-usage.ts";
 import { runLocalChat } from "../agent/bridge/runner.ts";
 import { runWebCliChatTurn } from "../server/codex-chat.ts";
 import { Store, toAgentProject } from "../server/store.ts";
@@ -112,6 +113,36 @@ describe("Codex current context", () => {
     expect(parser.state.text).toBe("");
   });
 
+  it("matches only current-turn activities and final envelopes, including split UTF-8 on resume", async () => {
+    const home = tmp(), path = filename(home);
+    mkdirSync(dirname(path), { recursive: true });
+    index(home, path);
+    const fixture = readFileSync(new URL("./fixtures/codex-subagent-rollout.jsonl", import.meta.url), "utf8").trim().split("\n").map(l => JSON.parse(l));
+    const row = (r: unknown) => JSON.stringify({ timestamp: new Date().toISOString(), ...r as object }) + "\n";
+    const [start, spawn, active, done, wait, message, end] = fixture;
+    writeFileSync(path, fixture.map(row).join(""));
+    const result: CodexRolloutActivity[] = [];
+    const monitor = codexRolloutMonitor({ CODEX_HOME: home }, id, () => {}, e => result.push(e));
+    monitor.start(id);
+    const change = (r: typeof message, fields: object) => ({ ...r, payload: { ...r.payload, ...fields } });
+    const prefix = Buffer.from([message, start, spawn, change(active, { thread_id: other }), active, wait,
+      change(done, { item: { ...done.payload.item, kind: "unknown" } }), change(done, { turn_id: "not-this-turn" }),
+      change(message, { recipient: "/other" }), change(message, { author: "/root/unrelated" }),
+      change(message, { content: [{ type: "input_text", text: message.payload.content[0].text.replace("FINAL_ANSWER", "PROGRESS") }] }),
+      done].map(row).join(""));
+    const data = Buffer.concat([prefix, Buffer.from([message, end, ...fixture].map(row).join(""))]);
+    // Force a read between bytes of a multi-byte character in the active result.
+    const boundary = data.indexOf(Buffer.from("铜色"), prefix.length) + 1;
+    expect(boundary).toBeGreaterThan(prefix.length);
+    appendFileSync(path, data.subarray(0, boundary));
+    try {
+      await vi.waitFor(() => expect(result.map(r => r.kind)).toEqual(["started", "completed"]), { timeout: 3000 });
+      appendFileSync(path, data.subarray(boundary));
+    } finally { await monitor.finish(); }
+    expect(result).toEqual([{ threadId: other, kind: "started", task: "检查颜色" }, { threadId: other, kind: "completed" },
+      { threadId: other, kind: "message", result: "铜色" }]);
+  });
+
   it.each(["outside", "wrong-id", "symlink", "mismatched-resume", "traversal"])("rejects %s without reading its telemetry", async mode => {
     const home = tmp();
     const untrusted = mode === "wrong-id" ? filename(home, other) : filename(tmp());
@@ -134,12 +165,15 @@ it.each(["cloud", "local"])("delivers the Codex rollout snapshot from the effect
   const temp = tmp(), home = tmp(), path = filename(home);
   mkdirSync(dirname(path), { recursive: true });
   index(home, path);
+  const replay = readFileSync(new URL("./fixtures/codex-subagent-rollout.jsonl", import.meta.url), "utf8").trim().split("\n").map(line => JSON.parse(line));
   const fake = join(temp, "codex.cjs");
   writeFileSync(fake, `#!${process.execPath}\nprocess.stdin.resume(); process.stdin.on('end', () => {
     const fs = require('node:fs'), path = require('node:path');
     console.log(JSON.stringify({type:'thread.started',thread_id:${JSON.stringify(id)}}));
-    const row = payload => JSON.stringify({type:'event_msg', timestamp:new Date().toISOString(), payload})+'\\n';
-    fs.writeFileSync(path.join(process.env.CODEX_HOME, ${JSON.stringify(path.slice(home.length + 1))}), row({type:'task_started'}) + row(${JSON.stringify(token(56))}));
+    const rows = ${JSON.stringify(replay)};
+    rows.splice(1, 0, {type:'event_msg', payload:${JSON.stringify(token(56))}});
+    fs.writeFileSync(path.join(process.env.CODEX_HOME, ${JSON.stringify(path.slice(home.length + 1))}), rows.map(row => JSON.stringify({...row, timestamp:new Date().toISOString()})+'\\n').join(''));
+    console.log(JSON.stringify({type:'item.completed',item:{id:'wait',type:'collab_tool_call',tool:'wait',receiver_thread_ids:[],agents_states:{},status:'completed'}}));
     console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ok'}}));
     console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:40000}}));
   });`, { mode: 0o700 });
@@ -148,21 +182,28 @@ it.each(["cloud", "local"])("delivers the Codex rollout snapshot from the effect
   vi.stubEnv("RELAYDESK_CODEX_BIN", fake);
   const events: ChatStreamEvent[] = [];
   const shared = { prompt: "fixture", signal: new AbortController().signal, onEvent: (e: ChatStreamEvent) => events.push(e) };
+  const childSnapshot = { summary: "检查颜色", output: "铜色", subagent: { status: "done" } };
+  const expected = { status: "done", content: "ok", events: expect.arrayContaining([expect.objectContaining(childSnapshot)]) };
   if (mode === "cloud") {
     const dbPath = join(temp, "store.sqlite"), store = new Store(dbPath);
     try {
       const projectId = store.createProject({ name: "Fixture", repo: "test/test" }).id;
       const result = await runWebCliChatTurn({ ...shared, dbPath, project: toAgentProject(store.getProjectRow(projectId)),
         session: store.createChatSession(projectId), attachments: [], priorMessages: [] });
-      expect(result.status).toBe("done");
+      expect(result).toMatchObject(expected);
     } finally { store.close(); }
   } else {
     const cli = { available: true, version: "test" };
     const result = await runLocalChat({ ...shared, config: { runtimes: { codex: { bin: fake, extra_env: { CODEX_HOME: home } } } },
       catalog: { models: [], db_clients: [], runtimes: { codex: cli, claude: cli } }, homeDir: temp, cwd: temp, spaceDir: temp, allowSecrets: false,
       p: { session_id: "session", project_id: "project", run_id: "run", runtime: "codex", sandbox_mode: "read-only", prompt: shared.prompt, workspace_manifest: { files: [] } } });
-    expect(result.status).toBe("done");
+    expect(result).toMatchObject(expected);
   }
+  const tools = events.flatMap(e => e.type === "tool" ? [e.event] : []);
+  expect(tools).toContainEqual(expect.objectContaining({ tool: "wait", status: "done" }));
+  const child = tools.filter(e => e.subagent);
+  expect(new Set(child.map(e => e.id)).size).toBe(1);
+  expect(child.at(-1)).toMatchObject({ summary: "检查颜色", output: "铜色", subagent: { status: "done" } });
   expect(events.filter(e => e.type === "context_usage")).toEqual([{ type: "context_usage", usage: { used_tokens: 56, window_tokens: 258400 } }]);
   expect(JSON.stringify(events)).not.toContain("private-rollout-content");
 });
