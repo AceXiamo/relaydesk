@@ -77,6 +77,24 @@ describe("project chat streams", () => {
     await Promise.all([second, third]);
   });
 
+  it("keeps parallel subagents independent across repeated frames and an aborted turn", async () => {
+    const { streams, requests } = fixture();
+    const s = session("p", "s");
+    const pending = streams.send(s, "delegate", []);
+    const req = requests.get("p/s")!;
+    const first = { id: "a", tool: "Agent", summary: "Inspect A", status: "running", subagent: { status: "running" } } as const;
+    const second = { ...first, id: "b", summary: "Inspect B" };
+    const failed = { ...second, status: "error", subagent: { status: "error", activity: "Checking B" }, output: "B failed" } as const;
+    for (const event of [first, second, failed, failed]) req.emit({ type: "tool", event });
+    const live = streams.snapshot().get(s.id)!.assistant;
+    expect(live.events).toEqual([first, failed]);
+    const saved = { ...live, status: "aborted" as const };
+    req.emit({ type: "done", session: s, message: saved });
+    req.end();
+    await pending;
+    expect(streams.snapshot().get(s.id)?.assistant.events).toEqual(live.events);
+  });
+
   it.each(["done", "aborted"] as const)("hands off exactly once on saved %s, before old EOF or abort ACK", async status => {
     const { streams, transport, requests } = fixture();
     const a = session("p", "a");

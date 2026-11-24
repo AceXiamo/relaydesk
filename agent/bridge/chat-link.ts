@@ -24,6 +24,7 @@ export class ChatLink {
   private readonly receipt = latch();
   private available = latch();
   private text = "";
+  private subagents = new Map<string, Extract<ChatStreamEvent, { type: "tool" }>>();
   private thread?: string;
   private usage?: Extract<ChatStreamEvent, { type: "context_usage" }>;
   private readonly graceMs: number;
@@ -36,6 +37,9 @@ export class ChatLink {
   event(event: ChatStreamEvent) {
     if (this.settled) return;
     if (event.type === "context_usage") this.usage = event;
+    if (event.type === "tool" && event.event.subagent && (this.subagents.has(event.event.id) || this.subagents.size < 1000)) {
+      this.subagents.set(event.event.id, event);
+    }
     if (event.type === "text_delta") this.text = (this.text + event.delta).slice(0, 120_000);
     if (event.type === "text_replace") this.text = event.text.slice(0, 120_000);
     if (event.type === "status" && event.external_session_id !== undefined) this.thread = event.external_session_id;
@@ -57,6 +61,7 @@ export class ChatLink {
     if (this.terminal) this.sendTerminal();
     else {
       transport.emit({ type: "text_replace", text: this.text });
+      for (const snapshot of this.subagents.values()) transport.emit(snapshot);
       if (this.thread !== undefined) transport.emit({ type: "status", message: "已接回本机 CLI 会话", external_session_id: this.thread });
     }
   }

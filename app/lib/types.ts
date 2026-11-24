@@ -624,6 +624,10 @@ export interface ChatToolEvent {
   output?: string;
   exit_code?: number | null;
   images?: ChatToolImage[];
+  subagent?: {
+    status: "unknown" | "running" | "done" | "error" | "interrupted";
+    activity?: string;
+  };
 }
 
 export type ChatSessionKind = "chat" | "task" | "release";

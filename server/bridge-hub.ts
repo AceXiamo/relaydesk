@@ -73,7 +73,8 @@ type Payload = z.infer<typeof frame>["payload"];
 const toolImage = z.object({ url: text(2048), alt: text(256).optional() });
 const tool = z.object({ id: text(256), tool: text(128), summary: text(4096), status: z.enum(["running", "done", "error"]),
   output: text(32_768).optional(), exit_code: z.number().int().nullable().optional(),
-  images: z.array(toolImage).max(4).optional() });
+  images: z.array(toolImage).max(4).optional(),
+  subagent: z.object({ status: z.enum(["unknown", "running", "done", "error", "interrupted"]), activity: text(4096).optional() }).optional() });
 const contextUsageFrame = z.object({ type: z.literal("context_usage"), usage: z.object({
   used_tokens: z.number().int().nonnegative(), window_tokens: z.number().int().positive().optional(),
 }) });

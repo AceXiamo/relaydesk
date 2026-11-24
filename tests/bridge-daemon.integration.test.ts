@@ -2,6 +2,7 @@ import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, readdirSyn
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Duplex } from "node:stream";
+import type { ChatStreamEvent, ChatToolEvent } from "../app/lib/types.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startBridgeDaemon, type BridgeDaemonOptions } from "../agent/bridge/index.ts";
 import { buildWorkspaceManifest, getProjectFilesDir } from "../server/workspace.ts";
@@ -303,6 +304,31 @@ describe("real bridge daemon + HTTP chat", () => {
       expect(args.includes("resume")).toBe(mode !== "on");
       expect(args.filter(arg => arg.startsWith("service_tier="))).toEqual(tier ? [`service_tier="${tier}"`] : []);
     }
+  });
+
+  it.each(["codex", "claude"] as const)("preserves %s subagent snapshots from stdout through both transports and history", async runtime => {
+    const { id, p } = await start();
+    const bin = join(f.root, "fake-codex.mjs");
+    const replay = readFileSync(new URL(`./fixtures/${runtime}-subagents.jsonl`, import.meta.url), "utf8");
+    writeFileSync(bin, `#!/usr/bin/env node\nif (process.argv.some(a => ['--version','--help','-v'].includes(a))) console.log('fixture');\nelse { for await (const _ of process.stdin) {} process.stdout.write(${JSON.stringify(replay)}); }`);
+    vi.stubEnv(runtime === "codex" ? "RELAYDESK_CODEX_BIN" : "RELAYDESK_CLAUDE_BIN", bin);
+    const histories: ChatToolEvent[][] = [];
+    for (const target of ["cloud", `local:${id}`]) {
+      const s = await f.session(p, id);
+      await f.ok(s.path, "PATCH", { runtime, execution_target: target });
+      const frames = (await (await s.turn("Replay subagent activity")).text()).split("\n")
+        .filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)) as ChatStreamEvent);
+      const live = new Map<string, ChatToolEvent>();
+      for (const frame of frames) if (frame.type === "tool" && frame.event.subagent) live.set(frame.event.id, frame.event);
+      expect(live.size, `${runtime} on ${target}`).toBe(runtime === "claude" ? 2 : 1);
+      const detail = await s.detail();
+      expect(detail.session.resolved_target).toBe(target);
+      const saved = detail.messages.at(-1);
+      expect(saved.status).toBe("done");
+      expect(saved.events.filter((e: { subagent?: unknown }) => e.subagent)).toEqual([...live.values()]);
+      histories.push([...live.values()]);
+    }
+    expect(histories[1]).toEqual(histories[0]);
   });
 
   it("normalizes a local Claude stream and keeps its read-only tool set", async () => {

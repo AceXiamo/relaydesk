@@ -33,6 +33,22 @@ it("restores the whole text snapshot without replaying an RPC that may have alre
   link.cancel();
 });
 
+it("replays only the latest snapshot of each subagent after reconnect", () => {
+  const first = transport(), next = transport();
+  const link = new ChatLink(first, 1000, new AbortController());
+  const running = { id: "a", tool: "Agent", summary: "inspect", status: "running", subagent: { status: "running" } } as const;
+  link.event({ type: "tool", event: running });
+  link.detach();
+  const done = { ...running, status: "done", subagent: { status: "done" }, output: "result" } as const;
+  link.event({ type: "tool", event: done });
+  link.event({ type: "tool", event: { ...running, id: "b" } });
+  link.attach(next);
+  expect(next.emit.mock.calls.map(([event]) => event)).toEqual([
+    { type: "text_replace", text: "" }, { type: "tool", event: done }, { type: "tool", event: { ...running, id: "b" } },
+  ]);
+  link.cancel();
+});
+
 it("releases pending calls and kills the child when the grace expires", async () => {
   vi.useFakeTimers();
   try {

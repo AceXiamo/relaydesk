@@ -93,11 +93,14 @@ setInterval(() => {}, 2000);
     emit({ type: "text_replace", text: "received fix" });
     emit({ type: "text_delta", delta: "ture-secret!" });
     for (const status of ["running", "done"] as const) emit({ type: "tool", event: { id: "t", tool: "read", status, summary: "read file" } });
+    emit({ type: "tool", event: { id: "child", tool: "Agent", summary: "inspect", status: "running",
+      subagent: { status: "running", activity: "checking fixture-secret" } } });
     const barrier = conn.send("workspace.fetch", { project_id: projectId, path: "HANDBOOK.md" });
     await conn.next("workspace.fetch.result", barrier);
     if (cause === "abort") controller.abort();
     if (cause === "disconnect") conn.ws.terminate();
     expect(await turn).toMatchObject({ status: cause === "abort" ? "aborted" : "error", ...(cause.endsWith("timeout") && { stopReason: cause }),
-      content: "received [redacted]!", externalSessionId: "first-thread", events: [{ id: "t", status: "done" }] });
+      content: "received [redacted]!", externalSessionId: "first-thread", events: [{ id: "t", status: "done" },
+        { id: "child", subagent: { status: "running", activity: "checking [redacted]" } }] });
   });
 });
