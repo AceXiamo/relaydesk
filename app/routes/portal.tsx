@@ -1054,6 +1054,25 @@ function PortalContent() {
     [mineTasks],
   );
 
+  const pendingMineTasks = useMemo(
+    () =>
+      mineTasks.filter(
+        (t) => t.can_reply || t.can_accept || t.can_request_deploy,
+      ),
+    [mineTasks],
+  );
+
+  const recentShippedTasks = useMemo(() => {
+    const pool = config?.can_view_team && teamTasks.length > 0 ? teamTasks : mineTasks;
+    const shipped = pool.filter(
+      (t) => t.status_label === "已上线" || t.status_label === "已确认解决",
+    );
+    return {
+      scope: (config?.can_view_team && teamTasks.length > 0 ? "team" : "mine") as "mine" | "team",
+      items: shipped.slice(0, 4),
+    };
+  }, [config?.can_view_team, mineTasks, teamTasks]);
+
   const returningPreviewTasks = useMemo(() => {
     if (mineTasks.length === 0) return [];
     const prioritized = [...mineTasks].sort((a, b) => {
@@ -1168,71 +1187,119 @@ function PortalContent() {
 
   return (
     <div className="rd-portal-shell min-h-dvh bg-[var(--p-page)] text-[var(--p-ink)]">
-      {/* Framed Architectural Canvas (Beautiful UI-inspired hairline rails + dashed dividers) */}
-      <div className="relative mx-auto max-w-[920px] min-h-dvh bg-[var(--p-page)] shadow-[0_0_0_1px_var(--p-line)] flex flex-col">
-        {/* Un-stuck Editorial Masthead (no sticky admin chrome) */}
-        <header className="border-b border-dashed border-[var(--p-line)] px-5 sm:px-9 py-5">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            {/* Brand / Project Identity */}
-            <button
-              type="button"
-              onClick={() => {
-                setTab("submit");
-                setSelectedTaskId(null);
-              }}
-              className="group inline-flex items-center gap-3 min-w-0 text-left cursor-pointer"
-            >
-              {/* Minimalist 3x3 Dot Grid Mark */}
-              <span
-                aria-hidden="true"
-                className="w-8 h-8 rounded-[9px] bg-[var(--p-surface)] shadow-[var(--p-shadow-btn)] grid grid-cols-3 place-items-center p-1.5 shrink-0 transition-transform duration-150 group-hover:scale-[1.04]"
+      {/* Compact 3-Column Architectural Shell */}
+      <div className="relative mx-auto max-w-[1260px] min-h-dvh bg-[var(--p-page)] shadow-[0_0_0_1px_var(--p-line)] flex flex-col">
+        {/* Single-Row Dense Header */}
+        <header className="border-b border-[var(--p-line)] px-4 sm:px-5 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            {/* Left: Brand + Inline Tabs */}
+            <div className="flex flex-wrap items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setTab("submit");
+                  setSelectedTaskId(null);
+                }}
+                className="group inline-flex items-center gap-2 min-w-0 text-left cursor-pointer"
               >
-                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
-                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-cobalt)]" />
-                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
-                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-forest)]" />
-                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
-                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-vermilion)]" />
-                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
-                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
-                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
-              </span>
+                <span
+                  aria-hidden="true"
+                  className="w-5.5 h-5.5 rounded-[6px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] grid grid-cols-3 place-items-center p-1 shrink-0 transition-transform duration-150 group-hover:scale-[1.04]"
+                >
+                  <span className="w-[2.5px] h-[2.5px] rounded-[0.5px] bg-[var(--p-ink)]" />
+                  <span className="w-[2.5px] h-[2.5px] rounded-[0.5px] bg-[var(--p-cobalt)]" />
+                  <span className="w-[2.5px] h-[2.5px] rounded-[0.5px] bg-[var(--p-ink)]" />
+                  <span className="w-[2.5px] h-[2.5px] rounded-[0.5px] bg-[var(--p-forest)]" />
+                  <span className="w-[2.5px] h-[2.5px] rounded-[0.5px] bg-[var(--p-ink)]" />
+                  <span className="w-[2.5px] h-[2.5px] rounded-[0.5px] bg-[var(--p-vermilion)]" />
+                  <span className="w-[2.5px] h-[2.5px] rounded-[0.5px] bg-[var(--p-ink)]" />
+                  <span className="w-[2.5px] h-[2.5px] rounded-[0.5px] bg-[var(--p-ink)]" />
+                  <span className="w-[2.5px] h-[2.5px] rounded-[0.5px] bg-[var(--p-ink)]" />
+                </span>
 
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h1 className="text-[15px] font-semibold tracking-[-0.02em] text-[var(--p-ink)] truncate">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <h1 className="text-[13px] font-semibold tracking-[-0.02em] text-[var(--p-ink)] truncate">
                     {config.project_name}
                   </h1>
-                  <span className="text-[var(--p-line-strong)]">/</span>
-                  <span className="font-mono text-[11.5px] text-[var(--p-ink-3)] shrink-0">
+                  <span className="text-[var(--p-line-strong)] text-[11px]">/</span>
+                  <span className="font-mono text-[10.5px] text-[var(--p-ink-3)] shrink-0">
                     反馈中心
                   </span>
                 </div>
-              </div>
-            </button>
+              </button>
 
-            {/* Right Controls: Identity + Sliding Pill Theme Toggle */}
-            <div className="flex items-center gap-2.5 shrink-0">
+              <span className="hidden sm:inline-block h-3.5 w-px bg-[var(--p-line)]" />
+
+              <nav
+                role="tablist"
+                aria-label="反馈面板导航"
+                className="flex items-center gap-1"
+              >
+                {navTabs.map((item) => {
+                  const active = tab === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => {
+                        setTab(item.id);
+                        setSelectedTaskId(null);
+                      }}
+                      className={cn(
+                        "inline-flex items-center gap-1 h-6.5 px-2.5 rounded-[6px] text-[11.5px] font-medium transition-all duration-150 cursor-pointer select-none",
+                        active
+                          ? "bg-[var(--p-ink)] text-[var(--p-page)]"
+                          : "text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)]",
+                      )}
+                    >
+                      <span>{item.label}</span>
+                      {item.badge !== undefined && (
+                        <span
+                          className={cn(
+                            "inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 rounded-[4px] text-[10px] font-mono tabular-nums",
+                            active
+                              ? "bg-white/20 text-[var(--p-page)] dark:bg-black/20"
+                              : "bg-[var(--p-field)] text-[var(--p-ink-2)]",
+                          )}
+                        >
+                          {item.badge}
+                        </span>
+                      )}
+                      {item.alert && (
+                        <span
+                          aria-label="有待处理工单"
+                          className="w-1.5 h-1.5 rounded-full bg-[var(--p-vermilion)] shrink-0"
+                        />
+                      )}
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+
+            {/* Right: Compact Identity + Theme Switch */}
+            <div className="flex items-center gap-1.5 shrink-0">
               <div
                 title={`当前授权身份：${config.label}`}
-                className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-[var(--p-field)] text-[12px] font-medium text-[var(--p-ink-2)] max-w-[160px]"
+                className="inline-flex items-center gap-1.5 h-6 px-2 rounded-[5px] bg-[var(--p-field)] text-[11px] font-medium text-[var(--p-ink-2)] max-w-[130px]"
               >
                 <LivePulseDot tone="emerald" active />
                 <span className="truncate">{config.label}</span>
               </div>
 
-              {/* Beautiful UI-style 2-cell sliding pill theme switch */}
               <button
                 type="button"
                 onClick={toggleTheme}
                 aria-label={dark ? "切换浅色主题" : "切换深色主题"}
-                className="relative inline-grid h-8 w-15 grid-cols-2 items-center rounded-full bg-[var(--p-field)] p-0.5 cursor-pointer"
+                className="relative inline-grid h-6 w-11 grid-cols-2 items-center rounded-[5px] bg-[var(--p-field)] p-0.5 cursor-pointer"
               >
                 <span
                   aria-hidden="true"
                   className={cn(
-                    "absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-[var(--p-surface)] shadow-[var(--p-shadow-btn)] transition-transform duration-200 ease-[cubic-bezier(0.23,1,0.32,1)]",
-                    dark ? "translate-x-7" : "translate-x-0",
+                    "absolute inset-y-0.5 left-0.5 w-5 rounded-[4px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] transition-transform duration-200 ease-[cubic-bezier(0.23,1,0.32,1)]",
+                    dark ? "translate-x-5" : "translate-x-0",
                   )}
                 />
                 <span
@@ -1241,7 +1308,7 @@ function PortalContent() {
                     !dark ? "text-[var(--p-ink)]" : "text-[var(--p-ink-3)]",
                   )}
                 >
-                  <Icon name="sun" size={13} />
+                  <Icon name="sun" size={11} />
                 </span>
                 <span
                   className={cn(
@@ -1249,496 +1316,543 @@ function PortalContent() {
                     dark ? "text-[var(--p-ink)]" : "text-[var(--p-ink-3)]",
                   )}
                 >
-                  <Icon name="moon" size={13} />
+                  <Icon name="moon" size={11} />
                 </span>
               </button>
             </div>
           </div>
-
-          {/* Lightweight Editorial View Switcher */}
-          <nav
-            role="tablist"
-            aria-label="反馈面板导航"
-            className="mt-4 pt-3.5 border-t border-dashed border-[var(--p-line)]/80 flex flex-wrap items-center gap-1.5"
-          >
-            {navTabs.map((item) => {
-              const active = tab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => {
-                    setTab(item.id);
-                    setSelectedTaskId(null);
-                  }}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 h-8 px-3.5 rounded-full text-[12.5px] font-medium transition-all duration-150 cursor-pointer select-none",
-                    active
-                      ? "bg-[var(--p-ink)] text-[var(--p-page)] shadow-xs"
-                      : "text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)]",
-                  )}
-                >
-                  <span>{item.label}</span>
-                  {item.badge !== undefined && (
-                    <span
-                      className={cn(
-                        "inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full text-[10.5px] font-mono tabular-nums",
-                        active
-                          ? "bg-white/20 text-[var(--p-page)] dark:bg-black/20"
-                          : "bg-[var(--p-field)] text-[var(--p-ink-2)]",
-                      )}
-                    >
-                      {item.badge}
-                    </span>
-                  )}
-                  {item.alert && (
-                    <span
-                      aria-label="有待处理工单"
-                      className="w-1.5 h-1.5 rounded-full bg-[var(--p-vermilion)] shrink-0"
-                    />
-                  )}
-                </button>
-              );
-            })}
-          </nav>
         </header>
 
-        {/* Main Content Canvas */}
-        <main className="flex-1 w-full">
-          {/* ── TAB 1: EXPRESS FEEDBACK (HERO + COMPOSER + RETURNING PROGRESS DOCK) ── */}
-          {tab === "submit" && (
-            <div className="animate-rd-portal-in">
-              <div className="px-5 sm:px-9 py-9 sm:py-13">
-                {submittedDetail ? (
-                  <section className="rd-portal-dots rounded-[20px] bg-[var(--p-canvas)] p-3 sm:p-4 shadow-[var(--p-shadow-hairline)] animate-rd-portal-in">
-                    <div className="rounded-[14px] bg-[var(--p-surface)] p-6 sm:p-8 shadow-[var(--p-shadow-card)] space-y-6">
-                      <div className="flex items-start gap-4">
-                        <div className="w-11 h-11 rounded-[12px] bg-[var(--p-forest-tint)] text-[var(--p-forest)] flex items-center justify-center shrink-0 animate-rd-step-pop">
-                          <Icon name="check-circle-2" size={22} />
-                        </div>
-                        <div className="min-w-0 space-y-2">
-                          <div className="flex flex-wrap items-center gap-2.5">
-                            <h2 className="text-[20px] font-semibold tracking-[-0.025em] text-[var(--p-ink)]">
-                              反馈已收到，正在跟进处理
-                            </h2>
-                            <CopyButton
-                              value={submittedDetail.task.code}
-                              label={submittedDetail.task.code}
-                              copiedLabel="已复制编号"
-                              size="xs"
-                              variant="secondary"
-                            />
-                          </div>
-                          <p className="text-[14.5px] font-medium text-[var(--p-ink)]">
-                            {submittedDetail.task.title}
-                          </p>
-                          <p className="text-[13px] leading-relaxed text-[var(--p-ink-2)]">
-                            你可以随时在「我的反馈」查看排查修复与上线进度，回复团队追问或在线确认解决。
-                          </p>
-                        </div>
-                      </div>
+        {/* 3-Column Body: Left (My Progress) + Center (Chat / Feed / Detail) + Right (Service & Shipped) */}
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[236px_minmax(0,1fr)] xl:grid-cols-[236px_minmax(0,1fr)_248px]">
+          {/* ── LEFT RAIL: Actionable & Recent My Feedback ── */}
+          <aside
+            aria-label="我的反馈动态"
+            className="hidden lg:flex flex-col border-r border-[var(--p-line)] bg-[var(--p-page)] p-3.5 space-y-4"
+          >
+            {/* Pending actions for the user */}
+            {pendingMineTasks.length > 0 && (
+              <section className="space-y-2">
+                <div className="flex items-center justify-between gap-2 px-1">
+                  <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] font-medium uppercase tracking-[0.04em] text-[var(--p-ink-2)]">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--p-vermilion)]" />
+                    <span>待你处理</span>
+                  </span>
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded-[4px] bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] tabular-nums">
+                    {pendingMineTasks.length}
+                  </span>
+                </div>
 
-                      <div className="flex flex-wrap items-center justify-end gap-2.5 pt-4 border-t border-dashed border-[var(--p-line)]">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSubmittedDetail(null);
-                            if (agentEnabled) setSubmitMode("agent");
-                          }}
-                          className="inline-flex items-center gap-1.5 h-9 px-4 rounded-full bg-[var(--p-field)] text-[13px] font-medium text-[var(--p-ink)] shadow-[var(--p-shadow-btn)] hover:bg-[var(--p-hover)] transition-all active:scale-[0.97] cursor-pointer"
-                        >
-                          <Icon name="plus" size={14} />
-                          <span>继续反馈</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const targetId = submittedDetail.task.id;
-                            setSubmittedDetail(null);
-                            openTaskStory(targetId, "mine");
-                          }}
-                          className="inline-flex items-center gap-1.5 h-9 px-4.5 rounded-full bg-[var(--p-ink)] text-[var(--p-page)] text-[13px] font-medium hover:opacity-90 transition-all active:scale-[0.97] cursor-pointer shadow-xs"
-                        >
-                          <span>查看处理进度</span>
-                          <Icon name="arrow-right" size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  </section>
-                ) : agentOnline && submitMode === "agent" ? (
-                  <PortalFeedbackConversation
-                    config={config}
-                    stagedImages={images}
-                    onUploadFiles={uploadFiles}
-                    onRemoveStagedImage={removeImage}
-                    onClearStagedImages={clearStagedImages}
-                    onOpenLightbox={(src) => setLightboxSrc(src)}
-                    onDiagnose={portalApi.diagnose}
-                    onCreateTask={handleCreateFromConversation}
-                    onSwitchToManual={handleSwitchToManual}
-                    onRefreshConfig={handleRecheckAvailability}
-                    onPossibleAuthError={handlePossibleAuthError}
-                    onConversationActiveChange={setConversationActive}
-                  />
-                ) : agentOffline && submitMode === "agent" ? (
-                  <section
-                    data-testid="portal-agent-offline"
-                    className="space-y-7 animate-rd-portal-in"
-                  >
-                    <div className="space-y-4">
-                      <div className="flex items-center gap-2.5 text-[12px]">
-                        <span className="font-mono text-[11.5px] text-[var(--p-ink-3)] tabular-nums">
-                          01
-                        </span>
-                        <span className="text-[var(--p-line-strong)]">/</span>
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] text-[11.5px] font-medium">
-                          <LivePulseDot tone="amber" active={false} />
-                          <span>诊断节点暂离线</span>
-                        </span>
-                      </div>
-                      <h2 className="text-[28px] sm:text-[36px] font-semibold tracking-[-0.035em] leading-[1.14] text-[var(--p-ink)] text-balance">
-                        反馈诊断助手暂时离线，你仍可直接留言
-                      </h2>
-                      <p className="text-[14.5px] leading-relaxed text-[var(--p-ink-2)] max-w-[540px]">
-                        项目维护者的本地诊断节点暂时未在线。你可以稍后重新检测，或直接填写反馈进入处理队列。
-                      </p>
-                    </div>
-
-                    <div className="rd-portal-dots rounded-[20px] bg-[var(--p-canvas)] p-6 sm:p-8 shadow-[var(--p-shadow-hairline)] flex flex-wrap items-center justify-between gap-4">
-                      <div className="flex items-center gap-3.5 min-w-0">
-                        <div className="w-11 h-11 rounded-[12px] bg-[var(--p-surface)] text-[var(--p-vermilion)] shadow-[var(--p-shadow-card)] flex items-center justify-center shrink-0">
-                          <Icon name="wifi-off" size={20} />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-[14px] font-semibold text-[var(--p-ink)]">
-                            直接提交反馈单
-                          </div>
-                          <p className="text-[12.5px] text-[var(--p-ink-3)]">
-                            填写现象并附带截图，提交后即可实时追踪处理进度
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2.5">
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="sm"
-                          icon="refresh-cw"
-                          loading={recheckingConfig}
-                          onClick={() => void handleRecheckAvailability()}
-                        >
-                          重新检测状态
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="primary"
-                          size="sm"
-                          icon="pen-line"
-                          data-testid="portal-offline-to-manual"
-                          onClick={() => setSubmitMode("manual")}
-                        >
-                          直接填写反馈单
-                        </Button>
-                      </div>
-                    </div>
-                  </section>
-                ) : (
-                  <div className="space-y-8 animate-rd-portal-in">
-                    {/* Bold Editorial Hero for Direct Feedback */}
-                    <div className="space-y-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div className="flex flex-wrap items-center gap-2.5 text-[12px]">
-                          <span className="font-mono text-[11.5px] font-medium text-[var(--p-ink-3)] tabular-nums">
-                            01
-                          </span>
-                          <span className="text-[var(--p-line-strong)]">/</span>
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] text-[11.5px] font-medium">
-                            <span>直接提单模式 · 提交即建单</span>
-                          </span>
-                          {config.release_window && (
-                            <span className="hidden sm:inline-flex items-center gap-1 text-[11.5px] text-[var(--p-ink-3)]">
-                              <Icon name="calendar-clock" size={12} />
-                              <span>发布窗口 {config.release_window}</span>
-                            </span>
-                          )}
-                        </div>
-
-                        {agentOnline && (
-                          <button
-                            type="button"
-                            data-testid="portal-switch-agent"
-                            onClick={() => setSubmitMode("agent")}
-                            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-[var(--p-field)] text-[12px] font-medium text-[var(--p-ink)] shadow-[var(--p-shadow-btn)] hover:bg-[var(--p-hover)] transition-all active:scale-[0.97] cursor-pointer"
-                          >
-                            <Icon name="sparkles" size={13} className="text-[var(--p-cobalt)]" />
-                            <span>返回 AI 诊断对话</span>
-                          </button>
-                        )}
-                        {agentOffline && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="xs"
-                            icon="refresh-cw"
-                            loading={recheckingConfig}
-                            onClick={() => {
-                              setSubmitMode("agent");
-                              void handleRecheckAvailability();
-                            }}
-                          >
-                            检测助手是否上线
-                          </Button>
-                        )}
-                      </div>
-
-                      <h2 className="text-[30px] sm:text-[40px] font-semibold tracking-[-0.035em] leading-[1.12] text-[var(--p-ink)] text-balance">
-                        {agentEnabled
-                          ? "直接写下你的反馈"
-                          : `有什么想告诉 ${config.project_name} 的？`}
-                      </h2>
-                      <p className="text-[14.5px] sm:text-[15.5px] leading-relaxed text-[var(--p-ink-2)] max-w-[560px]">
-                        {agentEnabled
-                          ? "跳过对话排查，直接提交工单进入项目处理队列，支持粘贴或拖入截图。"
-                          : "描述你遇到的问题、建议或使用疑问，提交后将进入处理队列并可随时回来查看进度。"}
-                      </p>
-                    </div>
-
-                    {/* Recessed Dotted Showcase Well wrapping the Form */}
-                    <div className="rd-portal-dots rounded-[20px] bg-[var(--p-canvas)] p-2.5 sm:p-4 shadow-[var(--p-shadow-hairline)]">
-                      <form
-                        data-testid="portal-manual-form"
-                        onSubmit={(e) => void handleSubmitFeedback(e)}
-                        onDragOver={(e) => {
-                          e.preventDefault();
-                          setDragOver(true);
-                        }}
-                        onDragLeave={() => setDragOver(false)}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          setDragOver(false);
-                          if (e.dataTransfer?.files?.length) {
-                            void uploadFiles(e.dataTransfer.files);
+                <div className="space-y-1.5">
+                  {pendingMineTasks.slice(0, 3).map((t) => {
+                    const actionMeta = t.can_reply
+                      ? {
+                          label: "待补充",
+                          cls: "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]",
+                        }
+                      : t.can_accept
+                        ? {
+                            label: "待验收",
+                            cls: "bg-[var(--p-forest-tint)] text-[var(--p-forest)]",
                           }
-                        }}
+                        : {
+                            label: "可提前发",
+                            cls: "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)]",
+                          };
+                    const active = tab === "mine" && selectedTaskId === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => openTaskStory(t.id, "mine")}
                         className={cn(
-                          "rounded-[14px] bg-[var(--p-surface)] overflow-hidden transition-all duration-200",
-                          dragOver
-                            ? "shadow-[0_0_0_2px_var(--p-cobalt),var(--p-shadow-composer)]"
-                            : "shadow-[var(--p-shadow-composer)]",
+                          "w-full text-left rounded-[7px] px-2.5 py-2 transition-all cursor-pointer space-y-1",
+                          active
+                            ? "bg-[var(--p-surface)] shadow-[0_0_0_1px_var(--p-cobalt)]"
+                            : "bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] hover:bg-[var(--p-hover)]/60",
                         )}
                       >
-                        <div className="p-5 sm:p-6 space-y-5">
-                          {/* Type selector pills */}
-                          <div className="space-y-2">
-                            <span className="block text-[12px] font-medium text-[var(--p-ink-2)]">
-                              反馈类型
-                            </span>
-                            <div className="grid grid-cols-3 gap-2.5">
-                              {FEEDBACK_TYPES.map((item) => {
-                                const active = feedbackType === item.id;
-                                const activeTone =
-                                  item.tone === "rose"
-                                    ? "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] shadow-[0_0_0_1.5px_var(--p-vermilion)]"
-                                    : item.tone === "amber"
-                                      ? "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] shadow-[0_0_0_1.5px_var(--p-cobalt)]"
-                                      : "bg-[var(--p-forest-tint)] text-[var(--p-forest)] shadow-[0_0_0_1.5px_var(--p-forest)]";
-                                return (
-                                  <button
-                                    key={item.id}
-                                    type="button"
-                                    aria-pressed={active}
-                                    onClick={() => setFeedbackType(item.id)}
-                                    className={cn(
-                                      "flex items-center justify-center gap-1.5 h-10 px-3 rounded-[10px] text-[13px] font-medium transition-all duration-150 cursor-pointer",
-                                      active
-                                        ? activeTone
-                                        : "bg-[var(--p-page)] text-[var(--p-ink-2)] shadow-[var(--p-shadow-hairline)] hover:bg-[var(--p-hover)] hover:text-[var(--p-ink)]",
-                                    )}
-                                  >
-                                    <Icon name={item.icon} size={14} />
-                                    <span>{item.label}</span>
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-
-                          {/* Title input */}
-                          <label className="block space-y-1.5">
-                            <span className="text-[12px] font-medium text-[var(--p-ink-2)]">
-                              简要标题（可选）
-                            </span>
-                            <input
-                              type="text"
-                              maxLength={180}
-                              value={title}
-                              onChange={(e) => setTitle(e.target.value)}
-                              placeholder="一句话概括现象或建议，留空将自动从正文首行提取"
-                              className="w-full h-10.5 px-3.5 rounded-[10px] bg-[var(--p-page)] shadow-[var(--p-shadow-hairline)] text-[14px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)] transition-all"
-                            />
-                          </label>
-
-                          {/* Body textarea */}
-                          <div className="space-y-1.5">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[12px] font-medium text-[var(--p-ink-2)]">
-                                详细描述 <span className="text-[var(--p-vermilion)]">*</span>
-                              </span>
-                              <span className="text-[11px] font-mono text-[var(--p-ink-3)] tabular-nums">
-                                {body.length} / 20000
-                              </span>
-                            </div>
-                            <textarea
-                              required
-                              rows={5}
-                              maxLength={20000}
-                              value={body}
-                              onChange={(e) => setBody(e.target.value)}
-                              onPaste={(e) => {
-                                const files = e.clipboardData?.files;
-                                if (files && files.length > 0) {
-                                  const hasImg = Array.from(files).some((f) =>
-                                    f.type.startsWith("image/"),
-                                  );
-                                  if (hasImg) {
-                                    e.preventDefault();
-                                    void uploadFiles(files);
-                                  }
-                                }
-                              }}
-                              placeholder="请描述具体现象、复现步骤或期望效果（支持直接粘贴或拖入截图）…"
-                              className="w-full rounded-[10px] bg-[var(--p-page)] shadow-[var(--p-shadow-hairline)] p-3.5 text-[14px] leading-relaxed text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)] transition-all resize-y"
-                            />
-
-                            {/* Toolbar: Upload */}
-                            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                              <div className="flex items-center gap-2">
-                                <input
-                                  ref={fileInputRef}
-                                  type="file"
-                                  accept="image/*"
-                                  multiple
-                                  className="hidden"
-                                  onChange={(e) => {
-                                    if (e.target.files?.length) {
-                                      void uploadFiles(e.target.files);
-                                      e.target.value = "";
-                                    }
-                                  }}
-                                />
-                                <button
-                                  type="button"
-                                  disabled={!config.upload_enabled || images.length >= 6}
-                                  onClick={() => fileInputRef.current?.click()}
-                                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-[var(--p-field)] text-[12px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors disabled:opacity-45 cursor-pointer"
-                                >
-                                  <Icon name="image" size={13.5} />
-                                  <span>
-                                    {config.upload_enabled
-                                      ? `上传截图 (${images.length}/6)`
-                                      : "图床未配置"}
-                                  </span>
-                                </button>
-                              </div>
-                              <span className="text-[11.5px] text-[var(--p-ink-3)]">
-                                支持 Ctrl/⌘+V 直接粘贴截图
-                              </span>
-                            </div>
-                          </div>
-
-                          {/* Uploaded image thumbnails */}
-                          {images.length > 0 && (
-                            <div className="flex flex-wrap gap-2.5">
-                              {images.map((img) => (
-                                <div
-                                  key={img.id}
-                                  className="group relative w-20 h-16 rounded-[10px] overflow-hidden shadow-[var(--p-shadow-hairline)] bg-[var(--p-canvas)] animate-rd-step-pop"
-                                >
-                                  <img
-                                    src={img.remoteUrl || img.previewUrl}
-                                    alt="上传截图"
-                                    onClick={() =>
-                                      setLightboxSrc(img.remoteUrl || img.previewUrl)
-                                    }
-                                    className="w-full h-full object-cover cursor-zoom-in transition-transform duration-150 group-hover:scale-105"
-                                  />
-                                  {img.uploading && (
-                                    <div className="absolute inset-0 bg-black/40 flex items-center justify-center text-white">
-                                      <Icon name="loader-2" size={16} className="animate-spin" />
-                                    </div>
-                                  )}
-                                  <button
-                                    type="button"
-                                    aria-label="移除截图"
-                                    onClick={() => removeImage(img.id)}
-                                    className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/70 text-white flex items-center justify-center hover:bg-black cursor-pointer"
-                                  >
-                                    <Icon name="x" size={11} />
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-
-                          {/* Optional Release Preference Card */}
-                          {config.can_request_deploy && (
-                            <div className="rounded-[12px] bg-[var(--p-cobalt-tint)] p-3.5">
-                              <Switch
-                                checked={releasePref === "request_immediate"}
-                                onChange={(checked) =>
-                                  setReleasePref(checked ? "request_immediate" : "default")
-                                }
-                                label="修复完成后，若线上空闲请 AI 评估即时发布"
-                                description={
-                                  config.release_window
-                                    ? `当前默认发布窗口为 ${config.release_window}；勾选后，修复完成将自动触发一次只读 AI 门禁评估，低风险且无活跃影响时立即上线。`
-                                    : "勾选后，修复完成将自动触发一次只读 AI 门禁评估，满足安全条件时立即触发上线。"
-                                }
-                              />
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="px-5 sm:px-6 py-4 bg-[var(--p-page)]/80 border-t border-dashed border-[var(--p-line)] flex flex-wrap items-center justify-between gap-2">
-                          <span className="text-[12px] text-[var(--p-ink-3)]">
-                            以「{config.label}」身份提交
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="font-mono text-[10px] text-[var(--p-ink-3)] tabular-nums">
+                            {t.code}
                           </span>
-                          <button
-                            type="submit"
-                            disabled={submitting || !body.trim() || images.some((i) => i.uploading)}
-                            className="inline-flex items-center justify-center gap-1.5 h-9 px-5 rounded-full bg-[var(--p-ink)] text-[var(--p-page)] text-[13px] font-medium hover:opacity-90 active:scale-[0.97] transition-all disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer shadow-xs"
-                          >
-                            {submitting ? (
-                              <Icon name="loader-2" size={14} className="animate-spin" />
-                            ) : (
-                              <Icon name="send" size={13.5} />
+                          <span
+                            className={cn(
+                              "px-1.5 py-0.5 rounded-[4px] text-[10px] font-medium",
+                              actionMeta.cls,
                             )}
-                            <span>提交反馈</span>
-                          </button>
+                          >
+                            {actionMeta.label}
+                          </span>
                         </div>
-                      </form>
-                    </div>
-                  </div>
+                        <p className="text-[11.5px] font-medium text-[var(--p-ink)] leading-snug line-clamp-2">
+                          {t.title}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
+            {/* Recent my feedback list */}
+            <section className="space-y-2 flex-1 min-h-0">
+              <div className="flex items-center justify-between gap-2 px-1">
+                <span className="font-mono text-[10.5px] font-medium uppercase tracking-[0.04em] text-[var(--p-ink-3)]">
+                  我的反馈
+                </span>
+                {mineTasks.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTab("mine");
+                      setSelectedTaskId(null);
+                    }}
+                    className="text-[10.5px] text-[var(--p-ink-3)] hover:text-[var(--p-ink)] transition-colors cursor-pointer"
+                  >
+                    全部 {mineTasks.length} →
+                  </button>
                 )}
               </div>
 
-              {/* ── RETURNING USER PROGRESS DOCK (Right on Home, below dashed divider) ── */}
-              {!conversationActive && !submittedDetail && returningPreviewTasks.length > 0 && (
-                <section className="border-t border-dashed border-[var(--p-line)] px-5 sm:px-9 py-8 sm:py-10 space-y-5">
-                  <div className="flex flex-wrap items-baseline justify-between gap-3">
-                    <div className="flex items-baseline gap-2.5">
-                      <span className="font-mono text-[11.5px] font-medium text-[var(--p-ink-3)] tabular-nums">
-                        02
+              {mineTasks.length === 0 ? (
+                <div className="rounded-[7px] bg-[var(--p-canvas)]/70 shadow-[var(--p-shadow-hairline)] px-2.5 py-3 text-[11px] leading-relaxed text-[var(--p-ink-3)]">
+                  你提交的反馈会显示在这里，排查、修复与上线进度实时同步。
+                </div>
+              ) : (
+                <div className="space-y-0.5">
+                  {mineTasks.slice(0, 7).map((t) => {
+                    const vis = resolveStatusVisual(t.status_label);
+                    const active = tab === "mine" && selectedTaskId === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => openTaskStory(t.id, "mine")}
+                        className={cn(
+                          "group w-full text-left rounded-[6px] px-2 py-1.5 transition-colors cursor-pointer space-y-0.5",
+                          active
+                            ? "bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)]"
+                            : "hover:bg-[var(--p-hover)]/70",
+                        )}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <LivePulseDot tone={vis.dotTone} active={vis.pulse} />
+                          <span className="text-[11.5px] font-medium text-[var(--p-ink)] truncate group-hover:text-[var(--p-cobalt)] transition-colors">
+                            {t.title}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-1.5 pl-3 text-[10px] text-[var(--p-ink-3)]">
+                          <span className="font-mono tabular-nums truncate">
+                            {t.code} · {t.status_label}
+                          </span>
+                          <span className="tabular-nums shrink-0">
+                            {formatRelativeTime(t.created_at)}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </aside>
+
+          {/* Main Content Canvas */}
+          <main className="min-w-0 w-full flex flex-col">
+            {/* ── TAB 1: EXPRESS FEEDBACK (TRADITIONAL CHAT + COMPACT PROGRESS DOCK) ── */}
+            {tab === "submit" && (
+              <div className="flex-1 flex flex-col px-4 sm:px-5 py-4 space-y-4 animate-rd-portal-in">
+              {submittedDetail ? (
+                <section className="rounded-[10px] bg-[var(--p-surface)] p-4 sm:p-5 shadow-[var(--p-shadow-card)] space-y-4 animate-rd-portal-in">
+                  <div className="flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-[8px] bg-[var(--p-forest-tint)] text-[var(--p-forest)] flex items-center justify-center shrink-0 animate-rd-step-pop">
+                      <Icon name="check-circle-2" size={16} />
+                    </div>
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h2 className="text-[14.5px] font-semibold tracking-[-0.02em] text-[var(--p-ink)]">
+                          反馈已收到，正在跟进处理
+                        </h2>
+                        <CopyButton
+                          value={submittedDetail.task.code}
+                          label={submittedDetail.task.code}
+                          copiedLabel="已复制编号"
+                          size="xs"
+                          variant="secondary"
+                        />
+                      </div>
+                      <p className="text-[13px] font-medium text-[var(--p-ink)]">
+                        {submittedDetail.task.title}
+                      </p>
+                      <p className="text-[12px] leading-relaxed text-[var(--p-ink-2)]">
+                        你可以随时在「我的反馈」查看排查修复与上线进度，回复团队追问或在线确认解决。
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-end gap-1.5 pt-3 border-t border-dashed border-[var(--p-line)]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSubmittedDetail(null);
+                        if (agentEnabled) setSubmitMode("agent");
+                      }}
+                      className="inline-flex items-center gap-1 h-7 px-2.5 rounded-[6px] bg-[var(--p-field)] text-[11.5px] font-medium text-[var(--p-ink)] shadow-[var(--p-shadow-hairline)] hover:bg-[var(--p-hover)] transition-all active:scale-[0.97] cursor-pointer"
+                    >
+                      <Icon name="plus" size={12} />
+                      <span>继续反馈</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetId = submittedDetail.task.id;
+                        setSubmittedDetail(null);
+                        openTaskStory(targetId, "mine");
+                      }}
+                      className="inline-flex items-center gap-1 h-7 px-3 rounded-[6px] bg-[var(--p-ink)] text-[var(--p-page)] text-[11.5px] font-medium hover:opacity-90 transition-all active:scale-[0.97] cursor-pointer"
+                    >
+                      <span>查看处理进度</span>
+                      <Icon name="arrow-right" size={12} />
+                    </button>
+                  </div>
+                </section>
+              ) : agentOnline && submitMode === "agent" ? (
+                <PortalFeedbackConversation
+                  config={config}
+                  stagedImages={images}
+                  onUploadFiles={uploadFiles}
+                  onRemoveStagedImage={removeImage}
+                  onClearStagedImages={clearStagedImages}
+                  onOpenLightbox={(src) => setLightboxSrc(src)}
+                  onDiagnose={portalApi.diagnose}
+                  onCreateTask={handleCreateFromConversation}
+                  onSwitchToManual={handleSwitchToManual}
+                  onRefreshConfig={handleRecheckAvailability}
+                  onPossibleAuthError={handlePossibleAuthError}
+                  onConversationActiveChange={setConversationActive}
+                />
+              ) : agentOffline && submitMode === "agent" ? (
+                <section
+                  data-testid="portal-agent-offline"
+                  className="rounded-[10px] bg-[var(--p-surface)] p-4 shadow-[var(--p-shadow-card)] space-y-3 animate-rd-portal-in"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <div className="w-7 h-7 rounded-[7px] bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] flex items-center justify-center shrink-0 mt-0.5">
+                        <Icon name="wifi-off" size={14} />
+                      </div>
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="flex items-center gap-2">
+                          <h2 className="text-[13.5px] font-semibold text-[var(--p-ink)]">
+                            反馈诊断助手暂时离线
+                          </h2>
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[4px] bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] text-[10.5px] font-medium">
+                            <LivePulseDot tone="amber" active={false} />
+                            <span>节点未在线</span>
+                          </span>
+                        </div>
+                        <p className="text-[12px] text-[var(--p-ink-2)]">
+                          你可以稍后重新检测，或直接填写反馈单进入处理队列。
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="xs"
+                        icon="refresh-cw"
+                        loading={recheckingConfig}
+                        onClick={() => void handleRecheckAvailability()}
+                      >
+                        重新检测
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="primary"
+                        size="xs"
+                        icon="pen-line"
+                        data-testid="portal-offline-to-manual"
+                        onClick={() => setSubmitMode("manual")}
+                      >
+                        直接填写反馈单
+                      </Button>
+                    </div>
+                  </div>
+                </section>
+              ) : (
+                <form
+                  data-testid="portal-manual-form"
+                  onSubmit={(e) => void handleSubmitFeedback(e)}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDragOver(true);
+                  }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOver(false);
+                    if (e.dataTransfer?.files?.length) {
+                      void uploadFiles(e.dataTransfer.files);
+                    }
+                  }}
+                  className={cn(
+                    "rounded-[10px] bg-[var(--p-surface)] overflow-hidden transition-all duration-150 animate-rd-portal-in",
+                    dragOver
+                      ? "shadow-[0_0_0_1.5px_var(--p-cobalt),var(--p-shadow-card)]"
+                      : "shadow-[var(--p-shadow-card)]",
+                  )}
+                >
+                  {/* Compact Form Top Bar */}
+                  <div className="px-3.5 py-2 border-b border-[var(--p-line)] bg-[var(--p-page)]/75 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0 text-[12px]">
+                      <span className="font-semibold text-[var(--p-ink)] truncate">
+                        {agentEnabled ? "直接提单" : `向 ${config.project_name} 提交反馈`}
                       </span>
-                      <h3 className="text-[15.5px] font-semibold tracking-[-0.015em] text-[var(--p-ink)]">
-                        你最近的反馈进度
-                      </h3>
+                      <span className="px-1.5 py-0.5 rounded-[4px] bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] text-[10.5px] font-medium">
+                        提交即建单
+                      </span>
+                      {config.release_window && (
+                        <span className="hidden sm:inline-flex items-center gap-1 text-[10.5px] text-[var(--p-ink-3)]">
+                          <Icon name="calendar-clock" size={11} />
+                          <span>窗口 {config.release_window}</span>
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      {agentOnline && (
+                        <button
+                          type="button"
+                          data-testid="portal-switch-agent"
+                          onClick={() => setSubmitMode("agent")}
+                          className="inline-flex items-center gap-1 h-6 px-2 rounded-[5px] bg-[var(--p-field)] text-[11px] font-medium text-[var(--p-ink)] shadow-[var(--p-shadow-hairline)] hover:bg-[var(--p-hover)] transition-all active:scale-[0.97] cursor-pointer"
+                        >
+                          <Icon name="sparkles" size={11} className="text-[var(--p-cobalt)]" />
+                          <span>返回 AI 诊断对话</span>
+                        </button>
+                      )}
+                      {agentOffline && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          icon="refresh-cw"
+                          loading={recheckingConfig}
+                          onClick={() => {
+                            setSubmitMode("agent");
+                            void handleRecheckAvailability();
+                          }}
+                        >
+                          检测助手
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 sm:p-4 space-y-3">
+                    {/* Type selector pills */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] font-medium text-[var(--p-ink-3)] mr-1">
+                        类型
+                      </span>
+                      {FEEDBACK_TYPES.map((item) => {
+                        const active = feedbackType === item.id;
+                        const activeTone =
+                          item.tone === "rose"
+                            ? "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] shadow-[0_0_0_1px_var(--p-vermilion)]"
+                            : item.tone === "amber"
+                              ? "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] shadow-[0_0_0_1px_var(--p-cobalt)]"
+                              : "bg-[var(--p-forest-tint)] text-[var(--p-forest)] shadow-[0_0_0_1px_var(--p-forest)]";
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            aria-pressed={active}
+                            onClick={() => setFeedbackType(item.id)}
+                            className={cn(
+                              "inline-flex items-center gap-1 h-6.5 px-2.5 rounded-[5px] text-[11.5px] font-medium transition-all duration-150 cursor-pointer",
+                              active
+                                ? activeTone
+                                : "bg-[var(--p-page)] text-[var(--p-ink-2)] shadow-[var(--p-shadow-hairline)] hover:bg-[var(--p-hover)] hover:text-[var(--p-ink)]",
+                            )}
+                          >
+                            <Icon name={item.icon} size={12} />
+                            <span>{item.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Title input */}
+                    <label className="block space-y-1">
+                      <span className="text-[11px] font-medium text-[var(--p-ink-3)]">
+                        简要标题（可选）
+                      </span>
+                      <input
+                        type="text"
+                        maxLength={180}
+                        value={title}
+                        onChange={(e) => setTitle(e.target.value)}
+                        placeholder="一句话概括现象或建议，留空自动提取首行"
+                        className="w-full h-8 px-2.5 rounded-[6px] bg-[var(--p-page)] shadow-[var(--p-shadow-hairline)] text-[12.5px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)] transition-all"
+                      />
+                    </label>
+
+                    {/* Body textarea */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-medium text-[var(--p-ink-3)]">
+                          详细描述 <span className="text-[var(--p-vermilion)]">*</span>
+                        </span>
+                        <span className="text-[10.5px] font-mono text-[var(--p-ink-3)] tabular-nums">
+                          {body.length} / 20000
+                        </span>
+                      </div>
+                      <textarea
+                        required
+                        rows={4}
+                        maxLength={20000}
+                        value={body}
+                        onChange={(e) => setBody(e.target.value)}
+                        onPaste={(e) => {
+                          const files = e.clipboardData?.files;
+                          if (files && files.length > 0) {
+                            const hasImg = Array.from(files).some((f) =>
+                              f.type.startsWith("image/"),
+                            );
+                            if (hasImg) {
+                              e.preventDefault();
+                              void uploadFiles(files);
+                            }
+                          }
+                        }}
+                        placeholder="请描述具体现象、复现步骤或期望效果（支持直接粘贴或拖入截图）…"
+                        className="w-full rounded-[6px] bg-[var(--p-page)] shadow-[var(--p-shadow-hairline)] p-2.5 text-[12.5px] leading-relaxed text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)] transition-all resize-y"
+                      />
+
+                      {/* Toolbar: Upload */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            className="hidden"
+                            onChange={(e) => {
+                              if (e.target.files?.length) {
+                                void uploadFiles(e.target.files);
+                                e.target.value = "";
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            disabled={!config.upload_enabled || images.length >= 6}
+                            onClick={() => fileInputRef.current?.click()}
+                            className="inline-flex items-center gap-1 h-6 px-2 rounded-[5px] bg-[var(--p-field)] text-[11px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors disabled:opacity-45 cursor-pointer"
+                          >
+                            <Icon name="image" size={12} />
+                            <span>
+                              {config.upload_enabled
+                                ? `上传截图 (${images.length}/6)`
+                                : "图床未配置"}
+                            </span>
+                          </button>
+                        </div>
+                        <span className="text-[10.5px] text-[var(--p-ink-3)]">
+                          支持 Ctrl/⌘+V 直接粘贴截图
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Uploaded image thumbnails */}
+                    {images.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {images.map((img) => (
+                          <div
+                            key={img.id}
+                            className="group relative w-14 h-11 rounded-[6px] overflow-hidden shadow-[var(--p-shadow-hairline)] bg-[var(--p-canvas)] animate-rd-step-pop"
+                          >
+                            <img
+                              src={img.remoteUrl || img.previewUrl}
+                              alt="上传截图"
+                              onClick={() =>
+                                setLightboxSrc(img.remoteUrl || img.previewUrl)
+                              }
+                              className="w-full h-full object-cover cursor-zoom-in transition-transform duration-150 group-hover:scale-105"
+                            />
+                            {img.uploading && (
+                              <div className="absolute inset-0 bg-black/40 flex items-center justify-center text-white">
+                                <Icon name="loader-2" size={13} className="animate-spin" />
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              aria-label="移除截图"
+                              onClick={() => removeImage(img.id)}
+                              className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/70 text-white flex items-center justify-center hover:bg-black cursor-pointer"
+                            >
+                              <Icon name="x" size={9} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Optional Release Preference Card */}
+                    {config.can_request_deploy && (
+                      <div className="rounded-[7px] bg-[var(--p-cobalt-tint)] px-3 py-2">
+                        <Switch
+                          checked={releasePref === "request_immediate"}
+                          onChange={(checked) =>
+                            setReleasePref(checked ? "request_immediate" : "default")
+                          }
+                          label="修复完成后，若线上空闲请 AI 评估即时发布"
+                          description={
+                            config.release_window
+                              ? `当前默认发布窗口为 ${config.release_window}；勾选后修复完成将自动触发一次只读 AI 门禁评估。`
+                              : "勾选后修复完成将自动触发一次只读 AI 门禁评估，满足安全条件时立即触发上线。"
+                          }
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="px-3.5 sm:px-4 py-2.5 bg-[var(--p-page)]/80 border-t border-[var(--p-line)] flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] text-[var(--p-ink-3)]">
+                      以「{config.label}」身份提交
+                    </span>
+                    <button
+                      type="submit"
+                      disabled={submitting || !body.trim() || images.some((i) => i.uploading)}
+                      className="inline-flex items-center justify-center gap-1 h-7 px-3 rounded-[6px] bg-[var(--p-ink)] text-[var(--p-page)] text-[11.5px] font-medium hover:opacity-90 active:scale-[0.97] transition-all disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      {submitting ? (
+                        <Icon name="loader-2" size={12} className="animate-spin" />
+                      ) : (
+                        <Icon name="send" size={11.5} />
+                      )}
+                      <span>提交反馈</span>
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* ── COMPACT RETURNING USER PROGRESS DOCK (mobile/tablet only; desktop uses left rail) ── */}
+              {!conversationActive && !submittedDetail && returningPreviewTasks.length > 0 && (
+                <section className="lg:hidden pt-1 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[10.5px] uppercase tracking-[0.05em] text-[var(--p-ink-3)]">
+                        最近反馈进度
+                      </span>
                       {actionCount > 0 && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] text-[11px] font-medium">
-                          {actionCount} 条待你确认
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded-[4px] bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] text-[10.5px] font-medium">
+                          {actionCount} 条待确认
                         </span>
                       )}
                     </div>
@@ -1749,79 +1863,58 @@ function PortalContent() {
                         setTab("mine");
                         setSelectedTaskId(null);
                       }}
-                      className="inline-flex items-center gap-1 text-[12.5px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] transition-colors cursor-pointer"
+                      className="inline-flex items-center gap-1 text-[11px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] transition-colors cursor-pointer"
                     >
-                      <span>查看全部 {mineTasks.length} 条</span>
-                      <Icon name="arrow-right" size={13.5} />
+                      <span>全部 {mineTasks.length} 条</span>
+                      <Icon name="arrow-right" size={11.5} />
                     </button>
                   </div>
 
-                  <div className="space-y-2.5">
+                  <div className="rounded-[8px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] divide-y divide-[var(--p-line)] overflow-hidden">
                     {returningPreviewTasks.map((t) => {
                       const vis = resolveStatusVisual(t.status_label);
                       const actionHint = t.can_reply
-                        ? "需要你补充说明"
+                        ? "待补充"
                         : t.can_accept
-                          ? "已上线 · 请确认是否解决"
+                          ? "待确认"
                           : t.can_request_deploy
-                            ? "修复就绪 · 可申请提前发布"
+                            ? "可提前发布"
                             : null;
                       return (
                         <button
                           key={t.id}
                           type="button"
                           onClick={() => openTaskStory(t.id, "mine")}
-                          className="group w-full text-left rounded-[12px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] hover:shadow-[var(--p-shadow-card)] hover:-translate-y-0.5 px-4 sm:px-5 py-4 transition-all duration-150 cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                          className="group w-full text-left px-3 py-2 hover:bg-[var(--p-hover)]/60 transition-colors cursor-pointer flex items-center justify-between gap-2.5"
                         >
-                          <div className="min-w-0 space-y-1.5">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-mono text-[11.5px] text-[var(--p-ink-3)] tabular-nums">
-                                {t.code}
-                              </span>
-                              <span
-                                className={cn(
-                                  "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium border",
-                                  vis.badgeClass,
-                                )}
-                              >
-                                <LivePulseDot tone={vis.dotTone} active={vis.pulse} />
-                                <span>{t.status_label}</span>
-                              </span>
-                              {actionHint && (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]">
-                                  {actionHint}
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--p-ink)] truncate">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-mono text-[11px] text-[var(--p-ink-3)] tabular-nums shrink-0">
+                              {t.code}
+                            </span>
+                            <span className="text-[12px] font-medium text-[var(--p-ink)] truncate group-hover:text-[var(--p-cobalt)] transition-colors">
                               {t.title}
-                            </p>
+                            </span>
                           </div>
 
-                          <div className="flex items-center gap-3 shrink-0">
-                            <div className="flex items-center gap-1" aria-hidden="true">
-                              {LIFECYCLE_STEPS.map((s, idx) => (
-                                <span
-                                  key={s.key}
-                                  className={cn(
-                                    "h-1.5 w-4 rounded-full transition-colors",
-                                    idx < vis.stepIndex
-                                      ? "bg-[var(--p-forest)]"
-                                      : idx === vis.stepIndex
-                                        ? vis.dotTone === "amber"
-                                          ? "bg-[var(--p-vermilion)]"
-                                          : vis.dotTone === "emerald"
-                                            ? "bg-[var(--p-forest)]"
-                                            : "bg-[var(--p-cobalt)]"
-                                        : "bg-[var(--p-field)]",
-                                  )}
-                                />
-                              ))}
-                            </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {actionHint && (
+                              <span className="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded-[4px] text-[10px] font-medium bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]">
+                                {actionHint}
+                              </span>
+                            )}
+                            <span
+                              className={cn(
+                                "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[4px] text-[10.5px] font-medium border",
+                                vis.badgeClass,
+                              )}
+                            >
+                              <LivePulseDot tone={vis.dotTone} active={vis.pulse} />
+                              <span>{t.status_label}</span>
+                            </span>
                             <Icon
                               name="chevron-right"
-                              size={15}
-                              className="text-[var(--p-ink-3)] group-hover:text-[var(--p-ink)] group-hover:translate-x-0.5 transition-all"
+                              size={12.5}
+                              className="text-[var(--p-ink-3)] group-hover:text-[var(--p-ink)] transition-colors"
                             />
                           </div>
                         </button>
@@ -1833,42 +1926,33 @@ function PortalContent() {
             </div>
           )}
 
-          {/* ── TAB 2 & 3: EDITORIAL PROGRESS FEED -> FOCUSED DETAIL STORY (NO ADMIN SPLIT PANE) ── */}
+          {/* ── TAB 2 & 3: COMPACT PROGRESS LIST -> FOCUSED DETAIL VIEW ── */}
           {tab !== "submit" && (
-            <div className="px-5 sm:px-9 py-8 sm:py-11 animate-rd-portal-in">
+            <div className="px-4 sm:px-5 py-4 animate-rd-portal-in">
               {!selectedTaskId ? (
-                /* ── FEED VIEW ── */
-                <div className="space-y-7">
-                  {/* Editorial Section Header */}
-                  <div className="pb-6 border-b border-dashed border-[var(--p-line)] flex flex-wrap items-end justify-between gap-4">
-                    <div className="space-y-2.5">
-                      <div className="flex items-center gap-2 text-[12px]">
-                        <span className="font-mono text-[11.5px] font-medium text-[var(--p-ink-3)] tabular-nums">
-                          {tab === "mine" ? "02" : "03"}
-                        </span>
-                        <span className="text-[var(--p-line-strong)]">/</span>
-                        <span className="font-mono text-[11.5px] text-[var(--p-ink-3)]">
-                          {tab === "mine" ? "MY FEEDBACK" : "TEAM STREAM"}
-                        </span>
-                      </div>
-                      <h2 className="text-[26px] sm:text-[34px] font-semibold tracking-[-0.03em] leading-[1.12] text-[var(--p-ink)]">
-                        {tab === "mine" ? "我的反馈进度" : "团队反馈动态"}
+                /* ── COMPACT FEED VIEW ── */
+                <div className="space-y-3">
+                  {/* Single-Row Section Header */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-dashed border-[var(--p-line)]">
+                    <div className="flex items-baseline gap-2 min-w-0">
+                      <h2 className="text-[14.5px] font-semibold tracking-[-0.02em] text-[var(--p-ink)]">
+                        {tab === "mine" ? "我的反馈" : "团队动态"}
                       </h2>
-                      <p className="text-[14px] text-[var(--p-ink-2)]">
+                      <span className="text-[11.5px] text-[var(--p-ink-3)] tabular-nums">
                         {currentList.length === 0
-                          ? "提交反馈后，排查修复与发布上线进度会实时同步在这里。"
-                          : `共 ${currentList.length} 条记录${pendingActionInList > 0 ? ` · ${pendingActionInList} 条需要你确认或补充` : " · 全部进度实时同步"}`}
-                      </p>
+                          ? "暂无记录"
+                          : `共 ${currentList.length} 条${pendingActionInList > 0 ? ` · ${pendingActionInList} 条待处理` : ""}`}
+                      </span>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5">
                       <button
                         type="button"
                         onClick={() => void loadTasks(tab === "team" ? "team" : "mine", false)}
                         aria-label="刷新进度"
-                        className="inline-flex items-center gap-1.5 h-9 px-3.5 rounded-full bg-[var(--p-field)] text-[12.5px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1 h-6.5 px-2 rounded-[5px] bg-[var(--p-field)] text-[11px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors cursor-pointer"
                       >
-                        <Icon name="refresh-cw" size={13.5} />
+                        <Icon name="refresh-cw" size={11.5} />
                         <span>刷新</span>
                       </button>
                       <button
@@ -1877,18 +1961,18 @@ function PortalContent() {
                           setTab("submit");
                           setSelectedTaskId(null);
                         }}
-                        className="inline-flex items-center gap-1.5 h-9 px-4 rounded-full bg-[var(--p-ink)] text-[var(--p-page)] text-[12.5px] font-medium hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-xs"
+                        className="inline-flex items-center gap-1 h-6.5 px-2.5 rounded-[5px] bg-[var(--p-ink)] text-[var(--p-page)] text-[11px] font-medium hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer"
                       >
-                        <Icon name="plus" size={14} />
-                        <span>写一条反馈</span>
+                        <Icon name="plus" size={11.5} />
+                        <span>写反馈</span>
                       </button>
                     </div>
                   </div>
 
-                  {/* Lightweight Filter Pills + Quiet Search (only when items exist) */}
+                  {/* Compact Filter + Search Bar */}
                   {currentList.length > 0 && (
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1">
                         {(
                           [
                             { id: "all", label: "全部" },
@@ -1904,9 +1988,9 @@ function PortalContent() {
                               type="button"
                               onClick={() => setTaskFilter(f.id)}
                               className={cn(
-                                "h-8 px-3.5 rounded-full text-[12.5px] font-medium transition-all cursor-pointer",
+                                "h-6.5 px-2.5 rounded-[5px] text-[11.5px] font-medium transition-all cursor-pointer",
                                 active
-                                  ? "bg-[var(--p-surface)] text-[var(--p-ink)] shadow-[var(--p-shadow-btn)]"
+                                  ? "bg-[var(--p-surface)] text-[var(--p-ink)] shadow-[var(--p-shadow-hairline)]"
                                   : "text-[var(--p-ink-3)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)]",
                               )}
                             >
@@ -1916,84 +2000,84 @@ function PortalContent() {
                         })}
                       </div>
 
-                      <div className="relative w-full sm:w-56">
+                      <div className="relative w-full sm:w-48">
                         <Icon
                           name="search"
-                          size={13.5}
-                          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--p-ink-3)]"
+                          size={12}
+                          className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--p-ink-3)]"
                         />
                         <input
                           type="search"
                           value={searchQuery}
                           onChange={(e) => setSearchQuery(e.target.value)}
-                          placeholder="快速查找标题或编号…"
-                          className="w-full h-8.5 pl-8.5 pr-3 rounded-full bg-[var(--p-field)] text-[12.5px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:bg-[var(--p-surface)] focus:shadow-[0_0_0_1.5px_var(--p-cobalt)] transition-all"
+                          placeholder="查找标题或编号…"
+                          className="w-full h-6.5 pl-7 pr-2.5 rounded-[5px] bg-[var(--p-field)] text-[11.5px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:bg-[var(--p-surface)] focus:shadow-[0_0_0_1.5px_var(--p-cobalt)] transition-all"
                         />
                       </div>
                     </div>
                   )}
 
-                  {/* Single-Column Progress Cards */}
+                  {/* Information-Dense List */}
                   {loadingList && currentList.length === 0 ? (
-                    <div className="space-y-3">
+                    <div className="space-y-1.5">
                       {[0, 1, 2].map((i) => (
                         <div
                           key={i}
-                          className="h-28 rounded-[14px] bg-[var(--p-canvas)] animate-pulse"
+                          className="h-14 rounded-[8px] bg-[var(--p-canvas)] animate-pulse"
                         />
                       ))}
                     </div>
                   ) : filteredTasks.length === 0 ? (
-                    <div className="rd-portal-dots rounded-[20px] bg-[var(--p-canvas)] p-10 sm:p-14 text-center shadow-[var(--p-shadow-hairline)] space-y-4">
-                      <div className="w-11 h-11 rounded-[12px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] text-[var(--p-ink-3)] flex items-center justify-center mx-auto">
-                        <Icon name="inbox" size={20} />
+                    <div className="rounded-[10px] bg-[var(--p-canvas)] px-6 py-8 text-center shadow-[var(--p-shadow-hairline)] space-y-2.5">
+                      <div className="w-8 h-8 rounded-[8px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] text-[var(--p-ink-3)] flex items-center justify-center mx-auto">
+                        <Icon name="inbox" size={15} />
                       </div>
-                      <div className="space-y-1.5 max-w-sm mx-auto">
-                        <p className="text-[15.5px] font-semibold text-[var(--p-ink)]">
+                      <div className="space-y-1 max-w-xs mx-auto">
+                        <p className="text-[13px] font-semibold text-[var(--p-ink)]">
                           {currentList.length === 0
                             ? tab === "team"
                               ? "还没有团队反馈动态"
                               : "还没有提交过反馈"
                             : "没有符合当前筛选的记录"}
                         </p>
-                        <p className="text-[13px] text-[var(--p-ink-2)]">
+                        <p className="text-[11.5px] text-[var(--p-ink-2)]">
                           {currentList.length === 0
-                            ? "遇到问题或有产品想法？写下来后，这里会持续同步每一阶段的处理进度。"
+                            ? "写下问题或建议后，这里会持续同步每一阶段的处理进度。"
                             : "试试切换筛选标签或清空搜索词。"}
                         </p>
                       </div>
                       {currentList.length === 0 && (
-                        <div className="pt-1">
+                        <div className="pt-0.5">
                           <button
                             type="button"
                             onClick={() => setTab("submit")}
-                            className="inline-flex items-center gap-1.5 h-9 px-4.5 rounded-full bg-[var(--p-ink)] text-[var(--p-page)] text-[13px] font-medium hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer"
+                            className="inline-flex items-center gap-1 h-7 px-3 rounded-[6px] bg-[var(--p-ink)] text-[var(--p-page)] text-[11.5px] font-medium hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer"
                           >
-                            <Icon name="pen-line" size={14} />
-                            <span>去表达第一条反馈</span>
+                            <Icon name="pen-line" size={12} />
+                            <span>去写第一条反馈</span>
                           </button>
                         </div>
                       )}
                     </div>
                   ) : (
-                    <div className="space-y-3.5">
+                    <div className="rounded-[8px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] divide-y divide-[var(--p-line)] overflow-hidden">
                       {filteredTasks.map((t) => {
                         const vis = resolveStatusVisual(t.status_label);
                         const actionBanner = t.can_reply
                           ? {
-                              label: "团队邀请你补充更多信息，点击回复后自动继续处理",
+                              label: "团队邀请补充信息",
                               icon: "message-square-plus",
                               tone: "vermilion" as const,
                             }
                           : t.can_accept
                             ? {
-                                label: "修复已发布上线，点击确认问题是否已解决",
+                                label: "已发布上线 · 请确认是否解决",
                                 icon: "rocket",
                                 tone: "forest" as const,
                               }
                             : t.can_request_deploy
                               ? {
-                                  label: "修复已就绪，点击可申请 AI 评估提前发布上线",
+                                  label: "修复已就绪 · 可申请提前发布",
                                   icon: "zap",
                                   tone: "cobalt" as const,
                                 }
@@ -2004,108 +2088,91 @@ function PortalContent() {
                             key={t.id}
                             type="button"
                             onClick={() => setSelectedTaskId(t.id)}
-                            className="group w-full text-left rounded-[14px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] hover:-translate-y-0.5 transition-all duration-150 cursor-pointer overflow-hidden"
+                            className="group w-full text-left px-3.5 py-2.5 hover:bg-[var(--p-hover)]/55 transition-colors cursor-pointer space-y-1.5"
                           >
-                            <div className="p-5 sm:p-6 space-y-4">
-                              {/* Meta row */}
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <span className="font-mono text-[12px] font-medium text-[var(--p-ink-3)] tabular-nums">
-                                    {t.code}
+                            {/* Top line: code + title + status + time */}
+                            <div className="flex items-center justify-between gap-2.5">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="font-mono text-[11px] font-medium text-[var(--p-ink-3)] tabular-nums shrink-0">
+                                  {t.code}
+                                </span>
+                                <h3 className="text-[12.5px] font-medium text-[var(--p-ink)] truncate group-hover:text-[var(--p-cobalt)] transition-colors">
+                                  {t.title}
+                                </h3>
+                                {tab === "team" && t.owned && (
+                                  <span className="px-1.5 py-0.5 rounded-[4px] text-[10px] font-medium bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] shrink-0">
+                                    我提交
                                   </span>
-                                  {tab === "team" && t.owned && (
-                                    <span className="px-2 py-0.5 rounded-full text-[10.5px] font-medium bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)]">
-                                      我提交的
-                                    </span>
-                                  )}
-                                  <span className="text-[var(--p-line-strong)]">·</span>
-                                  <span className="text-[12px] text-[var(--p-ink-3)] tabular-nums">
-                                    {formatRelativeTime(t.created_at)}
-                                  </span>
-                                </div>
+                                )}
+                              </div>
 
+                              <div className="flex items-center gap-2 shrink-0">
                                 <span
                                   className={cn(
-                                    "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11.5px] font-medium border",
+                                    "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[4px] text-[10.5px] font-medium border",
                                     vis.badgeClass,
                                   )}
                                 >
                                   <LivePulseDot tone={vis.dotTone} active={vis.pulse} />
                                   <span>{t.status_label}</span>
                                 </span>
-                              </div>
-
-                              {/* Title */}
-                              <div className="flex items-start justify-between gap-4">
-                                <h3 className="text-[15.5px] sm:text-[16.5px] font-semibold tracking-[-0.015em] text-[var(--p-ink)] leading-snug group-hover:text-[var(--p-cobalt)] transition-colors">
-                                  {t.title}
-                                </h3>
+                                <span className="hidden sm:inline text-[11px] text-[var(--p-ink-3)] tabular-nums">
+                                  {formatRelativeTime(t.created_at)}
+                                </span>
                                 <Icon
-                                  name="arrow-right"
-                                  size={16}
-                                  className="text-[var(--p-ink-3)] group-hover:text-[var(--p-ink)] group-hover:translate-x-0.5 transition-all shrink-0 mt-1"
+                                  name="chevron-right"
+                                  size={12.5}
+                                  className="text-[var(--p-ink-3)] group-hover:text-[var(--p-ink)] transition-colors"
                                 />
                               </div>
+                            </div>
 
-                              {/* Inline 5-step visual progress bar */}
-                              <div className="grid grid-cols-5 gap-1.5 pt-0.5">
+                            {/* Compact 5-segment progress track + optional inline action */}
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-1">
                                 {LIFECYCLE_STEPS.map((step, idx) => {
                                   const done = idx < vis.stepIndex;
                                   const current = idx === vis.stepIndex;
                                   return (
-                                    <div key={step.key} className="space-y-1">
-                                      <div className="h-1.5 rounded-full overflow-hidden bg-[var(--p-field)]">
-                                        <div
-                                          className={cn(
-                                            "h-full rounded-full transition-all duration-500",
-                                            done
-                                              ? "w-full bg-[var(--p-forest)]"
-                                              : current
-                                                ? vis.dotTone === "amber"
-                                                  ? "w-full bg-[var(--p-vermilion)]"
-                                                  : vis.dotTone === "emerald"
-                                                    ? "w-full bg-[var(--p-forest)]"
-                                                    : "w-full bg-[var(--p-cobalt)]"
-                                                : "w-0",
-                                          )}
-                                        />
-                                      </div>
-                                      <span
-                                        className={cn(
-                                          "block text-[10.5px] truncate",
-                                          current
-                                            ? "font-medium text-[var(--p-ink)]"
-                                            : done
-                                              ? "text-[var(--p-forest)]"
-                                              : "text-[var(--p-ink-3)]",
-                                        )}
-                                      >
-                                        {step.label}
-                                      </span>
-                                    </div>
+                                    <span
+                                      key={step.key}
+                                      title={step.label}
+                                      className={cn(
+                                        "h-1 w-6 sm:w-8 rounded-full transition-colors",
+                                        done
+                                          ? "bg-[var(--p-forest)]"
+                                          : current
+                                            ? vis.dotTone === "amber"
+                                              ? "bg-[var(--p-vermilion)]"
+                                              : vis.dotTone === "emerald"
+                                                ? "bg-[var(--p-forest)]"
+                                                : "bg-[var(--p-cobalt)]"
+                                            : "bg-[var(--p-field)]",
+                                      )}
+                                    />
                                   );
                                 })}
-                              </div>
-                            </div>
-
-                            {actionBanner && (
-                              <div
-                                className={cn(
-                                  "px-5 sm:px-6 py-2.5 border-t border-dashed border-[var(--p-line)] flex items-center justify-between gap-2 text-[12px] font-medium",
-                                  actionBanner.tone === "vermilion"
-                                    ? "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]"
-                                    : actionBanner.tone === "forest"
-                                      ? "bg-[var(--p-forest-tint)] text-[var(--p-forest)]"
-                                      : "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)]",
-                                )}
-                              >
-                                <span className="inline-flex items-center gap-1.5 min-w-0 truncate">
-                                  <Icon name={actionBanner.icon} size={13.5} className="shrink-0" />
-                                  <span className="truncate">{actionBanner.label}</span>
+                                <span className="ml-1.5 text-[10.5px] text-[var(--p-ink-3)]">
+                                  {LIFECYCLE_STEPS[vis.stepIndex]?.label ?? t.status_label}
                                 </span>
-                                <span className="shrink-0">去处理 →</span>
                               </div>
-                            )}
+
+                              {actionBanner && (
+                                <span
+                                  className={cn(
+                                    "inline-flex items-center gap-1 text-[11px] font-medium",
+                                    actionBanner.tone === "vermilion"
+                                      ? "text-[var(--p-vermilion)]"
+                                      : actionBanner.tone === "forest"
+                                        ? "text-[var(--p-forest)]"
+                                        : "text-[var(--p-cobalt)]",
+                                  )}
+                                >
+                                  <Icon name={actionBanner.icon} size={11.5} />
+                                  <span>{actionBanner.label}</span>
+                                </span>
+                              )}
+                            </div>
                           </button>
                         );
                       })}
@@ -2113,16 +2180,16 @@ function PortalContent() {
                   )}
                 </div>
               ) : (
-                /* ── FOCUSED STORY / DETAIL VIEW (SINGLE COLUMN) ── */
-                <div className="space-y-6 animate-rd-portal-in">
+                /* ── COMPACT DETAIL STORY VIEW ── */
+                <div className="space-y-3.5 animate-rd-portal-in">
                   {/* Top Breadcrumb Bar */}
-                  <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center justify-between gap-2">
                     <button
                       type="button"
                       onClick={() => setSelectedTaskId(null)}
-                      className="inline-flex items-center gap-1.5 h-8.5 px-3.5 rounded-full bg-[var(--p-field)] text-[12.5px] font-medium text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors cursor-pointer"
+                      className="inline-flex items-center gap-1 h-6.5 px-2 rounded-[5px] bg-[var(--p-field)] text-[11.5px] font-medium text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors cursor-pointer"
                     >
-                      <Icon name="arrow-left" size={14} />
+                      <Icon name="arrow-left" size={12} />
                       <span>{tab === "team" ? "返回团队动态" : "返回我的反馈"}</span>
                     </button>
 
@@ -2130,80 +2197,84 @@ function PortalContent() {
                       <button
                         type="button"
                         onClick={() => void loadTaskDetail(detail.task.id, false)}
-                        className="inline-flex items-center gap-1.5 h-8.5 px-3 rounded-full text-[12.5px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1 h-6.5 px-2 rounded-[5px] text-[11.5px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors cursor-pointer"
                       >
-                        <Icon name="refresh-cw" size={13} />
-                        <span>刷新进度</span>
+                        <Icon name="refresh-cw" size={11.5} />
+                        <span>刷新</span>
                       </button>
                     )}
                   </div>
 
                   {loadingDetail && !detail ? (
-                    <div className="rounded-[16px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] p-6 sm:p-8 space-y-5">
-                      <div className="h-7 w-2/3 rounded-lg bg-[var(--p-canvas)] animate-pulse" />
-                      <div className="h-14 rounded-xl bg-[var(--p-canvas)] animate-pulse" />
-                      <div className="h-36 rounded-xl bg-[var(--p-canvas)] animate-pulse" />
+                    <div className="rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] p-4 space-y-3">
+                      <div className="h-5 w-2/3 rounded bg-[var(--p-canvas)] animate-pulse" />
+                      <div className="h-8 rounded bg-[var(--p-canvas)] animate-pulse" />
+                      <div className="h-24 rounded bg-[var(--p-canvas)] animate-pulse" />
                     </div>
                   ) : detail ? (
-                    <article className="space-y-7">
-                      {/* Story Header & Progress Track */}
-                      <div className="rounded-[16px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] p-5 sm:p-7 space-y-6">
-                        <div className="space-y-3">
-                          <div className="flex flex-wrap items-center gap-2.5">
-                            <CopyButton
-                              value={detail.task.code}
-                              label={detail.task.code}
-                              copiedLabel="已复制"
-                              size="xs"
-                              variant="secondary"
-                            />
-                            <span
-                              title={formatDateTime(detail.task.created_at)}
-                              className="text-[12px] text-[var(--p-ink-3)] tabular-nums"
-                            >
-                              提交于 {formatDateTime(detail.task.created_at)}
-                            </span>
-                          </div>
+                    <article className="space-y-3.5">
+                      {/* Compact Header & Progress Track */}
+                      <div className="rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] p-3.5 sm:p-4 space-y-3">
+                        <div className="space-y-1.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <CopyButton
+                                value={detail.task.code}
+                                label={detail.task.code}
+                                copiedLabel="已复制"
+                                size="xs"
+                                variant="secondary"
+                              />
+                              <span
+                                title={formatDateTime(detail.task.created_at)}
+                                className="text-[11px] text-[var(--p-ink-3)] tabular-nums"
+                              >
+                                提交于 {formatDateTime(detail.task.created_at)}
+                              </span>
+                            </div>
 
-                          <h2 className="text-[22px] sm:text-[26px] font-semibold tracking-[-0.025em] leading-snug text-[var(--p-ink)]">
-                            {detail.task.title}
-                          </h2>
-
-                          {(() => {
-                            const vis = resolveStatusVisual(detail.task.status_label);
-                            return (
-                              <div className="flex flex-wrap items-center gap-2.5">
+                            {(() => {
+                              const vis = resolveStatusVisual(detail.task.status_label);
+                              return (
                                 <span
                                   className={cn(
-                                    "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[12px] font-medium border",
+                                    "inline-flex items-center gap-1 px-2 py-0.5 rounded-[4px] text-[11px] font-medium border",
                                     vis.badgeClass,
                                   )}
                                 >
                                   <LivePulseDot tone={vis.dotTone} active={vis.pulse} />
                                   <span>{detail.task.status_label}</span>
                                 </span>
-                                {vis.specialNote && (
-                                  <span className="text-[12.5px] text-[var(--p-ink-2)]">
-                                    {vis.specialNote}
-                                  </span>
-                                )}
-                              </div>
-                            );
+                              );
+                            })()}
+                          </div>
+
+                          <h2 className="text-[15px] sm:text-[16px] font-semibold tracking-[-0.02em] leading-snug text-[var(--p-ink)]">
+                            {detail.task.title}
+                          </h2>
+
+                          {(() => {
+                            const vis = resolveStatusVisual(detail.task.status_label);
+                            return vis.specialNote ? (
+                              <p className="text-[11.5px] text-[var(--p-ink-2)]">
+                                {vis.specialNote}
+                              </p>
+                            ) : null;
                           })()}
                         </div>
 
-                        {/* Numbered 5-Step Lifecycle Progress Track */}
+                        {/* Compact 5-Step Lifecycle Progress Track */}
                         {(() => {
                           const vis = resolveStatusVisual(detail.task.status_label);
                           return (
-                            <div className="pt-5 border-t border-dashed border-[var(--p-line)]">
-                              <div className="grid grid-cols-5 gap-2">
+                            <div className="pt-2.5 border-t border-dashed border-[var(--p-line)]">
+                              <div className="grid grid-cols-5 gap-1.5">
                                 {LIFECYCLE_STEPS.map((step, idx) => {
                                   const done = idx < vis.stepIndex;
                                   const current = idx === vis.stepIndex;
                                   return (
-                                    <div key={step.key} className="space-y-2">
-                                      <div className="h-2 rounded-full overflow-hidden bg-[var(--p-field)]">
+                                    <div key={step.key} className="space-y-1">
+                                      <div className="h-1 rounded-full overflow-hidden bg-[var(--p-field)]">
                                         <div
                                           className={cn(
                                             "h-full rounded-full transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
@@ -2219,13 +2290,13 @@ function PortalContent() {
                                           )}
                                         />
                                       </div>
-                                      <div className="space-y-0.5">
-                                        <span className="hidden sm:block font-mono text-[10px] text-[var(--p-ink-3)] tabular-nums">
+                                      <div className="flex items-center gap-1 text-[10.5px] truncate">
+                                        <span className="hidden sm:inline font-mono text-[9.5px] text-[var(--p-ink-3)] tabular-nums">
                                           0{idx + 1}
                                         </span>
-                                        <div
+                                        <span
                                           className={cn(
-                                            "text-[11.5px] font-medium truncate",
+                                            "font-medium truncate",
                                             current
                                               ? "text-[var(--p-ink)]"
                                               : done
@@ -2234,7 +2305,7 @@ function PortalContent() {
                                           )}
                                         >
                                           {step.label}
-                                        </div>
+                                        </span>
                                       </div>
                                     </div>
                                   );
@@ -2247,23 +2318,23 @@ function PortalContent() {
 
                       {/* Online Acceptance Action Card */}
                       {detail.task.can_accept && (
-                        <div className="rounded-[14px] bg-[var(--p-forest-tint)] p-5 space-y-3.5 animate-rd-portal-in">
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div className="space-y-1">
-                              <div className="flex items-center gap-2 text-[14px] font-semibold text-[var(--p-ink)]">
+                        <div className="rounded-[9px] bg-[var(--p-forest-tint)] p-3.5 space-y-2.5 animate-rd-portal-in">
+                          <div className="flex flex-wrap items-center justify-between gap-2.5">
+                            <div className="space-y-0.5 min-w-0">
+                              <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-[var(--p-ink)]">
                                 <Icon
                                   name="rocket"
-                                  size={15}
+                                  size={13.5}
                                   className="text-[var(--p-forest)]"
                                 />
                                 <span>修复已发布上线，请确认问题是否已解决</span>
                               </div>
-                              <p className="text-[12.5px] text-[var(--p-ink-2)]">
-                                若问题仍存在，点击「仍有问题」并补充现象即可自动重新进入处理队列。
+                              <p className="text-[11.5px] text-[var(--p-ink-2)]">
+                                若问题仍存在，点击「仍有问题」补充现象即可重新进入处理队列。
                               </p>
                             </div>
                             {acceptMode === "idle" && (
-                              <div className="flex items-center gap-2 shrink-0">
+                              <div className="flex items-center gap-1.5 shrink-0">
                                 <Button
                                   type="button"
                                   variant="secondary"
@@ -2289,16 +2360,16 @@ function PortalContent() {
                           </div>
 
                           {acceptMode === "broken" && (
-                            <div className="space-y-2.5 pt-3 border-t border-dashed border-[var(--p-line)] animate-rd-portal-in">
+                            <div className="space-y-2 pt-2 border-t border-dashed border-[var(--p-line)] animate-rd-portal-in">
                               <textarea
                                 rows={2}
                                 maxLength={4000}
                                 value={brokenNote}
                                 onChange={(e) => setBrokenNote(e.target.value)}
                                 placeholder="请简单说明仍然存在的问题或新的现象（可选）…"
-                                className="w-full rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] px-3.5 py-2.5 text-[13px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)]"
+                                className="w-full rounded-[6px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] px-2.5 py-2 text-[12px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)]"
                               />
-                              <div className="flex justify-end gap-1.5">
+                              <div className="flex justify-end gap-1">
                                 <Button
                                   type="button"
                                   variant="ghost"
@@ -2336,35 +2407,35 @@ function PortalContent() {
                       {detail.task.can_reply && (
                         <form
                           onSubmit={(e) => void handleReplySubmit(e)}
-                          className="rounded-[14px] bg-[var(--p-vermilion-tint)] p-5 space-y-3 animate-rd-portal-in"
+                          className="rounded-[9px] bg-[var(--p-vermilion-tint)] p-3.5 space-y-2 animate-rd-portal-in"
                         >
-                          <div className="flex items-center gap-2 text-[13.5px] font-semibold text-[var(--p-ink)]">
+                          <div className="flex items-center gap-1.5 text-[12px] font-semibold text-[var(--p-ink)]">
                             <Icon
                               name="message-square-plus"
-                              size={15}
+                              size={13.5}
                               className="text-[var(--p-vermilion)]"
                             />
                             <span>请补充更多信息，回复后将自动继续处理</span>
                           </div>
                           <textarea
                             required
-                            rows={3}
+                            rows={2}
                             maxLength={8000}
                             value={replyText}
                             onChange={(e) => setReplyText(e.target.value)}
                             placeholder="输入补充说明、复现环境或操作步骤…"
-                            className="w-full rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] p-3 text-[13.5px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)]"
+                            className="w-full rounded-[6px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] p-2.5 text-[12px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)]"
                           />
                           <div className="flex justify-end">
                             <button
                               type="submit"
                               disabled={sendingReply || !replyText.trim()}
-                              className="inline-flex items-center gap-1.5 h-8.5 px-4 rounded-full bg-[var(--p-ink)] text-[var(--p-page)] text-[12.5px] font-medium hover:opacity-90 active:scale-[0.97] transition-all disabled:opacity-45 cursor-pointer"
+                              className="inline-flex items-center gap-1 h-6.5 px-3 rounded-[5px] bg-[var(--p-ink)] text-[var(--p-page)] text-[11.5px] font-medium hover:opacity-90 active:scale-[0.97] transition-all disabled:opacity-45 cursor-pointer"
                             >
                               {sendingReply ? (
-                                <Icon name="loader-2" size={13} className="animate-spin" />
+                                <Icon name="loader-2" size={11.5} className="animate-spin" />
                               ) : (
-                                <Icon name="send" size={13} />
+                                <Icon name="send" size={11.5} />
                               )}
                               <span>发送补充说明</span>
                             </button>
@@ -2372,38 +2443,38 @@ function PortalContent() {
                         </form>
                       )}
 
-                      {/* Editorial Public Message Timeline */}
-                      <div className="space-y-4">
-                        <div className="flex items-center gap-2 text-[12px]">
-                          <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-[var(--p-ink-3)]">
+                      {/* Compact Public Message Timeline */}
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-[11px]">
+                          <span className="font-mono text-[10.5px] uppercase tracking-[0.05em] text-[var(--p-ink-3)]">
                             沟通与进度记录
                           </span>
                           <span className="h-px flex-1 border-b border-dashed border-[var(--p-line)]" />
                         </div>
 
                         {detail.messages.length === 0 ? (
-                          <p className="text-[13px] text-[var(--p-ink-3)] py-4">
+                          <p className="text-[12px] text-[var(--p-ink-3)] py-2">
                             暂无公开留言记录。
                           </p>
                         ) : (
-                          <div className="space-y-3">
+                          <div className="space-y-2">
                             {detail.messages.map((msg) => {
                               const isReporter = msg.author === "reporter";
                               return (
                                 <div
                                   key={msg.id}
                                   className={cn(
-                                    "rounded-[14px] p-4 sm:p-5 space-y-2.5",
+                                    "rounded-[8px] px-3.5 py-2.5 space-y-1.5",
                                     isReporter
                                       ? "bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)]"
                                       : "bg-[var(--p-cobalt-tint)]/65 shadow-[var(--p-shadow-hairline)]",
                                   )}
                                 >
-                                  <div className="flex items-center justify-between gap-2 text-[12px]">
-                                    <span className="inline-flex items-center gap-2 font-semibold text-[var(--p-ink)]">
+                                  <div className="flex items-center justify-between gap-2 text-[11px]">
+                                    <span className="inline-flex items-center gap-1.5 font-semibold text-[var(--p-ink)]">
                                       <span
                                         className={cn(
-                                          "w-6 h-6 rounded-[7px] inline-flex items-center justify-center",
+                                          "w-4.5 h-4.5 rounded-[5px] inline-flex items-center justify-center",
                                           isReporter
                                             ? "bg-[var(--p-field)] text-[var(--p-ink-2)]"
                                             : "bg-[var(--p-surface)] text-[var(--p-cobalt)] shadow-2xs",
@@ -2411,7 +2482,7 @@ function PortalContent() {
                                       >
                                         <Icon
                                           name={isReporter ? "user" : "sparkles"}
-                                          size={12.5}
+                                          size={10.5}
                                         />
                                       </span>
                                       <span>
@@ -2424,12 +2495,12 @@ function PortalContent() {
                                     </span>
                                     <span
                                       title={formatDateTime(msg.created_at)}
-                                      className="font-mono text-[11px] text-[var(--p-ink-3)] tabular-nums"
+                                      className="font-mono text-[10.5px] text-[var(--p-ink-3)] tabular-nums"
                                     >
                                       {formatDateTime(msg.created_at)}
                                     </span>
                                   </div>
-                                  <div className="text-[13.5px] leading-relaxed text-[var(--p-ink-2)]">
+                                  <div className="text-[12.5px] leading-relaxed text-[var(--p-ink-2)]">
                                     <MarkdownContent content={msg.body} />
                                   </div>
                                 </div>
@@ -2444,10 +2515,137 @@ function PortalContent() {
               )}
             </div>
           )}
-        </main>
+          </main>
 
-        {/* Minimal Editorial Footer */}
-        <footer className="mt-auto border-t border-dashed border-[var(--p-line)] px-5 sm:px-9 py-4 flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-[var(--p-ink-3)]">
+          {/* ── RIGHT RAIL: Service Status, Recent Shipped Fixes & Flow ── */}
+          <aside
+            aria-label="服务状态与最近上线"
+            className="hidden xl:flex flex-col border-l border-[var(--p-line)] bg-[var(--p-page)] p-3.5 space-y-4"
+          >
+            {/* Service & Release Status */}
+            <section className="space-y-2">
+              <div className="px-1 font-mono text-[10.5px] font-medium uppercase tracking-[0.04em] text-[var(--p-ink-3)]">
+                服务与发布
+              </div>
+              <div className="rounded-[8px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] divide-y divide-[var(--p-line)] text-[11px]">
+                <div className="px-2.5 py-2 flex items-center justify-between gap-2">
+                  <span className="text-[var(--p-ink-3)]">诊断助手</span>
+                  {agentOnline ? (
+                    <span className="inline-flex items-center gap-1 font-medium text-[var(--p-forest)]">
+                      <LivePulseDot tone="emerald" active />
+                      <span>在线</span>
+                    </span>
+                  ) : agentOffline ? (
+                    <span className="inline-flex items-center gap-1 font-medium text-[var(--p-vermilion)]">
+                      <LivePulseDot tone="amber" active={false} />
+                      <span>暂离线</span>
+                    </span>
+                  ) : (
+                    <span className="text-[var(--p-ink-2)]">直接提单</span>
+                  )}
+                </div>
+
+                <div className="px-2.5 py-2 flex items-center justify-between gap-2">
+                  <span className="text-[var(--p-ink-3)]">发布窗口</span>
+                  <span className="font-mono text-[10.5px] text-[var(--p-ink)] truncate">
+                    {config.release_window || "实时随修随发"}
+                  </span>
+                </div>
+
+                <div className="px-2.5 py-2 flex items-center justify-between gap-2">
+                  <span className="text-[var(--p-ink-3)]">提前发布</span>
+                  <span className="text-[var(--p-ink-2)]">
+                    {config.can_request_deploy ? "AI 门禁可申请" : "按窗口发布"}
+                  </span>
+                </div>
+
+                <div className="px-2.5 py-2 flex items-center justify-between gap-2">
+                  <span className="text-[var(--p-ink-3)]">截图附件</span>
+                  <span className="text-[var(--p-ink-2)]">
+                    {config.upload_enabled ? "支持粘贴 / 拖拽" : "暂未开启"}
+                  </span>
+                </div>
+              </div>
+            </section>
+
+            {/* Recently Shipped Fixes (worth knowing before reporting!) */}
+            <section className="space-y-2">
+              <div className="flex items-center justify-between gap-2 px-1">
+                <span className="font-mono text-[10.5px] font-medium uppercase tracking-[0.04em] text-[var(--p-ink-3)]">
+                  最近已上线
+                </span>
+                {config.can_view_team && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTab("team");
+                      setSelectedTaskId(null);
+                    }}
+                    className="text-[10.5px] text-[var(--p-ink-3)] hover:text-[var(--p-ink)] transition-colors cursor-pointer"
+                  >
+                    团队动态 →
+                  </button>
+                )}
+              </div>
+
+              {recentShippedTasks.items.length === 0 ? (
+                <div className="rounded-[7px] bg-[var(--p-canvas)]/70 shadow-[var(--p-shadow-hairline)] px-2.5 py-2.5 text-[11px] leading-relaxed text-[var(--p-ink-3)]">
+                  近期已修复并上线的改进会同步展示在这里，方便你快速确认是否已解决。
+                </div>
+              ) : (
+                <div className="rounded-[8px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] divide-y divide-[var(--p-line)] overflow-hidden">
+                  {recentShippedTasks.items.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => openTaskStory(t.id, recentShippedTasks.scope)}
+                      className="group w-full text-left px-2.5 py-2 hover:bg-[var(--p-hover)]/60 transition-colors cursor-pointer space-y-0.5"
+                    >
+                      <div className="flex items-start gap-1.5">
+                        <Icon
+                          name="check-circle-2"
+                          size={11.5}
+                          className="text-[var(--p-forest)] shrink-0 mt-0.5"
+                        />
+                        <span className="text-[11.5px] font-medium text-[var(--p-ink)] leading-snug line-clamp-2 group-hover:text-[var(--p-cobalt)] transition-colors">
+                          {t.title}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-1.5 pl-4 text-[10px] text-[var(--p-ink-3)] font-mono tabular-nums">
+                        <span>{t.code}</span>
+                        <span>{formatRelativeTime(t.created_at)}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {/* Transparent 3-Step Flow */}
+            <section className="space-y-2 pt-1">
+              <div className="px-1 font-mono text-[10.5px] font-medium uppercase tracking-[0.04em] text-[var(--p-ink-3)]">
+                处理机制
+              </div>
+              <ol className="rounded-[8px] bg-[var(--p-canvas)]/70 shadow-[var(--p-shadow-hairline)] px-2.5 py-2 space-y-2 text-[11px] text-[var(--p-ink-2)]">
+                <li className="flex items-start gap-2">
+                  <span className="font-mono text-[10px] text-[var(--p-ink-3)] mt-0.5">01</span>
+                  <span>先对话定位，区分使用疑问与产品缺陷</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="font-mono text-[10px] text-[var(--p-ink-3)] mt-0.5">02</span>
+                  <span>仅在你点击确认后才正式生成工单</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="font-mono text-[10px] text-[var(--p-ink-3)] mt-0.5">03</span>
+                  <span>排查、上线与验收状态全程实时同步</span>
+                </li>
+              </ol>
+            </section>
+          </aside>
+        </div>
+
+        {/* Compact Footer */}
+        <footer className="mt-auto border-t border-dashed border-[var(--p-line)] px-4 sm:px-5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-[10.5px] text-[var(--p-ink-3)]">
           <span className="font-mono">{config.project_name} · Feedback Portal</span>
           <span>由 Relaydesk 驱动</span>
         </footer>
