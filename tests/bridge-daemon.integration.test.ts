@@ -56,6 +56,10 @@ if (existsSync(join(space,'files','sample.sqlite'))) {
   db.close();
 }
 writeFileSync('facts.json', JSON.stringify(facts));
+if (prompt.includes('WAIT_FOR_NETWORK_SWITCH')) {
+  appendFileSync('launches.txt', String(process.pid) + '\\n');
+  while (!existsSync('network-restored')) await new Promise(resolve => setTimeout(resolve, 20));
+}
 if (prompt.includes('MAKE_CHANGES')) {
   writeFileSync(join(space, 'HANDBOOK.md'), 'updated handbook');
   writeFileSync(join(space, 'DEPLOY.md'), 'updated deploy doc');
@@ -74,7 +78,8 @@ if (prompt.includes('BLOCK_UNTIL_CANCELLED') && !args.includes('resume')) {
 }
 if (claude) {
   emit({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'fixture reasoning' } } });
-  emit({ type: 'result', result: 'fixture Claude reply' });
+  emit({ type: 'assistant', message: { model: 'fixture-main', usage: { input_tokens: 25, cache_read_input_tokens: 75, cache_creation_input_tokens: 0 } } });
+  emit({ type: 'result', result: 'fixture Claude reply', modelUsage: { 'fixture-main': { contextWindow: 200000 } } });
   process.exit(0);
 }
 emit({ type: 'item.completed', item: { id: 'tool', type: 'command_execution', command: 'fixture', aggregated_output: 'tool:' + dbUrl, exit_code: 0 } });
@@ -90,6 +95,7 @@ beforeEach(async () => {
   f = await fixture();
   vi.stubEnv("HOME", join(f.root, "home"));
   vi.stubEnv("CODEX_HOME", undefined);
+  vi.stubEnv("CLAUDE_CONFIG_DIR", undefined);
 });
 afterEach(async () => {
   try { await daemon?.close(); } finally { daemon = undefined; vi.unstubAllEnvs(); await f.close(); }
@@ -174,6 +180,20 @@ describe("real bridge daemon + HTTP chat", () => {
     config.models.push({ id: "hot-loaded", runtime: "codex", context_window: 99000 });
     writeFileSync(configPath, JSON.stringify(config));
     await expect.poll(async () => (await agent()).models, { timeout: 6000 }).toContainEqual(expect.objectContaining({ id: "hot-loaded", context_window: 99000 }));
+  });
+
+  it("publishes cache-only window changes and clears the window when the cache no longer reports it", async () => {
+    const { agent, configPath } = await start();
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    delete config.models[0].context_window;
+    writeFileSync(configPath, JSON.stringify(config));
+    const model = async () => (await agent()).models.find((item: { id: string }) => item.id === "detected-codex");
+    await expect.poll(model, { timeout: 6000 }).not.toHaveProperty("context_window");
+    const cachePath = join(f.root, "home", ".codex", "models_cache.json");
+    for (const context_window of [140000, 96000, undefined]) {
+      writeFileSync(cachePath, JSON.stringify({ models: [{ slug: "detected-codex", context_window, total_tokens: 987654 }] }));
+      await expect.poll(async () => (await model()).context_window, { timeout: 6000 }).toBe(context_window);
+    }
   });
 
   it("refreshes the reported Claude catalog when only the picker options change", async () => {
@@ -269,6 +289,22 @@ describe("real bridge daemon + HTTP chat", () => {
     expect((await fetch(`${f.srv.url}/api/bridge/projects/${p}/workspace/file?path=files/output.txt`, { method: "PUT", headers: bearer(token), body: "late change" })).status).toBe(403);
   });
 
+  it("applies session Fast preferences through HTTP and the bridge without losing the thread", async () => {
+    const { id, p, repo, agent } = await start();
+    writeFileSync(join(f.root, "home/.codex/models_cache.json"), JSON.stringify({ models: [{ slug: "detected-codex", additional_speed_tiers: ["fast"] }] }));
+    await expect.poll(async () => (await agent()).models, { timeout: 6000 }).toContainEqual(expect.objectContaining({ id: "detected-codex", supports_fast: true }));
+    const s = await f.session(p, id);
+    expect((await s.detail()).session.fast_mode).toBe("default");
+    expect((await f.api(s.path, "PATCH", { fast_mode: true })).status).toBe(400);
+    for (const [mode, tier] of [["on", "priority"], ["off", "default"], ["default", null]] as const) {
+      expect((await f.ok(s.path, "PATCH", { model: "detected-codex", fast_mode: mode })).session.fast_mode).toBe(mode);
+      expect(await (await s.turn("Check Fast")).text()).toContain("event: done");
+      const args = facts(repo).args as string[];
+      expect(args.includes("resume")).toBe(mode !== "on");
+      expect(args.filter(arg => arg.startsWith("service_tier="))).toEqual(tier ? [`service_tier="${tier}"`] : []);
+    }
+  });
+
   it("normalizes a local Claude stream and keeps its read-only tool set", async () => {
     const { id, p, repo } = await start();
     const s = await f.session(p, id);
@@ -276,10 +312,103 @@ describe("real bridge daemon + HTTP chat", () => {
     const text = await (await s.turn("Inspect local sources")).text();
     expect(text).toContain("event: reasoning");
     expect(text).toContain("fixture Claude reply");
-    expect((await s.detail()).session).toMatchObject({ resolved_target: `local:${id}`, external_session_id: "local-claude-thread" });
+    expect(text).toContain("event: context_usage");
+    expect((await s.detail()).session).toMatchObject({ resolved_target: `local:${id}`, external_session_id: "local-claude-thread", context_used_tokens: 100, context_window_tokens: 200000 });
     const { args, space } = facts(repo);
     expect(args[args.indexOf("--add-dir") + 1]).toBe(space);
     expect(args[args.indexOf("--allowedTools") + 1].split(",")).not.toContain("Write");
+  });
+
+  it("uses full Claude permissions on fresh and resumed writable network turns when enabled locally", async () => {
+    const { id, p, repo, configPath, agent } = await start();
+    const s = await f.session(p, id, "workspace-write");
+    await f.ok(s.path, "PATCH", { runtime: "claude", network_access: true });
+    const run = async () => {
+      expect(await (await s.turn("Inspect local tools")).text()).toContain("event: done");
+      return facts(repo).args as string[];
+    };
+    expect(await run()).toContain("dontAsk");
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    config.models.push({ id: "full-access-fixture", runtime: "claude" });
+    writeFileSync(configPath, JSON.stringify({ ...config, claude_full_access: true }));
+    await expect.poll(async () => (await agent()).models, { timeout: 6000 })
+      .toContainEqual(expect.objectContaining({ id: "full-access-fixture" }));
+    const full = await f.session(p, id, "workspace-write");
+    await f.ok(full.path, "PATCH", { runtime: "claude", network_access: true });
+    for (const resumed of [false, true]) {
+      expect(await (await full.turn("Inspect local tools")).text()).toContain("event: done");
+      const { args } = facts(repo);
+      expect(args[args.indexOf("--permission-mode") + 1]).toBe("bypassPermissions");
+      expect(args).not.toContain("--tools");
+      expect(args).not.toContain("--allowedTools");
+      expect(args.includes("--resume")).toBe(resumed);
+    }
+    await f.ok(s.path, "PATCH", { network_access: false });
+    expect(await run()).toContain("dontAsk");
+    await f.ok(s.path, "PATCH", { sandbox_mode: "read-only" });
+    const readOnly = await run();
+    expect(readOnly).toContain("dontAsk");
+    expect(readOnly[readOnly.indexOf("--tools") + 1]).toBe("Read,Grep,Glob");
+  });
+
+  it("requires a local Codex opt-in on each fresh or resumed writable network turn", async () => {
+    const { id, p, repo, configPath, agent } = await start();
+    const session = await f.session(p, id, "workspace-write");
+    await f.ok(session.path, "PATCH", { network_access: true });
+    const turn = async (s = session) => {
+      expect(await (await s.turn("Inspect local permissions")).text()).toContain("event: done");
+      return facts(repo).args as string[];
+    };
+    const bypass = "--dangerously-bypass-approvals-and-sandbox";
+    const defaults = await turn();
+    expect(defaults[defaults.indexOf("--sandbox") + 1]).toBe("workspace-write");
+    expect(defaults).not.toContain(bypass);
+
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    writeFileSync(configPath, JSON.stringify({ ...config, codex_full_access: true, accept_cli_runs: true }));
+    await expect.poll(async () => (await agent()).accept_cli_runs, { timeout: 6000 }).toBe(true);
+    const fresh = await f.session(p, id, "workspace-write");
+    await f.ok(fresh.path, "PATCH", { network_access: true });
+    for (const resumed of [false, true]) {
+      const args = await turn(fresh);
+      expect(args.includes("resume")).toBe(resumed);
+      expect(args).toContain(bypass);
+      expect(args).not.toContain("--sandbox");
+      expect(args.some(arg => arg.startsWith("sandbox_"))).toBe(false);
+    }
+
+    await f.ok(fresh.path, "PATCH", { network_access: false });
+    expect(await turn(fresh)).not.toContain(bypass);
+    const offline = await turn(fresh);
+    expect(offline).toEqual(expect.arrayContaining(["resume", 'sandbox_mode="workspace-write"', "sandbox_workspace_write.network_access=false"]));
+    expect(offline).toContain(`sandbox_workspace_write.writable_roots=${JSON.stringify([facts(repo).space])}`);
+    expect(offline).not.toContain(bypass);
+    await f.ok(fresh.path, "PATCH", { sandbox_mode: "read-only", network_access: true });
+    expect(await turn(fresh)).not.toContain(bypass);
+    const readOnly = await turn(fresh);
+    expect(readOnly).toEqual(expect.arrayContaining(["resume", 'sandbox_mode="read-only"', "sandbox_workspace_write.network_access=false"]));
+    expect(readOnly).not.toContain(bypass);
+
+    for (const mode of ["pr_audit", "operator"] as const) {
+      const result = await f.srv.bridgeHub.runCliRun(id, {
+        run_id: `permissions-${mode}`, project_id: p, mode, runtime: "codex",
+        prompt: "Inspect the project", workspace_manifest: buildWorkspaceManifest(f.dbPath, p),
+      }, () => {});
+      expect(result.event).toBe("finish");
+      const { args } = facts(repo);
+      expect(args[args.indexOf("--sandbox") + 1]).toBe("read-only");
+      expect(args).not.toContain(bypass);
+      expect(args).toContain("sandbox_workspace_write.network_access=false");
+    }
+
+    await f.ok(fresh.path, "PATCH", { sandbox_mode: "workspace-write", network_access: true });
+    expect(await turn(fresh)).toContain(bypass);
+    // A Claude grant and a truthy string must not authorize Codex.
+    writeFileSync(configPath, JSON.stringify({ ...config, claude_full_access: true, codex_full_access: "true" }));
+    await expect.poll(async () => (await agent()).accept_cli_runs, { timeout: 6000 }).toBe(false);
+    const revoked = await turn(fresh);
+    expect(revoked).toEqual(expect.arrayContaining(["resume", 'sandbox_mode="workspace-write"', "sandbox_workspace_write.network_access=true"]));
+    expect(revoked).not.toContain(bypass);
   });
 
   it.each(["symlink", "hardlink"])("refuses a %s in the shadow cache and leaves the external file untouched", async (kind) => {
@@ -411,7 +540,31 @@ describe("real bridge daemon + HTTP chat", () => {
     expect(await (await next.turn("acquire after cancellation")).text()).toContain("fixture-reply");
   });
 
+  it("reattaches the same CLI after transport loss, then syncs its workspace through the new socket", async () => {
+    const connections: Duplex[] = [];
+    f.srv.server.on("upgrade", (_req, socket) => connections.push(socket));
+    const { id, p, repo } = await start();
+    const session = await f.session(p, id, "workspace-write");
+    const finished = (await session.turn("WAIT_FOR_NETWORK_SWITCH MAKE_CHANGES")).text();
+    await expect.poll(() => existsSync(join(repo, "launches.txt"))).toBe(true);
+    connections[0].destroy();
+    await expect.poll(() => connections.length).toBeGreaterThan(1);
+    await expect.poll(() => f.srv.bridgeHub.hasActiveWriteLease(id, p)).toBe(true);
+    writeFileSync(join(repo, "network-restored"), "go");
+    const text = await finished;
+    expect(text).toContain("正在等待接回原执行");
+    expect(text).toContain("继续原执行");
+    expect(text).toContain("event: done");
+    expect(readFileSync(join(repo, "launches.txt"), "utf8").trim().split("\n")).toHaveLength(1);
+    expect(readFileSync(join(getProjectFilesDir(f.dbPath, p), "output.txt"), "utf8")).toBe("result from local workspace");
+    expect((await session.detail()).messages.at(-1).status).toBe("done");
+  });
+
   it.each(["abort", "disconnect"] as const)("%s closes the running SSE response and kills the entire child process group", async (action) => {
+    if (action === "disconnect") {
+      await f.close();
+      f = await fixture({ bridgeHubOptions: { chatReconnectMs: 15 } });
+    }
     const connections: Duplex[] = [];
     f.srv.server.on("upgrade", (_req, socket) => connections.push(socket));
     const { id, p, repo, token } = await start();

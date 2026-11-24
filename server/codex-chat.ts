@@ -422,6 +422,7 @@ export interface RunChatTurnResult {
 
 function runSingleCliAttempt(params: {
   sessionId: string;
+  resumeId: string;
   runtime: ChatRuntime;
   bin: string;
   args: string[];
@@ -441,7 +442,7 @@ function runSingleCliAttempt(params: {
 }> {
   const { sessionId, runtime, bin, args, cwd, env, stdinPrompt, secrets, signal, onEvent, onImage } = params;
   return new Promise((resolve) => {
-    const parser = createCliStreamParser(runtime, secrets, onEvent, onImage, params.lookupAttachment);
+    const parser = createCliStreamParser(runtime, secrets, onEvent, onImage, params.lookupAttachment, { env, resumeId: params.resumeId });
     const { state } = parser;
     if (signal.aborted) {
       resolve({ exitCode: null, aborted: true, stderr: "", state });
@@ -502,7 +503,7 @@ function runSingleCliAttempt(params: {
       }
     });
 
-    const finish = (exitCode: number | null) => {
+    const finish = async (exitCode: number | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(forceTimer);
@@ -511,7 +512,7 @@ function runSingleCliAttempt(params: {
       if (activeSessionProcesses.get(sessionId)?.abort === doAbort) {
         activeSessionProcesses.delete(sessionId);
       }
-      parser.finish(exitCode === 0 && !aborted);
+      await parser.finish(exitCode === 0 && !aborted);
       state.text = redactSecrets(state.text, secrets);
       resolve({
         exitCode,
@@ -580,6 +581,10 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
   const matchesModel = (item: { runtime: ChatRuntime; id: string }) => item.runtime === session.runtime && item.id === model;
   const projectModel = projectSettings?.models.find(matchesModel);
   const metadata = { ...builtinModels.find(matchesModel), ...projectModel };
+  if (session.runtime === "codex" && session.fast_mode && session.fast_mode !== "default" && metadata.supports_fast !== true) {
+    return { content: "", events: [], externalSessionId: priorId, status: "error",
+      error: "当前云端模型未确认支持 GPT Fast。请在会话模型设置中选择「跟随 Harness」或更换模型。" };
+  }
   let reasoningEffort = session.reasoning_effort === "default"
     ? projectModel?.default_effort ?? matchingSettings?.default_effort ?? "default"
     : session.reasoning_effort;
@@ -680,6 +685,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       bin,
       model,
       reasoningEffort,
+      fastMode: session.fast_mode,
       sandboxMode: session.sandbox_mode,
       networkAccess: session.network_access,
       workspaceDir: workspace.workspaceDir,
@@ -705,6 +711,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
     }
     return runSingleCliAttempt({
       sessionId: session.id,
+      resumeId,
       runtime: session.runtime,
       bin,
       args: invocation.args,

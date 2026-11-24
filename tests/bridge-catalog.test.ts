@@ -21,6 +21,8 @@ beforeEach(async () => {
   configDir = join(homeDir, "bridge"); binDir = join(homeDir, "bin");
   await Promise.all([".claude", ".codex", "bridge", "bin"].map(p => mkdir(join(homeDir, p))));
   vi.stubEnv("PATH", binDir);
+  vi.stubEnv("CODEX_HOME", undefined);
+  vi.stubEnv("CLAUDE_CONFIG_DIR", undefined);
 });
 afterEach(async () => { vi.unstubAllEnvs(); await rm(homeDir, { recursive: true, force: true }); });
 
@@ -55,9 +57,26 @@ describe("local bridge model discovery", () => {
     expect(get("gpt-5.4")).toEqual({ id: "gpt-5.4", runtime: "claude", source: "bridge_config" });
     expect(get("agent")).toMatchObject({ label: "local", source: "cli_config" });
     expect(get("gateway/deep", "codex")).toMatchObject({ default_effort: "max" });
-    expect(get("claude-opus-4-6")).toMatchObject({ context_window: 1_000_000, default_effort: "low" });
+    expect(get("claude-opus-4-6")).toMatchObject({ default_effort: "low" });
+    expect(get("claude-opus-4-6")).not.toHaveProperty("context_window");
     expect(result.models.map(m => m.id)).toEqual(expect.arrayContaining(["sonnet", "custom/env", "gateway/o", "gateway/s", "gateway/h"]));
     expect(JSON.stringify(result)).not.toMatch(/private-value|in-a-description|not-a-model|claude-sonnet-4-6|my codex/);
+  });
+
+  it("distinguishes Fast capability, configured tier, and absent telemetry", async () => {
+    const config = { models: ["legacy", "standard", "unknown", "confirmed", "manual"].map(id => ({ runtime: "codex", id, ...(id === "manual" && { supports_fast: false }) })) };
+    await json(join(homeDir, ".codex/models_cache.json"), { models: [
+      { slug: "confirmed", service_tiers: [{ id: "priority", description: marker(1) }] },
+      { slug: "legacy", additional_speed_tiers: ["fast"] }, { slug: "standard", service_tiers: [] },
+      { slug: "unknown" }, { slug: "manual", additional_speed_tiers: ["fast"] },
+    ] });
+    const absent = await detectBridgeCatalog(config, { homeDir, configDir });
+    expect(absent.runtimes.codex.default_fast_mode).toBeUndefined();
+    expect(absent.models.map(m => m.supports_fast)).toEqual([true, false, undefined, true, false]);
+    await writeFile(join(homeDir, ".codex/config.toml"), 'service_tier = "priority"');
+    const configured = await detectBridgeCatalog(config, { homeDir, configDir });
+    expect(configured.runtimes.codex.default_fast_mode).toBe("on");
+    expect(JSON.stringify(configured)).not.toContain(marker(1));
   });
 
   it("discovers all Claude picker options and merges the default without exporting option metadata", async () => {
@@ -74,12 +93,47 @@ describe("local bridge model discovery", () => {
     })));
   });
 
+  it("syncs only bounded windows for exact runtime/model matches and respects configured overrides", async () => {
+    const codexDir = join(homeDir, "custom-codex"), claudeDir = join(homeDir, "custom-claude");
+    await mkdir(codexDir);
+    await mkdir(join(claudeDir, "cache"), { recursive: true });
+    vi.stubEnv("CODEX_HOME", codexDir);
+    await writeFile(join(codexDir, "config.toml"), [
+      'model = "configured"', 'model_context_window = 90000',
+      '[profiles.deep]', 'model = "profile"', 'model_context_window = 78000',
+    ].join("\n"));
+    await json(join(codexDir, "models_cache.json"), { models: [
+      { slug: "shared", context_window: 120000, max_context_window: 900000, base_instructions: marker(7).repeat(100000) },
+      ...["manual", "configured", "profile", "cache-only"].map(slug => ({ slug, context_window: 40000 })),
+      { slug: "unknown", context_window: 10_000_001, max_context_window: 900000, total_token_usage: { total_tokens: 999 } },
+    ] });
+    await json(join(claudeDir, "settings.json"), { availableModels: [{ id: "listed", contextWindow: 51000 }], modelPicker: { options: [
+      { model: "shared" }, { model: "explicit", contextWindow: 345678 }, { model: "shared[1m]" },
+    ] } });
+    await json(join(claudeDir, "cache/model-capabilities.json"), { timestamp: 1, models: [
+      { id: "shared", max_input_tokens: 200000, max_tokens: 8192 }, { id: "explicit", max_input_tokens: 30000 },
+      { id: "shared[1m]", max_tokens: 10000, input_tokens: 12345, total_input_tokens: 876543 },
+    ] });
+    const config = { runtimes: { claude: { extra_env: { CLAUDE_CONFIG_DIR: claudeDir } } }, models: [
+      { id: "shared", runtime: "codex" }, { id: "manual", runtime: "codex", context_window: 42000 }, { id: "unknown", runtime: "codex" },
+    ] };
+    const { models } = await detectBridgeCatalog(config, { homeDir });
+    expect(Object.fromEntries(models.map(m => [`${m.runtime}:${m.id}`, m.context_window]))).toStrictEqual({
+      "codex:shared": 120000, "codex:manual": 42000, "codex:configured": 90000, "codex:profile": 78000, "codex:unknown": undefined,
+      "claude:shared": 200000, "claude:explicit": 345678, "claude:listed": 51000, "claude:shared[1m]": undefined,
+    });
+    expect(JSON.stringify(models)).not.toMatch(/private-value|base_instructions|extra_env|total_input_tokens/);
+    expect((await detectBridgeCatalog({ ...config, auto_detect_cli_configs: false }, { homeDir })).models[0]).not.toHaveProperty("context_window");
+  });
+
   it("disables native discovery independently of explicitly configured files and watches absent files", async () => {
     await json(join(homeDir, ".claude/settings.json"), { model: "hidden" });
     await json(join(homeDir, "manual.json"), [{ id: "declared", runtime: "codex" }]);
     const config = { auto_detect_cli_configs: false, model_catalog_files: ["~/manual.json", "missing.json", "~/manual.json"] };
     expect(bridgeCatalogPaths(config, { homeDir, configDir })).toEqual([join(homeDir, "manual.json"), join(configDir, "missing.json")]);
-    expect(bridgeCatalogPaths({}, { homeDir })).toEqual([join(homeDir, ".claude/settings.json"), join(homeDir, ".claude/settings.local.json"), join(homeDir, ".codex/config.toml")]);
+    expect(bridgeCatalogPaths({}, { homeDir })).toEqual([
+      ".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml", ".codex/models_cache.json", ".claude/cache/model-capabilities.json",
+    ].map(path => join(homeDir, path)));
     expect((await detectBridgeCatalog(config, { homeDir, configDir })).models).toEqual([{ id: "declared", runtime: "codex", source: "bridge_config" }]);
   });
 
@@ -194,6 +248,16 @@ describe("target-scoped model catalog resolution", () => {
     });
     expect(codexCatalog.map((m) => m.id)).toEqual(["gpt-6.2-astra"]);
     expect(resolveDefaultModelForTarget("codex", active, runtimeInfo.project_cli)).toBe("gpt-6.2-astra");
+  });
+
+  it("keeps unreported local windows absent in chat and task pickers, including fallback rows", () => {
+    const agent = { ...macAgent, models: [{ id: "claude-opus-4-6", runtime: "claude" as const, context_window: 48000 }] };
+    const options = { runtime: "claude" as const, selectedModel: "claude-sonnet-4-6" };
+    for (const catalog of [resolveCatalogForTarget({ ...options, activeLocalAgent: agent, projectCli: undefined }),
+      resolveLocalTaskModelCatalog({ ...options, agent })]) {
+      expect(catalog.map(item => item.context_window)).toEqual([48000, undefined]);
+    }
+    expect(resolveLocalTaskModelCatalog({ ...options, agent: null }).every(item => item.context_window === undefined)).toBe(true);
   });
 
   it("uses cloud project models and built-in suggestions only when targeting cloud", () => {

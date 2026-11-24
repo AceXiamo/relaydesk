@@ -368,6 +368,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude')),
     model TEXT NOT NULL DEFAULT '',
     reasoning_effort TEXT NOT NULL DEFAULT 'default',
+    fast_mode TEXT NOT NULL DEFAULT 'default' CHECK(fast_mode IN ('default','on','off')),
     execution_target TEXT NOT NULL DEFAULT 'auto',
     resolved_target TEXT NOT NULL DEFAULT '',
     sandbox_mode TEXT NOT NULL DEFAULT 'workspace-write' CHECK(sandbox_mode IN ('read-only','workspace-write')),
@@ -954,6 +955,9 @@ export class Store {
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS tasks_project_deploy ON tasks(project_id, deploy_status, updated_at DESC)");
     const messageCols = this.db.prepare("PRAGMA table_info(chat_messages)").all();
+    if (!messageCols.some((c) => c.name === "error_reason")) {
+      this.db.exec("ALTER TABLE chat_messages ADD COLUMN error_reason TEXT");
+    }
     if (!messageCols.some((c) => c.name === "stop_reason")) {
       this.db.exec("ALTER TABLE chat_messages ADD COLUMN stop_reason TEXT");
     }
@@ -980,7 +984,13 @@ export class Store {
     if (!chatSessionCols.some((c) => c.name === "task_id")) {
       this.db.exec("ALTER TABLE chat_sessions ADD COLUMN task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE");
     }
+    if (!chatSessionCols.some((c) => c.name === "fast_mode")) {
+      this.db.exec("ALTER TABLE chat_sessions ADD COLUMN fast_mode TEXT NOT NULL DEFAULT 'default' CHECK(fast_mode IN ('default','on','off'))");
+    }
     this.migrateChatSessionsForReleases();
+    for (const column of ["context_used_tokens", "context_window_tokens"]) {
+      if (!chatSessionCols.some(c => c.name === column)) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN ${column} INTEGER`);
+    }
     this.migrateReleasesTable();
     this.db.exec("CREATE INDEX IF NOT EXISTS chat_sessions_project_kind ON chat_sessions(project_id, kind, updated_at DESC)");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS chat_sessions_task_unique ON chat_sessions(task_id) WHERE task_id IS NOT NULL");
@@ -1032,6 +1042,7 @@ export class Store {
             runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude')),
             model TEXT NOT NULL DEFAULT '',
             reasoning_effort TEXT NOT NULL DEFAULT 'default',
+            fast_mode TEXT NOT NULL DEFAULT 'default' CHECK(fast_mode IN ('default','on','off')),
             execution_target TEXT NOT NULL DEFAULT 'auto',
             resolved_target TEXT NOT NULL DEFAULT '',
             sandbox_mode TEXT NOT NULL DEFAULT 'read-only' CHECK(sandbox_mode IN ('read-only','workspace-write')),
@@ -1043,12 +1054,12 @@ export class Store {
           );
           INSERT INTO chat_sessions_new (
             id, project_id, kind, task_id, release_id, title, runtime, model,
-            reasoning_effort, execution_target, resolved_target, sandbox_mode,
+            reasoning_effort, fast_mode, execution_target, resolved_target, sandbox_mode,
             network_access, external_session_id, status, created_at, updated_at
           )
           SELECT
             id, project_id, kind, task_id, ${hasReleaseId ? "release_id" : "NULL"}, title, runtime, model,
-            reasoning_effort, execution_target, resolved_target, sandbox_mode,
+            reasoning_effort, fast_mode, execution_target, resolved_target, sandbox_mode,
             network_access, external_session_id, status, created_at, updated_at
           FROM chat_sessions;
           DROP TABLE chat_sessions;
@@ -3010,6 +3021,7 @@ export class Store {
     attachments_json: string;
     status: "streaming" | "done" | "error" | "aborted";
     created_at: string;
+    error_reason?: string | null;
     stop_reason?: ChatMessageRecord["stop_reason"] | null;
   }): ChatMessageRecord {
     let events: ChatToolEvent[] = [];
@@ -3034,6 +3046,7 @@ export class Store {
       events,
       attachments,
       status: row.status,
+      ...(row.error_reason && { error_reason: row.error_reason }),
       ...(row.stop_reason && { stop_reason: row.stop_reason }),
       created_at: row.created_at,
     };
@@ -3143,7 +3156,7 @@ export class Store {
   createChatSession(
     projectId: string,
     data: Partial<Pick<ChatSessionRecord,
-      "kind" | "task_id" | "release_id" | "title" | "runtime" | "model" | "reasoning_effort" | "execution_target" | "sandbox_mode" | "network_access"
+      "kind" | "task_id" | "release_id" | "title" | "runtime" | "model" | "reasoning_effort" | "fast_mode" | "execution_target" | "sandbox_mode" | "network_access"
     >> = {},
   ): ChatSessionRecord {
     this.getProjectRow(projectId);
@@ -3168,10 +3181,10 @@ export class Store {
     const now = nowIso();
     this.db
       .prepare(
-        `INSERT INTO chat_sessions(id, project_id, kind, task_id, release_id, title, runtime, model, reasoning_effort, execution_target, sandbox_mode, network_access, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chat_sessions(id, project_id, kind, task_id, release_id, title, runtime, model, reasoning_effort, fast_mode, execution_target, sandbox_mode, network_access, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, projectId, kind, taskId, releaseId, title, runtime, model, data.reasoning_effort ?? "default",
+      .run(id, projectId, kind, taskId, releaseId, title, runtime, model, data.reasoning_effort ?? "default", runtime === "codex" ? data.fast_mode ?? "default" : "default",
         data.execution_target ?? "auto", sandboxMode, networkAccess, now, now);
     return this.getChatSession(projectId, id);
   }
@@ -4045,8 +4058,8 @@ export class Store {
     projectId: string,
     sessionId: string,
     patch: Partial<Pick<ChatSessionRecord,
-      "title" | "runtime" | "model" | "reasoning_effort" | "execution_target" | "resolved_target" |
-      "sandbox_mode" | "network_access" | "external_session_id" | "status"
+      "title" | "runtime" | "model" | "reasoning_effort" | "fast_mode" | "execution_target" | "resolved_target" |
+      "sandbox_mode" | "network_access" | "external_session_id" | "status" | "context_used_tokens" | "context_window_tokens"
     >>,
   ): ChatSessionRecord {
     const current = this.getChatSession(projectId, sessionId);
@@ -4077,13 +4090,16 @@ export class Store {
     // External thread IDs belong to a particular CLI runtime.
     const externalSessionId = runtime !== current.runtime ? "" :
       (patch.external_session_id?.trim().slice(0, 200) ?? current.external_session_id);
+    const contextChanged = runtime !== current.runtime || model !== current.model || externalSessionId !== current.external_session_id ||
+      (patch.execution_target !== undefined && patch.execution_target !== current.execution_target) ||
+      (patch.resolved_target !== undefined && patch.resolved_target !== current.resolved_target);
     const status = patch.status ?? current.status;
     const now = nowIso();
     this.db
       .prepare(
         `UPDATE chat_sessions
-         SET title = ?, runtime = ?, model = ?, reasoning_effort = ?, execution_target = ?, resolved_target = ?,
-             sandbox_mode = ?, network_access = ?, external_session_id = ?, status = ?, updated_at = ?
+         SET title = ?, runtime = ?, model = ?, reasoning_effort = ?, fast_mode = ?, execution_target = ?, resolved_target = ?,
+             sandbox_mode = ?, network_access = ?, external_session_id = ?, context_used_tokens = ?, context_window_tokens = ?, status = ?, updated_at = ?
          WHERE id = ? AND project_id = ?`,
       )
       .run(
@@ -4091,11 +4107,14 @@ export class Store {
         runtime,
         model,
         patch.reasoning_effort ?? current.reasoning_effort,
+        runtime === "codex" ? patch.fast_mode ?? current.fast_mode ?? "default" : "default",
         patch.execution_target ?? current.execution_target,
         patch.resolved_target ?? (current.resolved_target || (externalSessionId ? "cloud" : "")),
         sandboxMode,
         networkAccess ? 1 : 0,
         externalSessionId,
+        patch.context_used_tokens !== undefined ? patch.context_used_tokens : contextChanged ? null : current.context_used_tokens ?? null,
+        patch.context_window_tokens !== undefined ? patch.context_window_tokens : contextChanged ? null : current.context_window_tokens ?? null,
         status,
         now,
         sessionId,
@@ -4182,6 +4201,7 @@ export class Store {
       content?: string;
       events?: ChatToolEvent[];
       status?: "streaming" | "done" | "error" | "aborted";
+      error_reason?: string;
       stop_reason?: ChatMessageRecord["stop_reason"];
     },
   ): ChatMessageRecord {
@@ -4205,8 +4225,8 @@ export class Store {
       patch.events !== undefined ? JSON.stringify(patch.events) : row.events_json;
     const status = patch.status ?? row.status;
     this.db
-      .prepare("UPDATE chat_messages SET content = ?, events_json = ?, status = ?, stop_reason = COALESCE(?, stop_reason) WHERE id = ?")
-      .run(content, eventsJson, status, patch.stop_reason ?? null, messageId);
+      .prepare("UPDATE chat_messages SET content = ?, events_json = ?, status = ?, stop_reason = COALESCE(?, stop_reason), error_reason = COALESCE(?, error_reason) WHERE id = ?")
+      .run(content, eventsJson, status, patch.stop_reason ?? null, patch.error_reason ?? null, messageId);
     this.db
       .prepare("UPDATE chat_sessions SET updated_at = ? WHERE id = ?")
       .run(nowIso(), row.session_id);
@@ -4215,6 +4235,7 @@ export class Store {
       content,
       events_json: eventsJson,
       status,
+      ...(patch.error_reason && { error_reason: patch.error_reason }),
       ...(patch.stop_reason && { stop_reason: patch.stop_reason }),
     });
   }

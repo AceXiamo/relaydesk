@@ -36,3 +36,12 @@ export function splitInlineThinkContent(raw: string): {
     hasOpenThink,
   };
 }
+
+export function chatMessageContent(message: ChatMessageRecord) {
+  const failed = message.role === "assistant" && message.status === "error";
+  // Older records used these prefixes for failures without generated text.
+  const legacy = failed && !message.error_reason && /^(?:执行失败|执行异常)：([\s\S]+)$/.exec(message.content);
+  const errorReason = failed ? message.error_reason || (legacy && legacy[1]) ||
+    (message.stop_reason && STOP_LABELS[message.stop_reason]) || "执行中断，未记录详细原因。" : undefined;
+  return { ...splitInlineThinkContent(legacy ? "" : message.content), errorReason };
+}

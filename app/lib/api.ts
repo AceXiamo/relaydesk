@@ -613,6 +613,7 @@ export const api = {
       runtime?: ChatRuntime;
       model?: string;
       reasoning_effort?: ChatReasoningEffort;
+      fast_mode?: ChatSessionRecord["fast_mode"];
       execution_target?: string;
       sandbox_mode?: ChatSandboxMode;
       network_access?: boolean;
@@ -635,6 +636,7 @@ export const api = {
       runtime?: ChatRuntime;
       model?: string;
       reasoning_effort?: ChatReasoningEffort;
+      fast_mode?: ChatSessionRecord["fast_mode"];
       execution_target?: string;
       sandbox_mode?: ChatSandboxMode;
       network_access?: boolean;

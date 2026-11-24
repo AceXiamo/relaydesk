@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { messagesWithTurn, ProjectChatStreams } from "../app/lib/chat-streams.ts";
-import { api } from "../app/lib/api.ts";
+import { api, ClientApiError } from "../app/lib/api.ts";
 import type { ChatSessionRecord, ChatStreamEvent } from "../app/lib/types.ts";
 
 function session(project_id: string, id: string): ChatSessionRecord {
@@ -44,6 +44,7 @@ describe("project chat streams", () => {
     const third = otherProject.send(session("q", "a"), "unrelated", []);
     const user = { ...initial.user, id: "user" };
     run.emit({ type: "session", user_message: user, assistant_message_id: "assistant", session: a });
+    run.emit({ type: "context_usage", usage: { used_tokens: 12000, window_tokens: 258000 } });
     run.emit({ type: "reasoning", text: "one" });
     run.emit({ type: "reasoning", text: " two" });
     run.emit({ type: "tool", event: { id: "cmd", tool: "shell", summary: "listing", status: "running" } });
@@ -54,6 +55,10 @@ describe("project chat streams", () => {
     const live = streams.snapshot().get("a")!;
     expect(live).toMatchObject({ running: true, assistant: { content: "partial", events: [{ id: "cmd" }] },
       statusLine: "正在生成回复", trace: { entries: [{ kind: "reasoning", text: "one two" }] } });
+    expect(live.session).toMatchObject({ context_used_tokens: 12000, context_window_tokens: 258000 });
+    expect(streams.snapshot().get("b")?.session.context_used_tokens).toBeUndefined();
+    run.emit({ type: "context_usage", usage: { used_tokens: 7200 } });
+    expect(streams.snapshot().get("a")?.session).toMatchObject({ context_used_tokens: 7200, context_window_tokens: null });
     expect(messagesWithTurn([user, { ...live.assistant, content: "" }], live)).toEqual([user, live.assistant]);
     expect(streams.snapshot().get("b")?.assistant.content).toBe("");
     expect(otherProject.snapshot().get("a")?.user.content).toBe("unrelated");
@@ -132,6 +137,29 @@ describe("project chat streams", () => {
     expect(transport.streamCodexChatMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("resubscribes after Wi-Fi changes without creating a second turn", async () => {
+    const { transport, requests } = fixture();
+    const subscribe = vi.fn<typeof api.subscribeCodexChatStream>();
+    const streams = new ProjectChatStreams({ ...transport, subscribeCodexChatStream: subscribe });
+    const s = session("p", "s"), result = streams.send(s, "one prompt", []);
+    const turn = streams.snapshot().get(s.id)!;
+    const active = { ...s, status: "running" as const, active_run_id: turn.runId };
+    const req = requests.get("p/s")!;
+    req.emit({ type: "session", session: active, user_message: turn.user, assistant_message_id: "a" });
+    req.emit({ type: "text_delta", delta: "partial" });
+    transport.getCodexChatSession.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockResolvedValue({ session: active, messages: [] });
+    subscribe.mockImplementationOnce(async (_p, _s, emit) => {
+      emit({ type: "done", session: s, message: { ...turn.assistant, id: "a", content: "complete", status: "done" } });
+      return true;
+    });
+    req.end();
+    await result;
+    expect(streams.snapshot().get(s.id)).toMatchObject({ running: false, assistant: { content: "complete" } });
+    expect(transport.streamCodexChatMessage).toHaveBeenCalledTimes(1);
+    expect(transport.getCodexChatSession).toHaveBeenCalledTimes(2);
+    expect(subscribe).toHaveBeenCalledTimes(1);
+  });
+
   it("retries an early stop only after the same run registers", async () => {
     const { streams, transport, requests } = fixture();
     const a = session("p", "a");
@@ -197,18 +225,51 @@ describe("project chat streams", () => {
     const next = streams.send(a, "next", [], turn.runId);
     old.emit({ type: "error", error: "timeout", message: { ...turn.assistant, id: matches ? "registered" : "unrelated", status: "error", stop_reason: "total_timeout" } });
     old.end();
-    expect(transport.streamCodexChatMessage).toHaveBeenCalledTimes(matches ? 2 : 1);
+    expect(transport.streamCodexChatMessage).toHaveBeenCalledTimes(1);
     await expect(first).rejects.toThrow("timeout");
-    if (!matches) {
-      await expect(next).rejects.toThrow("追问未发送");
-      return;
+    await expect(next).rejects.toThrow("追问未发送");
+    expect(streams.snapshot().get("a")).toMatchObject({ saved: matches, assistant: { error_reason: "timeout" } });
+    expect(streams.takeUnsent("a")?.content).toBe("next");
+  });
+
+  it("rolls back a rejected POST and accepts the draft only on manual submission", async () => {
+    const { streams, transport, requests } = fixture();
+    const a = session("p", "a");
+    const accepted = vi.fn();
+    const images = [{ kind: "image" as const, ref: "img.png", label: "img" }];
+    for (let i = 0; i < 2; i++) {
+      transport.streamCodexChatMessage.mockRejectedValueOnce(new ClientApiError(409, "本机节点离线"));
+      await expect(streams.send(a, "draft", images, undefined, accepted)).rejects.toThrow("离线");
+      expect(streams.snapshot().has(a.id)).toBe(false);
+      expect(accepted).not.toHaveBeenCalled();
     }
-    const successor = streams.snapshot().get("a")!;
-    expect(successor.previous[0].assistant.stop_reason).toBe("total_timeout");
+    const manual = streams.send(a, "draft", images, undefined, accepted);
     const req = requests.get("p/a")!;
-    req.emit({ type: "done", session: a, message: { ...successor.assistant, status: "done" } });
+    const { user, assistant } = streams.snapshot().get("a")!;
+    req.emit({ type: "session", session: a, user_message: user, assistant_message_id: "saved" });
+    expect(accepted).toHaveBeenCalledOnce();
+    expect(user.attachments).toEqual(images);
+    req.emit({ type: "done", session: a, message: { ...assistant, id: "saved", status: "done" } });
     req.end();
-    await next;
+    await manual;
+    expect(transport.streamCodexChatMessage).toHaveBeenCalledTimes(3);
+  });
+
+  it("restores the saved turn and pending draft if its follow-up POST is rejected", async () => {
+    const { streams, transport, requests } = fixture();
+    const a = session("p", "a");
+    const first = streams.send(a, "question", []);
+    const turn = streams.snapshot().get(a.id)!;
+    const follow = streams.send(a, "next", [], turn.runId);
+    const req = requests.get("p/a")!;
+    transport.streamCodexChatMessage.mockRejectedValueOnce(new ClientApiError(409, "本机节点离线"));
+    req.emit({ type: "done", session: a, message: { ...turn.assistant, status: "aborted", content: "partial" } });
+    req.end();
+    await first;
+    await expect(follow).rejects.toThrow("离线");
+    expect(streams.snapshot().get(a.id)).toMatchObject({ assistant: { content: "partial" }, running: false });
+    expect(streams.takeUnsent(a.id)?.content).toBe("next");
+    expect(transport.streamCodexChatMessage).toHaveBeenCalledTimes(2);
   });
 
   it("serializes the generated run ID in the message and targeted abort POST", async () => {
@@ -301,7 +362,7 @@ describe("project chat streams", () => {
     expect(transport.getCodexChatSession).not.toHaveBeenCalled();
   });
 
-  it.each(["done", "error"] as const)("hands a live observed run to its follow-up exactly once on saved %s", async terminal => {
+  it.each(["done", "error"] as const)("hands off a live observed follow-up only after successful completion or stop (%s)", async terminal => {
     const { streams, transport, requests, eof, subscribe, remote, idle, assistant, snapshot } = observedFixture();
     streams.observe(remote, []);
     const emit = subscribe.mock.calls[0][2];
@@ -311,6 +372,14 @@ describe("project chat streams", () => {
     expect(transport.abortCodexChatSession).toHaveBeenCalledExactlyOnceWith("p", "s", "remote", "follow_up");
     const message = { ...assistant, status: terminal === "error" ? "error" as const : "aborted" as const };
     emit(terminal === "error" ? { type: "error", error: "中断", message } : { type: "done", session: idle, message });
+    if (terminal === "error") {
+      await expect(follow).rejects.toThrow("追问未发送");
+      expect(streams.snapshot().get("s")?.assistant).toMatchObject({ content: "partial", error_reason: "中断" });
+      expect(streams.takeUnsent("s")?.content).toBe("改为检查目录");
+      expect(transport.streamCodexChatMessage).not.toHaveBeenCalled();
+      eof.resolve(true);
+      return;
+    }
     const successor = streams.snapshot().get("s")!;
     expect(successor.previous[0].assistant).toEqual(message);
     expect(transport.streamCodexChatMessage).toHaveBeenCalledExactlyOnceWith("p", "s", { run_id: successor.runId, content: "改为检查目录", attachments: [] }, expect.any(Function));

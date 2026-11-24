@@ -147,7 +147,11 @@ import type {
 } from "../app/lib/types.ts";
 
 function chatModelSelection(data: Record<string, unknown>) {
-  const fields: Partial<Pick<ChatSessionRecord, "runtime" | "model" | "reasoning_effort" | "execution_target">> = {};
+  const fields: Partial<Pick<ChatSessionRecord, "runtime" | "model" | "reasoning_effort" | "execution_target" | "fast_mode">> = {};
+  if ("fast_mode" in data) {
+    if (data.fast_mode !== "default" && data.fast_mode !== "on" && data.fast_mode !== "off") throw new ApiError(400, "Fast 模式无效");
+    fields.fast_mode = data.fast_mode;
+  }
   if ("runtime" in data) {
     if (data.runtime !== "codex" && data.runtime !== "claude") throw new ApiError(400, "运行工具无效");
     fields.runtime = data.runtime;

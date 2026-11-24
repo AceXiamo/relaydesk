@@ -1,6 +1,7 @@
+import { ContextUsageLabel } from "./agent-chat/ContextUsageLabel.tsx";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "~/lib/api.ts";
-import { splitInlineThinkContent, STOP_LABELS } from "~/lib/chat-content.ts";
+import { chatMessageContent, STOP_LABELS } from "~/lib/chat-content.ts";
 import { messagesWithTurn, type ProjectChatStreams } from "~/lib/chat-streams.ts";
 import { formatRelativeTime } from "~/lib/format.ts";
 import { effortLabels, resolveLocalTaskAgent } from "~/lib/model-catalog.ts";
@@ -12,7 +13,7 @@ import type {
   ProjectExecutionRoutingResponse,
   TaskRecord,
 } from "~/lib/types.ts";
-import { ThinkingTrace, ToolChipsGroup } from "./agent-chat/AgentPrimitives.tsx";
+import { ChatFailureNotice, ThinkingTrace, ToolChipsGroup } from "./agent-chat/AgentPrimitives.tsx";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./agent-chat/RichPromptEditor.tsx";
 import { Icon } from "./Icon.tsx";
 import {
@@ -73,7 +74,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
   const turn = useSyncExternalStore(streams.subscribe, readTurn, readTurn);
   const session = turn?.session ?? data?.session;
   const running = turn?.running ?? session?.status === "running";
-  const blocked = Boolean(turn?.pending || turn?.stopping || (running && !turn));
+  const blocked = Boolean(turn?.submitting || turn?.pending || turn?.stopping || (running && !turn));
 
   const agents = routing?.agents ?? [];
   const effectivePriority = routing?.effective_priority;
@@ -103,6 +104,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
     [agents, effectivePriority, task.project_id, activeTarget, activeRuntime],
   );
 
+  const offlineTarget = activeTarget.startsWith("local:") && routing && !resolvedAgent.agent?.online;
   const runtimeAvailability = useMemo(() => {
     const check = (rt: ChatRuntime) =>
       resolveLocalTaskAgent({
@@ -327,12 +329,13 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
   const send = () => {
     const content = draft.trim();
     const hasImages = attachments.length > 0;
-    if (!session || (!content && !hasImages) || blocked || savingConfig || uploadingImages) return;
+    if (!session || (!content && !hasImages) || offlineTarget || blocked || savingConfig || uploadingImages) return;
     const finalContent = content || "请查看附带的图片并继续处理当前任务。";
-    const completion = streams.send(session, finalContent, attachments, turn?.runId);
+    const completion = streams.send(session, finalContent, attachments, turn?.runId, () => {
+      setDraft(current => current === draft ? "" : current);
+      setAttachments(current => current.filter(item => !attachments.includes(item)));
+    });
     if (!completion) return;
-    setDraft("");
-    setAttachments([]);
     followBottom.current = true;
     void completion.catch(err => toast.error(err instanceof Error ? err.message : "发送失败"));
   };
@@ -498,7 +501,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
               const assistant = msg.role === "assistant";
               const trace = turn?.assistant.id === msg.id ? turn.trace : turn?.previous.find(pair => pair.assistant.id === msg.id)?.trace;
               const live = assistant && running && msg.id === turn?.assistant.id;
-              const { thinkingBlocks, visibleContent } = splitInlineThinkContent(msg.content);
+              const { thinkingBlocks, visibleContent, errorReason } = chatMessageContent(msg);
               const label = assistant ? "Local Agent" : brief ? "任务说明" : msg.role === "system" ? "系统" : "你";
               return <article key={msg.id} className={assistant ? "space-y-2" : "rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] px-4 py-3"}>
                 <div className="mb-2 flex items-center gap-2 text-xs text-[var(--text-muted)]">
@@ -510,7 +513,8 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                   <ThinkingTrace active={Boolean(live)} statusLabel={turn?.statusLine || "正在执行"} startedAt={trace?.startedAt} durationMs={trace?.durationMs} entries={[...(trace?.entries ?? []), ...thinkingBlocks.map((text, i) => ({ id: `inline-${i}`, kind: "reasoning" as const, text }))]} />
                   <ToolChipsGroup events={msg.events} isStreaming={live} />
                 </>}
-                {brief && msg.content.length > 550 ? <details><summary className="cursor-pointer text-xs text-[var(--text-secondary)]">展开任务说明</summary><MarkdownContent content={msg.content} projectId={task.project_id} compact /></details> : <MarkdownContent content={assistant ? visibleContent : msg.content} projectId={task.project_id} compact />}
+                {brief && msg.content.length > 550 ? <details><summary className="cursor-pointer text-xs text-[var(--text-secondary)]">展开任务说明</summary><MarkdownContent content={msg.content} projectId={task.project_id} compact /></details> : <MarkdownContent content={assistant ? visibleContent : msg.content} projectId={task.project_id} streaming={Boolean(live)} compact />}
+                {errorReason && <ChatFailureNotice reason={errorReason} />}
                 {msg.attachments.length > 0 && (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     {msg.attachments.map(ref =>
@@ -649,6 +653,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                 </div>
               )}
 
+              <ContextUsageLabel session={session} />
               <RichPromptEditor
                 ref={composerRef}
                 value={draft}
@@ -690,6 +695,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                       ? turn.stopFailed
                         ? "等待当前回复结束"
                         : "正在停止当前回复…"
+                      : offlineTarget ? "本机节点离线。上线后可手动发送草稿。"
                       : savingConfig
                         ? "正在保存执行配置…"
                         : "Enter 发送 · Shift+Enter 换行 · 支持 `行内代码` 与 ``` 代码块"}
@@ -697,7 +703,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
                   {running && <Button type="button" size="xs" variant="secondary" disabled={blocked} onClick={stop}>停止</Button>}
-                  <Button type="submit" size="xs" variant="primary" icon="send" disabled={(!draft.trim() && attachments.length === 0) || blocked || savingConfig || uploadingImages}>{running ? "发送插话" : "发送"}</Button>
+                  <Button type="submit" size="xs" variant="primary" icon="send" disabled={(!draft.trim() && attachments.length === 0) || offlineTarget || blocked || savingConfig || uploadingImages}>{running ? "发送插话" : "发送"}</Button>
                 </div>
               </div>
             </div>

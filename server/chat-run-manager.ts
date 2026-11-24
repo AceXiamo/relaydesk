@@ -250,7 +250,9 @@ export class ChatRunManager {
   }
 
   private emit(run: ActiveRun, event: ChatStreamEvent): void {
-    if (event.type === "text_delta") {
+    if (event.type === "context_usage") {
+      run.session = { ...run.session, context_used_tokens: event.usage.used_tokens, context_window_tokens: event.usage.window_tokens ?? null };
+    } else if (event.type === "text_delta") {
       run.content = (run.content + event.delta).slice(0, 120_000);
     } else if (event.type === "text_replace") {
       run.content = event.text.slice(0, 120_000);
@@ -263,6 +265,8 @@ export class ChatRunManager {
     } else if (event.type === "status") {
       run.statusLine = event.message;
     } else if (event.type === "session_updated") {
+      // An asynchronous title update must not roll back a newer CLI reading.
+      event = { ...event, session: { ...event.session, context_used_tokens: run.session.context_used_tokens, context_window_tokens: run.session.context_window_tokens } };
       run.session = { ...event.session, active_run_id: run.id };
     }
 
@@ -374,6 +378,8 @@ export class ChatRunManager {
           : undefined;
       current = this.store.updateChatSession(projectInfo.id, sessionId, {
         ...(autoTitle ? { title: autoTitle } : {}),
+        // Each turn waits for its own measurement, including turns on a different fallback node.
+        context_used_tokens: null, context_window_tokens: null,
         status: "running",
       });
       const userMsg = this.store.addChatMessage(sessionId, {
@@ -618,6 +624,7 @@ export class ChatRunManager {
             runtime: session.runtime,
             model: session.model,
             reasoning_effort: session.reasoning_effort,
+            fast_mode: session.fast_mode,
             sandbox_mode: session.sandbox_mode,
             network_access: session.network_access,
             resume_session_id: canResumePrior ? session.external_session_id : "",
@@ -683,10 +690,8 @@ export class ChatRunManager {
 
       const saved = this.store.transaction(true, () => {
         const updatedMsg = this.store.updateChatMessage(run.assistantMessageId, {
-          content:
-            result.status === "error" && !result.content && result.error
-              ? `执行失败：${result.error}`
-              : result.content,
+          content: result.status === "error" ? result.content || run.content : result.content,
+          error_reason: result.status === "error" ? result.error : undefined,
           events: result.events,
           status: result.status,
           stop_reason: stopReason,
@@ -700,6 +705,8 @@ export class ChatRunManager {
         const nextExternalId = canResume ? result.externalSessionId : "";
         const updatedSession = this.store.updateChatSession(projectInfo.id, sessionId, {
           external_session_id: nextExternalId,
+          context_used_tokens: canResume && current.model === session.model ? run.session.context_used_tokens : null,
+          context_window_tokens: canResume && current.model === session.model ? run.session.context_window_tokens : null,
           resolved_target: targetKey,
           status: result.status === "error" ? "error" : "idle",
         });
@@ -758,10 +765,13 @@ export class ChatRunManager {
       terminalStatus = "error";
       const { savedMsg, taskFinalized, releaseFinalized } = this.store.transaction(true, () => {
         const msg = this.store.updateChatMessage(run.assistantMessageId, {
-          content: `执行异常：${errMsg}`,
+          content: run.content,
+          events: Array.from(run.events.values()),
+          error_reason: errMsg,
           status: "error",
         });
         const updatedSession = this.store.updateChatSession(projectInfo.id, sessionId, {
+          context_used_tokens: run.session.context_used_tokens, context_window_tokens: run.session.context_window_tokens,
           status: "error",
         });
         let finalized = false;

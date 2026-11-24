@@ -1,4 +1,4 @@
-import type { api } from "./api.ts";
+import { ClientApiError, type api } from "./api.ts";
 import type { ChatContextRef, ChatMessageRecord, ChatSessionRecord, ChatStreamEvent } from "./types.ts";
 import type { TraceEntry } from "../components/agent-chat/AgentPrimitives.tsx";
 
@@ -27,12 +27,14 @@ interface Turn extends MessagePair {
   stopFailed?: boolean;
   statusLine: string;
   running: boolean;
+  submitting?: boolean;
   saved?: boolean;
 }
 
 interface Run {
   turn: Turn;
   registered: boolean;
+  onAccepted?: () => void;
   awaitingPair?: boolean;
   error?: string;
   retryStop?: () => void;
@@ -151,16 +153,17 @@ export class ProjectChatStreams {
   }
 
   // The caller supplies the run it saw. A stale click must never interrupt its successor.
-  send(session: ChatSessionRecord, content: string, attachments: ChatContextRef[], expectedRunId?: string): Promise<void> | null {
+  send(session: ChatSessionRecord, content: string, attachments: ChatContextRef[], expectedRunId?: string, onAccepted?: () => void): Promise<void> | null {
     const run = this.runs.get(session.id);
     if (!run) {
       const last = this.turns.get(session.id);
       if (last?.pending || (session.status === "running" && !last) || (last && expectedRunId && last.runId !== expectedRunId)) return null;
-      return this.start(session, userMessage(session.id, content, attachments), last ? this.completed(last) : []);
+      return this.start(session, userMessage(session.id, content, attachments), last, onAccepted);
     }
     if (expectedRunId !== run.turn.runId || run.turn.stopping) return null;
     const completion = new Promise<void>((resolve, reject) => { run.queued = { resolve, reject }; });
     this.update(run, { pending: userMessage(session.id, content, attachments), stopping: "follow_up" });
+    onAccepted?.();
     void this.requestStop(run, "follow_up").catch(() => {
       // Even if the stop POST fails, natural completion can still release the follow-up.
       this.update(run, { stopFailed: true });
@@ -199,16 +202,16 @@ export class ProjectChatStreams {
 
   private finish(run: Run, assistant: ChatMessageRecord, session: ChatSessionRecord, saved: boolean) {
     if (!this.current(run)) return;
-    const turn = { ...run.turn, assistant, session, running: false, saved, stopping: undefined, statusLine: "",
+    const turn = { ...run.turn, assistant, session, running: false, submitting: false, saved, stopping: undefined, statusLine: "",
       trace: { ...run.turn.trace, durationMs: Date.now() - run.turn.trace.startedAt } };
     this.runs.delete(session.id);
     run.retryStop?.();
-    if (saved && turn.pending && run.queued) {
+    if (saved && assistant.status !== "error" && turn.pending && run.queued) {
       // Consume before publishing the successor, independent of abort ACK, EOF or React mounting.
-      void this.start(session, turn.pending, this.completed(turn)).then(run.queued.resolve, run.queued.reject);
+      void this.start(session, turn.pending, turn).then(run.queued.resolve, run.queued.reject);
     } else {
       this.publish(session.id, turn);
-      run.queued?.reject(new Error("未能确认上一轮已保存，追问未发送"));
+      run.queued?.reject(new Error(saved ? "上一轮执行失败，追问未发送" : "未能确认上一轮已保存，追问未发送"));
     }
     if (session.task_id) this.taskActivity(session.task_id, "turn_finished");
   }
@@ -240,7 +243,7 @@ export class ProjectChatStreams {
     void this.follow(run);
   }
 
-  private async follow(run: Run) {
+  private async subscribeRun(run: Run) {
     const { session } = run.turn;
     if (this.transport.subscribeCodexChatStream) {
       const controller = new AbortController();
@@ -258,14 +261,30 @@ export class ProjectChatStreams {
         // Reconcile even if the connection closed before the snapshot arrived.
       }
     }
+  }
+
+  private async follow(run: Run) {
+    if (this.transport.subscribeCodexChatStream) await this.subscribeRun(run);
     if (this.current(run)) await this.waitForHistory(run);
   }
 
   private async waitForHistory(run: Run) {
     const { session } = run.turn;
+    let retryMs = 500;
     try {
       while (this.current(run)) {
-        const res = await this.transport.getCodexChatSession(session.project_id, session.id);
+        let res: Awaited<ReturnType<Transport["getCodexChatSession"]>>;
+        try {
+          res = await this.transport.getCodexChatSession(session.project_id, session.id);
+        } catch (err) {
+          // A missing network response is not evidence that the CLI stopped. Only retry reads.
+          if (!(err instanceof TypeError || (err instanceof ClientApiError && err.status >= 500))) throw err;
+          this.update(run, { statusLine: "连接暂时中断，正在重新获取本轮进度…" });
+          await new Promise(resolve => setTimeout(resolve, retryMs));
+          retryMs = Math.min(10_000, retryMs * 2);
+          continue;
+        }
+        retryMs = 500;
         if (!this.current(run)) return;
         const candidate = res.messages.at(-1), user = res.messages.at(-2);
         const knownPair = !run.awaitingPair;
@@ -279,6 +298,7 @@ export class ProjectChatStreams {
           // The history tail is enough to display, but not proof that an unknown/older turn
           // owns a pending follow-up. Preserve the draft rather than steering its successor.
           const safeToContinue = !run.queued || (knownPair && candidate?.id === saved.id);
+          if (saved.status === "error") run.error = saved.error_reason || "本轮执行失败";
           this.finish(run, saved, res.session, safeToContinue);
           return true;
         }
@@ -289,7 +309,8 @@ export class ProjectChatStreams {
           if (!run.turn.pending) this.observe(res.session, res.messages);
           return;
         }
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await this.subscribeRun(run);
+        if (this.current(run)) await new Promise(resolve => setTimeout(resolve, 1000));
       }
     } catch (err) {
       this.fail(run, err instanceof Error ? err.message : "读取回复状态失败");
@@ -297,8 +318,9 @@ export class ProjectChatStreams {
   }
 
   private fail(run: Run, error: string) {
+    run.error = error;
     const { assistant, session } = run.turn;
-    this.finish(run, { ...assistant, status: "error", content: assistant.content || error }, { ...session, status: "error" }, false);
+    this.finish(run, { ...assistant, status: "error", error_reason: error }, { ...session, status: "error" }, false);
   }
 
   private onEvent(run: Run, ev: ChatStreamEvent) {
@@ -320,11 +342,14 @@ export class ProjectChatStreams {
       }
       case "session": {
         run.registered = true;
-        update({ session: ev.session, user: ev.user_message, assistant: { ...assistant, id: ev.assistant_message_id } });
+        run.onAccepted?.();
+        run.onAccepted = undefined;
+        update({ submitting: false, session: ev.session, user: ev.user_message, assistant: { ...assistant, id: ev.assistant_message_id } });
         run.retryStop?.();
         run.retryStop = undefined;
         break;
       }
+      case "context_usage": update({ session: { ...session, context_used_tokens: ev.usage.used_tokens, context_window_tokens: ev.usage.window_tokens ?? null } }); break;
       case "session_updated": update({ session: ev.session }); break;
       case "task_updated": this.taskActivity(ev.task_id ?? session.task_id ?? undefined, ev.action); break;
       case "reasoning":
@@ -356,17 +381,17 @@ export class ProjectChatStreams {
       case "error":
         run.error = ev.error;
         if (ev.message && ev.message.id === assistant.id && ev.message.status !== "streaming") {
-          this.finish(run, ev.message, { ...run.turn.session, status: "error" }, true);
+          this.finish(run, { ...ev.message, error_reason: ev.message.error_reason || ev.error }, { ...run.turn.session, status: "error" }, true);
         } else this.fail(run, ev.error);
         break;
     }
   }
 
-  private async start(session: ChatSessionRecord, user: ChatMessageRecord, previous: MessagePair[]) {
+  private async start(session: ChatSessionRecord, user: ChatMessageRecord, prior?: Turn, onAccepted?: () => void) {
     const runId = newRunId();
     const startedAt = Date.now();
-    const run: Run = { registered: false, turn: {
-      session, runId, previous, running: true, statusLine: "正在连接项目空间与 CLI", user,
+    const run: Run = { registered: false, onAccepted, turn: {
+      session, runId, previous: prior ? this.completed(prior) : [], running: true, submitting: true, statusLine: "正在连接项目空间与 CLI", user,
       assistant: { ...user, id: `tmp-a-${runId}`, role: "assistant", content: "", attachments: [], status: "streaming" },
       trace: { startedAt, entries: [] },
     } };
@@ -378,11 +403,21 @@ export class ProjectChatStreams {
       if (this.current(run)) throw new Error("回复连接已中断");
     } catch (err) {
       if (this.current(run)) {
-        run.error = err instanceof Error ? err.message : "发送失败";
-        if (run.registered && run.turn.stopping) {
-          // A disconnected reader is not a save barrier. Reconcile the exact assistant via GET.
-          if (await this.waitForHistory(run)) run.error = "";
-        } else this.fail(run, run.error);
+        // A rejected POST never created a turn. Restore the prior transcript (and any queued draft).
+        if (!run.registered && err instanceof ClientApiError && err.status >= 400 && err.status < 500) {
+          this.runs.delete(session.id);
+          this.publish(session.id, prior);
+          run.retryStop?.();
+          run.queued?.reject(err);
+          throw err;
+        }
+        if (run.registered) {
+          this.update(run, { statusLine: "回复连接中断，正在重新连接本轮执行…" });
+          await this.waitForHistory(run);
+        } else {
+          run.error = err instanceof Error ? err.message : "发送失败";
+          this.fail(run, run.error);
+        }
       }
     }
     if (run.error) throw new Error(run.error);

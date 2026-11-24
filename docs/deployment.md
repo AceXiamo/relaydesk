@@ -95,8 +95,36 @@ CI 通过后会依次发布两个 `linux/amd64` 镜像：
 
 ```bash
 SHA=$(git rev-parse HEAD)
-gh run list -R AceXiamo/relaydesk -w image.yml -L 5
-gh run watch -R AceXiamo/relaydesk --exit-status
+RUN_ID=$(gh run list -R AceXiamo/relaydesk -w image.yml -c "$SHA" -L 1 --json databaseId --jq '.[0].databaseId // empty')
+test -n "$RUN_ID" && gh run watch "$RUN_ID" -R AceXiamo/relaydesk --exit-status
+```
+
+### 查询镜像构建返回 404
+
+先用同一会话检查身份和仓库可见性：
+
+```bash
+gh api user --jq .login
+gh api repos/AceXiamo/relaydesk --jq .full_name
+gh api rate_limit --jq .resources.core
+```
+
+REL-4 查询构建时，用户接口返回 401，私有仓库和工作流接口均返回 404，API 配额仍有余量。Git 能读取远端分支时，`gh` 仍可能使用另一套凭据。若用户和仓库接口均成功，再核对 Actions 读取权限、工作流路径和目标提交。遇到 403 或 429 时，按响应中的限流信息处理；Actions 计费分钟数需单独核实。[GitHub REST API 排障文档](https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api)
+
+若本机 Git 已配置本仓库的 GitHub HTTPS 凭据，可在可信终端的子 shell 中临时复用它。以下命令按发布 SHA 查询构建并等待结束，凭据仅在子 shell 内使用。不要开启命令跟踪或单独打印 credential helper 的输出。
+
+```bash
+(
+  set +x
+  set -eu
+  set -o pipefail
+  GH_TOKEN=$(printf 'url=https://github.com/AceXiamo/relaydesk.git\n\n' |
+    GIT_TERMINAL_PROMPT=0 git credential fill | sed -n 's/^password=//p')
+  test -n "$GH_TOKEN"
+  export GH_TOKEN
+  RUN_ID=$(gh run list -R AceXiamo/relaydesk -w image.yml -c "$SHA" -L 1 --json databaseId --jq '.[0].databaseId // empty')
+  test -n "$RUN_ID" && gh run watch "$RUN_ID" -R AceXiamo/relaydesk --exit-status
+)
 ```
 
 ---
@@ -113,7 +141,7 @@ Browser (SSE) <--> tw-1:relaydesk-web-1 <== WSS /api/bridge/ws ==> 本机 relayd
 
 根据 [`agent/bridge/index.ts`](../agent/bridge/index.ts) 的当前实现：
 1. `tw-1` 执行 `pier deploy -project relaydesk` 重建 `relaydesk-web-1` 的瞬间，WSS 连接立即断开；
-2. `relaydesk-bridge.mjs` 默认未启用断连宽限期（`disconnectGraceMs` 未配置），收到 `socket.once("close")` 后会**立刻 `abort()` 正在执行的本地 Agent 子进程**；
+2. 新版 Web 与 Bridge 都支持短时重连时，异常断网默认保留交互聊天最多 30 秒；只有同一个 Bridge 进程、同一个运行 ID、仍有效的绑定和原 Web 进程可以接回，不会重跑提示词、工具或已发出的 RPC。正常关闭、撤销令牌和独立 CLI 审计不使用此机制。**Web 重建会丢失内存中的原运行，不能靠重连跨过部署**；
 3. 如果你在同一个命令流里「同步运行 `pier deploy -project relaydesk` 然后再执行健康检查或重启本地 bridge」，Agent 进程会在容器重启瞬间被中断，后续步骤根本不会执行；若本地 SSH 还带着 PTY/管道挂在前台，甚至可能给远端带来 `SIGHUP`/`SIGPIPE` 干扰。
 
 因此，**Local Agent 执行自我迭代发布必须拆成三个阶段**：所有不断连的工作放在前面同步完成；Web 容器切流作为本轮的**最后一步**并以脱离进程树（detached）方式触发；验收在切流恢复后（下一轮或本机日志）完成。
@@ -125,8 +153,7 @@ PIER_SSH="/Users/AceXiamo/work/project/server_manage/scripts/pier-ssh"
 SHA=$(git rev-parse HEAD)
 MSG=$(git log -1 --pretty=%s)
 
-# 1. 确认 CI 已成功推送对应 SHA 镜像
-gh run watch -R AceXiamo/relaydesk --exit-status
+# 1. 按上一节确认该 SHA 的 image.yml 构建成功后继续
 
 # 2. 查看当前线上版本与运行状态（记录回滚基线 PREV_SHA）
 $PIER_SSH tw-1 '

@@ -178,6 +178,17 @@ export interface ModelCatalogItem {
 ```
 
 ### 3.2 本机 Bridge 配置文件与 CLI 配置自动发现
+
+受信任节点可在本机 bridge 配置中分别启用 `codex_full_access` 和 `claude_full_access`。两项默认关闭，只有 JSON 布尔值 `true` 才生效。授权覆盖该节点承接的所有已绑定项目。每个新回合和续聊都按当前回合的权限重新判定。
+
+| 本机回合 | Codex | Claude |
+| --- | --- | --- |
+| 可写、允许联网，且对应 CLI 已启用全权限 | `exec` 和 `exec resume` 均使用 `--dangerously-bypass-approvals-and-sandbox` | `bypassPermissions`，可调用本机配置的 MCP 和内置工具 |
+| 可写，关闭联网或未启用对应开关 | `workspace-write` 沙箱，按本回合设置限制命令联网 | 可写工具白名单 |
+| 只读对话、工单讨论、PR 审计 | `read-only` 沙箱 | 只读工具白名单 |
+
+全权限回合可访问运行 bridge 的系统账户有权使用的文件和服务，范围可超出项目工作目录。`allowed_roots` 约束项目目录绑定。数据源凭据下发仍由项目绑定的 `allow_datasource_secrets` 单独控制。关闭对应开关后，节点加载新配置，后续回合恢复受限模式，含已有线程的续聊。云端执行沿用云端权限配置。
+
 配置文件路径默认 `~/.config/relaydesk-bridge/config.json`（权限 `0600`，可通过 `--config` 或 `RELAYDESK_BRIDGE_CONFIG` 覆盖）：
 
 ```json
@@ -187,6 +198,8 @@ export interface ModelCatalogItem {
   "agent_name": "MacBook Pro (主力)",
   "max_concurrency": 2,
   "accept_cli_runs": true,
+  "codex_full_access": false,
+  "claude_full_access": false,
   "auto_detect_cli_configs": true,
   "allowed_roots": ["/Users/you/work"],
   "runtimes": {
@@ -249,7 +262,7 @@ Bridge 启动及文件变更时按以下优先级合并模型目录（高优先�
    - **Claude Code**：读取 `~/.claude/settings.json`（及 `~/.claude/settings.local.json`），提取 `model`、`availableModels` / `models`（如存在）、`env.ANTHROPIC_MODEL`、`env.ANTHROPIC_DEFAULT_OPUS_MODEL` / `SONNET` / `HAIKU`、`effortLevel` 等非敏感字段。
    - **Codex CLI**：读取 `~/.codex/config.toml`，提取顶级 `model`、`model_reasoning_effort`、各 `[profiles.*]` 下的 `model` 与 `model_reasoning_effort`。
    - **可选自定义模型表路径**：支持在 `config.json` 指定 `model_catalog_files: ["~/.claude/models.json"]`，方便用户复用已维护的本地模型清单。
-3. **内置元数据补全表**：对未手填 `context_window` / `effort_levels` 的已知官方模型自动补齐常见参数。
+3. **上下文窗口**按运行时和完整模型 ID 匹配。Bridge 优先保留显式填写的容量。Codex 读取顶级或对应 profile 的 `model_context_window`，其次读取 `models_cache.json` 的 `context_window`。Claude 可读取模型条目和选择器显式声明的窗口，也可从 `cache/model-capabilities.json` 的 `max_input_tokens` 补全。缓存变化会触发目录刷新。缺少可靠容量时，模型行省略窗口。内置表仍可补全 `effort_levels` 等其他元数据。
 4. **热更新**：Bridge 使用 `fs.watch`（500ms 防抖）监听 `config.json` 与上述 CLI 配置文件，变更后自动推送 `catalog.sync` 给云端，无需重启；Web 端也提供「刷新目录」按钮触发 `catalog.refresh`。
 
 ### 3.3 云端自定义模型列表补全
@@ -350,8 +363,14 @@ CREATE TABLE IF NOT EXISTS project_agent_bindings (
 - **服务端挂载**：在 `server.ts` 的 `http.Server` 上监听 `upgrade` 事件，仅拦截路径 `/api/bridge/ws`（使用 `ws` 包的 `WebSocketServer({ noServer: true })`）。
 - **鉴权**：HTTP Upgrade 请求必须携带 `Authorization: Bearer <agent_token>`，服务端计算 SHA-256 与 `bridge_agents.token_hash` 常量时间比对；失败直接返回 `HTTP/1.1 401 Unauthorized` 并销毁 socket（严禁把 token 放在 URL query 中）。
 - **单连接互斥**：同一 `agent_id` 新连入时，优雅关闭旧连接（close code `4001: Replaced by newer connection`），避免僵尸连接并发冲突。
-- **心跳与离线判定**：服务端每 15s 发送 WS ping，35s 内未收到 pong 则断开并标记 offline，同时向该节点挂起中的所有 `chat_sessions` 写入错误/中止事件并释放 SSE。
+- **心跳与离线判定**：服务端每 15s 发送 WS ping，距最后一次 pong 超过 35s 后，在下一次检查时断开连接。节点离线期间不接受新回合，没有可用的项目写入租约。
+- **换网后接回聊天**：新版 Bridge 在 `hello` 中上报进程随机标识 `chat_instance` 和仍持有的 `resume_runs`；新版 Web 以 `chat_reconnect_ms` 和 `resumed_runs` 确认。异常断开后默认等待 30 秒，仅允许原设备、原进程和有效的原项目绑定接回。面板保留已收到的进度，接回后以正文快照校正丢失的增量；最终结果含工具记录。不会重新启动 CLI，也不重试已发出的 RPC。超期、旧版本、服务重启或撤销授权时，原回合不会自动重跑。
+- **浏览器切网**：已登记的回合只重新读取历史、订阅现有 SSE；浏览器断线不等于 CLI 失败。
 - **反代注意事项（Traefik / Nginx）**：WSS 路径 `/api/bridge/ws` 需确保反代允许 Upgrade 头且读超时 ≥ 60s（15s ping 保活即可防空闲断连）。
+
+聊天输入框中的「上下文」是本轮 Harness 最近一次上报的占用量，与模型列表里的目录容量不同。只有本次执行上报了窗口时才计算百分比；只有用量时显示 token 数，无可用数据时显示「用量未上报」。消息流重连时从快照恢复；结束后刷新页面仍可查看。之前版本的历史对话不会回填推测值。 Codex 读取当前线程的最后一次 `last_token_usage.total_tokens`，Claude 按主调用的输入（含缓存）统计；两个运行时均不使用累计账单。
+
+Codex 输入栏中的闪电按钮控制当前会话的 GPT Fast。点亮表示已开启；可用性由所选模型和节点决定，未知或不支持时不可切换。Claude 不展示该按钮。
 
 ### 6.2 消息信封与核心帧类型
 所有帧为 UTF-8 JSON，统一格式 `{ type, id?, ts, payload }`：
@@ -364,7 +383,9 @@ CREATE TABLE IF NOT EXISTS project_agent_bindings (
 | Cloud → Bridge | `catalog.refresh` | 请求 Bridge 重新探测 CLI 与读取配置文件并回复 `catalog.sync`。 |
 | Cloud → Bridge | `project.bind` | Web 端修改项目工作目录时下发 `{ project_id, workdir }`；Bridge 校验 `allowed_roots` 后回复 `project.bind.result`。 |
 | Cloud → Bridge | `chat.start` | 启动一轮对话执行：`{ run_id, session_id, project_id, runtime, model, reasoning_effort, sandbox_mode, network_access, resume_session_id, prompt, system_context, workspace_manifest, datasource_env? }`。 |
-| Bridge → Cloud | `chat.event` | 流式回推：`{ run_id, session_id, event: ChatStreamEvent }`（复用 `status` / `reasoning` / `tool` / `text_delta` / `text_replace` / `done` / `error`）。 |
+| Bridge → Cloud | `chat.event` | 流式回推：`{ run_id, session_id, event: ChatStreamEvent }`（复用 `status` / `reasoning` / `tool` / `text_delta` / `text_replace` / `done` / `error`）。只有 `hello.ack.context_usage` 为 `true` 时才发送 `context_usage`，载荷仅包含 `used_tokens` 和可选的 `window_tokens`。 |
+| Cloud → Bridge | `chat.received` | 已收到终态结果，Bridge 可以释放缓存；仅在协商支持重连时发送。 |
+| Bridge → Cloud | `chat.lost` | 原运行在重连握手期间已结束，不再有执行可以接回。 |
 | Cloud → Bridge | `chat.abort` | 中止正在运行的对话：`{ run_id, session_id }`；Bridge 终止子进程组并回推中止状态。 |
 | Bridge ↔ Cloud | `workspace.fetch` / `workspace.fetch.result` | 按路径拉取 ≤ 2 MiB 的云端项目空间文件或 `HANDBOOK.md`（大于 2 MiB 走带 Bearer Token 的 HTTPS 流式下载接口）。 |
 | Bridge ↔ Cloud | `workspace.push` / `workspace.push.result` | `workspace-write` 模式下将本地空间影子目录的变更文件回写至云端项目空间。 |

@@ -48,6 +48,7 @@ interface SyncOptions {
   serverUrl: string;
   token: string;
   rpc: WorkspaceRpc;
+  waitForConnection?(signal: AbortSignal): Promise<void>;
   signal: AbortSignal;
 }
 
@@ -213,6 +214,7 @@ async function pull(o: SyncOptions, root: string, path: string, hash: string, si
       if (raw.toString("base64") !== reply.data) throw new Error("Invalid workspace base64");
       write(raw);
     } else {
+      await o.waitForConnection?.(o.signal);
       const response = await fetch(httpUrl(o, path), {
         headers: headers(o),
         redirect: "error",
@@ -322,6 +324,7 @@ export async function pushChangedShadowFiles(o: SyncOptions, mirror: Awaited<Ret
     if (data.length <= RPC_LIMIT) {
       await o.rpc("workspace.push", { ...fields(o, path), sha256: hash, data: data.toString("base64") }, o.signal);
     } else {
+      await o.waitForConnection?.(o.signal);
       const response = await fetch(httpUrl(o, path), {
         method: "PUT",
         headers: { ...headers(o), "Content-Type": "application/octet-stream" },

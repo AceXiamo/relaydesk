@@ -21,6 +21,8 @@ import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
+import { ChatLink } from "./chat-link.ts";
+import type { ChatStreamEvent } from "../../app/lib/types.ts";
 import { bridgeCatalogPaths, detectBridgeCatalog, type BridgeCatalog, type BridgeCatalogConfig } from "./catalog.ts";
 import { chatWatchdog, chatTimeoutMessage, type ChatTimeoutReason } from "./chat-timeouts.ts";
 import { readCodexAccount } from "./codex-account.ts";
@@ -251,6 +253,7 @@ type Frame = { type: string; id?: string; payload: Record<string, unknown> };
 function send(ws: WebSocket, type: string, payload: unknown, id?: string) {
   if (ws.readyState !== WebSocket.OPEN) return;
   if (ws.bufferedAmount > 8 * 1024 * 1024) {
+    console.warn(`[bridge] terminating socket: send buffer=${ws.bufferedAmount} bytes`);
     ws.terminate();
     return;
   }
@@ -274,9 +277,10 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
   let watchers: FSWatcher[] = [],
     version = 0;
   const lock = projectLocks();
+  let instance = randomUUID();
   const active = new Map<
     string,
-    { abort: AbortController; socket: WebSocket; project: string; session: string; job: Promise<void> }
+    { abort: AbortController; socket: WebSocket; project: string; session: string; job: Promise<void>; link?: ChatLink }
   >();
   const report = (c: Config, cat: BridgeCatalog) => ({
     hostname: hostname(),
@@ -334,6 +338,8 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       const next = load(path);
       const changed = config.server_url !== next.server_url || config.agent_token !== next.agent_token;
       if (changed) {
+        instance = randomUUID();
+        for (const run of active.values()) { run.link?.cancel(); run.abort.abort(); }
         ws?.terminate();
         superseded = false;
       }
@@ -377,10 +383,14 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
     });
     ws = socket;
     let accountRefresh: NodeJS.Timeout | undefined;
+    let graceMs = 0, acceptsUsage = false;
     let ready = false,
       lastPing = Date.now();
     const heartbeat = setInterval(() => {
-      if (Date.now() - lastPing > 35_000) socket.terminate();
+      if (Date.now() - lastPing > 35_000) {
+        log(`terminating socket: heartbeat age=${Date.now() - lastPing}ms`);
+        socket.terminate();
+      }
     }, 5000);
     socket.on("ping", () => {
       lastPing = Date.now();
@@ -389,7 +399,8 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       /* close handles cleanup and backoff, including HTTP 401. */
     });
     socket.once("open", () => {
-      send(socket, "hello", report(config, catalog));
+      send(socket, "hello", { ...report(config, catalog), chat_instance: o.disconnectGraceMs === 0 ? undefined : instance,
+        resume_runs: [...active].filter(([, run]) => run.link && !run.abort.signal.aborted).map(([id]) => id) });
     });
     const pending = new Map<string, { type: string; finish(payload?: Record<string, unknown>): void }>();
     const bridgeRpc = (
@@ -425,6 +436,14 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         send(socket, type, payload, id);
       });
     const rpc: WorkspaceRpc = (type, payload, signal) => bridgeRpc(type, payload, signal);
+    const transport = (run_id: string, session_id: string) => ({
+      open: () => socket.readyState === WebSocket.OPEN && ws === socket,
+      rpc: bridgeRpc,
+      emit: (event: unknown, result?: RunChatTurnResult) => {
+        if ((event as { type?: string })?.type === "context_usage" && !acceptsUsage) return;
+        send(socket, "chat.event", { run_id, session_id, event, ...(result && { result }) });
+      },
+    });
     function bind(f: Frame) {
       const id = f.payload.project_id,
         input = f.payload.workdir;
@@ -477,6 +496,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         return;
       }
       const abort = new AbortController();
+      const link = graceMs > 0 ? new ChatLink(transport(p.run_id, p.session_id), graceMs, abort) : undefined;
       let stopReason: ChatTimeoutReason | undefined;
       const clock = chatWatchdog(reason => {
         if (abort.signal.aborted) return;
@@ -501,9 +521,10 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
           const cwd = projectWorkdir(project, config, home);
           if (cwd !== boundDir) throw new Error("Project binding changed while waiting");
           if (!cat.runtimes[p.runtime].available) throw new Error("Requested CLI is not available");
-          const onEvent = (event: unknown) => {
+          const onEvent = (event: ChatStreamEvent) => {
             clock.progress();
-            send(socket, "chat.event", { ...ids, event });
+            if (link) link.event(event);
+            else if (event.type !== "context_usage" || acceptsUsage) send(socket, "chat.event", { ...ids, event });
           };
           const opts = {
             workdir: cwd,
@@ -514,7 +535,8 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
             runId: p.run_id,
             serverUrl: c.server_url,
             token: c.agent_token,
-            rpc,
+            rpc: link?.rpc ?? rpc,
+            waitForConnection: link?.waitForConnection,
             signal: abort.signal,
           };
           onEvent({ type: "status", message: "正在同步本机项目空间…" });
@@ -557,7 +579,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
                 | "finish_release",
               params: Record<string, unknown>,
             ) {
-              const res = await bridgeRpc(
+              const res = await (link?.rpc ?? bridgeRpc)(
                 "task.rpc",
                 { run_id: p.run_id, project_id: p.project_id, action, params },
                 abort.signal,
@@ -614,12 +636,13 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
             ? { ...result, status: "error", stopReason, error: chatTimeoutMessage[stopReason] }
             : { ...result, status: "aborted", error: undefined };
         }
-        terminal(result);
+        if (link) await link.finish(result);
+        else terminal(result);
       })().finally(() => {
         clock.close();
         active.delete(p.run_id);
       });
-      active.set(p.run_id, { abort, socket, project: p.project_id, session: p.session_id, job });
+      active.set(p.run_id, { abort, socket, project: p.project_id, session: p.session_id, job, link });
     }
     function startCliRun(p: {
       run_id: string;
@@ -765,6 +788,20 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       if (f.type === "hello.ack") {
         if (ready) return;
         ready = true;
+        acceptsUsage = f.payload.context_usage === true;
+        const offered = f.payload.chat_reconnect_ms;
+        graceMs = typeof offered === "number" && offered > 0 ? Math.min(offered, o.disconnectGraceMs ?? 30_000, 30_000) : 0;
+        const accepted = new Set(Array.isArray(f.payload.resumed_runs) ? f.payload.resumed_runs : []);
+        for (const [id, run] of active) {
+          if (!run.link || run.socket === socket) continue;
+          if (graceMs && accepted.has(id) && !run.abort.signal.aborted) {
+            run.socket = socket;
+            accepted.delete(id);
+            run.link.attach(transport(id, run.session));
+          } else run.link.cancel();
+        }
+        // A local grace/cancellation can expire between hello and its reply.
+        for (const id of accepted) if (typeof id === "string") send(socket, "chat.lost", { run_id: id });
         if (f.payload.sidebar_accounts === true) {
           const refresh = () => {
             void publishAccount(socket, "codex");
@@ -786,9 +823,13 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       if (f.type === "catalog.refresh") void reload(f.id);
       if (f.type === "project.bind") bind(f);
       if (f.type === "chat.start") start(f.payload as unknown as ChatStart);
+      if (f.type === "chat.received") {
+        const run = active.get(String(f.payload.run_id));
+        if (run?.socket === socket) run.link?.received();
+      }
       if (f.type === "chat.abort") {
         const a = active.get(String(f.payload.run_id));
-        if (a && a.socket === socket && (!f.payload.session_id || f.payload.session_id === a.session)) a.abort.abort();
+        if (a && a.socket === socket && (!f.payload.session_id || f.payload.session_id === a.session)) { a.link?.cancel(); a.abort.abort(); }
       }
       if (f.type === "cli_run.start") startCliRun(f.payload as Parameters<typeof startCliRun>[0]);
       if (f.type === "cli_run.abort") {
@@ -802,11 +843,8 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       pending.forEach((entry) => entry.finish());
       for (const a of active.values())
         if (a.socket === socket) {
-          if (!o.disconnectGraceMs || closed) a.abort.abort();
-          else {
-            const timer = setTimeout(() => a.abort.abort(), o.disconnectGraceMs);
-            void a.job.finally(() => clearTimeout(timer));
-          }
+          if (a.link && code === 1006 && !closed && !a.abort.signal.aborted) a.link.detach();
+          else { a.link?.cancel(); a.abort.abort(); }
         }
       if (ws === socket) {
         ws = undefined;
@@ -827,7 +865,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       clearTimeout(reconnect);
       clearTimeout(debounce);
       const connection = ws ? new Promise<void>((resolve) => ws!.once("close", () => resolve())) : Promise.resolve();
-      for (const a of active.values()) a.abort.abort();
+      for (const a of active.values()) { a.link?.cancel(); a.abort.abort(); }
       ws?.terminate();
       await Promise.allSettled([connection, ...[...active.values()].map((a) => a.job)]);
     },

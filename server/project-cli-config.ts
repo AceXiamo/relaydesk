@@ -57,7 +57,7 @@ const tokenLimit = z.number().int().positive().max(10_000_000).optional();
 const catalogItem = z.strictObject({
   id: z.string().refine(validCatalogId), runtime: z.enum(["codex", "claude"]),
   label: displayText(120).optional(), provider: displayText(60).optional(), context_window: tokenLimit, max_output_tokens: tokenLimit,
-  supports_effort: z.boolean().optional(), is_default: z.boolean().optional(),
+  supports_fast: z.boolean().optional(), supports_effort: z.boolean().optional(), is_default: z.boolean().optional(),
   effort_levels: z.array(effortLevel).transform(levels => [...new Set(levels)]).optional(), default_effort: effortLevel.optional(),
   tags: z.array(z.string()).max(8).optional(), source: z.enum(["cloud_config", "detected", "bridge_config", "cli_config"]).optional(),
 });

@@ -499,6 +499,7 @@ export interface WorkspaceRepoFileContent {
 
 /* ── Web Codex / CLI Chat ──────────────────────────────────────────────── */
 
+export type ChatFastMode = "default" | "on" | "off";
 export type ChatRuntime = "codex" | "claude";
 export type ChatSandboxMode = "read-only" | "workspace-write";
 export type ChatReasoningEffort = "default" | "off" | "low" | "medium" | "high" | "max";
@@ -510,6 +511,7 @@ export interface ModelCatalogItem {
   provider?: string;
   context_window?: number;
   max_output_tokens?: number;
+  supports_fast?: boolean;
   supports_effort?: boolean;
   effort_levels?: Array<Exclude<ChatReasoningEffort, "default">>;
   default_effort?: Exclude<ChatReasoningEffort, "default">;
@@ -531,6 +533,7 @@ export interface BridgeAgentBindingSummary {
 }
 
 export interface BridgeRuntimeStatus {
+  default_fast_mode?: Exclude<ChatFastMode, "default">;
   available: boolean;
   version?: string;
   default_model?: string;
@@ -625,6 +628,11 @@ export interface ChatToolEvent {
 
 export type ChatSessionKind = "chat" | "task" | "release";
 
+export interface ChatContextUsage {
+  used_tokens: number;
+  window_tokens?: number;
+}
+
 export interface ChatSessionRecord {
   id: string;
   project_id: string;
@@ -639,6 +647,9 @@ export interface ChatSessionRecord {
   execution_target: string;
   resolved_target: string;
   reasoning_effort: ChatReasoningEffort;
+  fast_mode?: ChatFastMode;
+  context_used_tokens?: number | null;
+  context_window_tokens?: number | null;
   external_session_id: string;
   active_run_id?: string;
   status: "idle" | "running" | "error";
@@ -656,6 +667,7 @@ export interface ChatMessageRecord {
   events: ChatToolEvent[];
   attachments: ChatContextRef[];
   status: "streaming" | "done" | "error" | "aborted";
+  error_reason?: string;
   stop_reason?: "user_stop" | "follow_up" | "queue_timeout" | "idle_timeout" | "total_timeout";
   created_at: string;
 }
@@ -703,6 +715,7 @@ export interface UtilityAiTestResult {
 }
 
 export type ChatStreamEvent =
+  | { type: "context_usage"; usage: ChatContextUsage }
   | { type: "session"; session: ChatSessionRecord; user_message: ChatMessageRecord; assistant_message_id: string }
   | {
       type: "snapshot";

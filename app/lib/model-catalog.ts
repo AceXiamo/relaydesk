@@ -14,6 +14,9 @@ const publicText = (value: unknown, max: number): value is string =>
   !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value) &&
   !/(?:[a-z][a-z0-9+.-]*:\/\/|\bBearer\s|(?:rdbr_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[a-z\d_-]{6,}|\beyJ[\w-]+\.[\w-]+\.[\w-]+)/i.test(value);
 
+export const validCatalogTokenLimit = (n: unknown): n is number =>
+  typeof n === "number" && Number.isSafeInteger(n) && n > 0 && n <= 10_000_000;
+
 const levels = ["off", "low", "medium", "high", "max"] as const;
 const isLevel = (value: unknown): value is typeof levels[number] => levels.some(level => value === level);
 
@@ -31,11 +34,12 @@ export function sanitizeBridgeModels(input: unknown): ModelCatalogItem[] {
     if (publicText(row.provider, 60)) item.provider = row.provider;
     for (const key of ["context_window", "max_output_tokens"] as const) {
       const n = row[key];
-      if (typeof n === "number" && Number.isSafeInteger(n) && n > 0 && n <= 10_000_000) item[key] = n;
+      if (validCatalogTokenLimit(n)) item[key] = n;
     }
     for (const key of ["is_default", "supports_effort"] as const) {
       if (typeof row[key] === "boolean") item[key] = row[key];
     }
+    if (runtime === "codex" && typeof row.supports_fast === "boolean") item.supports_fast = row.supports_fast;
     if (Array.isArray(row.effort_levels)) item.effort_levels = [...new Set(row.effort_levels.filter(isLevel))];
     if (isLevel(row.default_effort)) item.default_effort = row.default_effort;
     if (Array.isArray(row.tags)) item.tags = [...new Set<string>(row.tags.filter((tag: unknown) => publicText(tag, 48)).slice(0, 8))];
@@ -68,6 +72,9 @@ export const builtinModels: ModelCatalogItem[] = [
     effort_levels: ["off", "low", "medium", "high"], default_effort: "medium",
   },
 ];
+
+// Local windows depend on the harness configuration, even for a known model ID.
+export const localBuiltinMetadata = builtinModels.map(({ context_window, ...metadata }) => metadata);
 
 /**
  * Resolve which local bridge agent (if any) will handle execution for the given target and runtime.
@@ -106,6 +113,37 @@ export function resolveActiveLocalAgent(
     if (i === 0 && runtimeInfo?.routing?.auto_fallback === false) return null;
   }
   return null;
+}
+
+export function fastSupportForTarget(
+  entry: ModelCatalogItem | undefined,
+  agent: BridgeAgentSummary | null,
+  target: string,
+  info: ChatRuntimeInfo | null,
+): boolean | undefined {
+  const fixedTarget = target === "auto" && info?.routing?.auto_fallback === false
+    ? info.effective_priority?.[0] : target;
+  if (!agent && fixedTarget?.startsWith("local:")) return undefined;
+  return entry?.runtime === "codex" ? entry.supports_fast : undefined;
+}
+
+export function chatTargetAvailability(info: ChatRuntimeInfo | null, projectId: string, target: string, runtime: ChatRuntime) {
+  const agent = resolveActiveLocalAgent(info, projectId, target, runtime);
+  const primary = target === "auto" ? info?.effective_priority?.[0] : target;
+  const fixedLocal = primary?.startsWith("local:") && (target !== "auto" || info?.routing?.auto_fallback === false);
+  const binding = agent?.bindings.find(b => b.project_id === projectId);
+  if (agent?.online && agent.runtimes[runtime]?.available && binding?.enabled && binding.path_ok) {
+    return { mode: "local_cli" as const };
+  }
+  if (fixedLocal) {
+    const selected = info?.agents?.find(a => `local:${a.id}` === primary);
+    const reason = selected && !selected.online ? `本机节点「${selected.name}」离线。上线后可手动发送草稿。`
+      : "本机节点暂不可用，请检查节点和项目绑定。";
+    return { mode: "unavailable" as const, reason };
+  }
+  const mode = info?.auth_mode[runtime] ?? "unavailable";
+  const allOffline = target === "auto" && info?.agents?.length && info.agents.every(a => !a.online);
+  return { mode, reason: mode === "unavailable" && allOffline ? "本机节点离线。上线后可手动发送草稿。" : undefined };
 }
 
 /**
@@ -150,7 +188,7 @@ export function resolveCatalogForTarget(options: {
     selectedModel = "",
     includeSelectedFallback = true,
   } = options;
-  const suggestions = builtinModels.filter((item) => item.runtime === runtime);
+  const suggestions = (activeLocalAgent ? localBuiltinMetadata : builtinModels).filter((item) => item.runtime === runtime);
   const enrich = (item: ModelCatalogItem): ModelCatalogItem => ({
     ...suggestions.find((s) => s.id === item.id),
     ...item,
@@ -348,5 +386,5 @@ export function resolveLocalTaskModelCatalog(options: {
     projectCli: undefined,
     selectedModel,
     includeSelectedFallback,
-  });
+  }).map(({ context_window, ...metadata }) => metadata);
 }

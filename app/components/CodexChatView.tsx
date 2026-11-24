@@ -1,9 +1,11 @@
-import { splitInlineThinkContent, STOP_LABELS } from "~/lib/chat-content.ts";
+import { chatMessageContent, STOP_LABELS } from "~/lib/chat-content.ts";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "~/lib/api.ts";
 import { messagesWithTurn, type ProjectChatStreams, type TurnTrace } from "~/lib/chat-streams.ts";
 import { formatRelativeTime } from "~/lib/format.ts";
 import {
+  chatTargetAvailability,
+  fastSupportForTarget,
   resolveActiveLocalAgent,
   resolveCatalogForTarget,
   resolveDefaultModelForTarget,
@@ -11,6 +13,7 @@ import {
 import type {
   ChatContextRef,
   ChatMessageRecord,
+  ChatFastMode,
   ChatReasoningEffort,
   ChatRuntime,
   ChatRuntimeInfo,
@@ -23,6 +26,7 @@ import type {
   WorkspaceSummary,
 } from "~/lib/types.ts";
 import {
+  ChatFailureNotice,
   FollowUpList,
   PromptBar,
   ThinkingTrace,
@@ -171,6 +175,7 @@ export function CodexChatView({
   const [uploadingImages, setUploadingImages] = useState(false);
   const [draftRuntime, setDraftRuntime] = useState<ChatRuntime | null>(null);
   const [draftModel, setDraftModel] = useState("");
+  const [draftFast, setDraftFast] = useState<ChatFastMode>("default");
   const [draftEffort, setDraftEffort] = useState<ChatReasoningEffort>("default");
   const [draftTarget, setDraftTarget] = useState<ChatSessionRecord["execution_target"]>("auto");
   const [savingSettings, setSavingSettings] = useState(false);
@@ -180,7 +185,7 @@ export function CodexChatView({
   // Streaming & trace state
   const streaming = turn ? turn.running : activeSession?.status === "running";
   const runId = streaming ? turn?.runId ?? activeSession?.active_run_id : undefined;
-  const sendBlocked = Boolean(turn?.stopping || turn?.pending || (streaming && !runId));
+  const sendBlocked = Boolean(turn?.submitting || turn?.stopping || turn?.pending || (streaming && !runId));
   const statusLine = turn?.stopping
     ? turn.stopFailed ? "未能停止，等待当前回复结束" : "正在停止当前回复"
     : turn?.statusLine ?? (streaming ? "正在等待回复完成" : "");
@@ -215,17 +220,39 @@ export function CodexChatView({
     setShowScrollBottom(!near && el.scrollHeight > el.clientHeight + 120);
   }, []);
 
+  const runtimeRequest = useRef(0);
+  const refreshRuntime = useCallback(async () => {
+    if (!projectId) return;
+    const request = ++runtimeRequest.current;
+    try {
+      const info = await api.getCodexChatRuntime(projectId);
+      if (request === runtimeRequest.current && prevProjectIdRef.current === projectId) setRuntimeInfo(info);
+    } catch { /* A later refresh can recover without interrupting the draft. */ }
+  }, [projectId]);
+
+  useEffect(() => {
+    const refreshVisible = () => { if (!document.hidden) void refreshRuntime(); };
+    refreshVisible();
+    const timer = window.setInterval(refreshVisible, 10000);
+    window.addEventListener("focus", refreshVisible);
+    document.addEventListener("visibilitychange", refreshVisible);
+    return () => {
+      ++runtimeRequest.current;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshVisible);
+      document.removeEventListener("visibilitychange", refreshVisible);
+    };
+  }, [refreshRuntime]);
+
   const loadContextCatalog = useCallback(async () => {
     if (!projectId) return;
     try {
-      const [rt, summary, filesRes, dbsRes] = await Promise.all([
-        api.getCodexChatRuntime(projectId),
+      const [summary, filesRes, dbsRes] = await Promise.all([
         api.getWorkspaceSummary(projectId),
         api.listWorkspaceFiles(projectId),
         api.listWorkspaceDatabases(projectId),
       ]);
       if (prevProjectIdRef.current !== projectId) return;
-      setRuntimeInfo(rt);
       setWorkspaceSummary(summary);
       setWorkspaceFiles(filesRes.files.filter((f) => f.type === "file"));
       setWorkspaceDatabases(dbsRes.databases);
@@ -445,7 +472,7 @@ export function CodexChatView({
       await api.updateProjectAgentBinding(projectId, activeLocalAgent.id, {
         allow_datasource_secrets: true,
       });
-      await loadContextCatalog();
+      await refreshRuntime();
       toast.success(`已为「${activeLocalAgent.name}」开启数据源凭证授权`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "开启数据源凭证授权失败");
@@ -455,6 +482,7 @@ export function CodexChatView({
   };
 
   const currentModel = activeSession?.model ?? draftModel;
+  const currentFast = activeSession ? activeSession.fast_mode ?? "default" : draftFast;
   const currentEffort = activeSession ? activeSession.reasoning_effort ?? "default" : draftEffort;
   const targetDefaultModel = resolveDefaultModelForTarget(
     currentRuntime,
@@ -475,6 +503,7 @@ export function CodexChatView({
     setDraftRuntime(currentRuntime);
     setDraftModel(currentModel);
     setDraftEffort(currentEffort);
+    setDraftFast("default");
     setDraftTarget(activeSession?.execution_target ?? draftTarget);
     setDraftSandboxMode("workspace-write");
     setDraftNetworkAccess(true);
@@ -493,6 +522,7 @@ export function CodexChatView({
         runtime: currentRuntime,
         model: activeConfiguredModel,
         reasoning_effort: currentEffort,
+        fast_mode: currentRuntime === "codex" ? currentFast : "default",
         execution_target: draftTarget,
         sandbox_mode: currentSandboxMode,
         network_access: currentNetworkAccess,
@@ -596,7 +626,7 @@ export function CodexChatView({
     }
   };
 
-  const handleSend = async (promptOverride?: string, attachmentsOverride?: ChatContextRef[]) => {
+  const handleSend = async (promptOverride?: string, attachmentsOverride?: ChatContextRef[], consumeDraft = promptOverride === undefined) => {
     if (!projectId || sendBlocked || settingsBusy || uploadingImages || creatingForSend.current || currentAuthMode === "unavailable") return;
     const rawText = (promptOverride ?? input).trim();
     const currentAttachments = attachmentsOverride ?? [...attachments];
@@ -612,18 +642,20 @@ export function CodexChatView({
     }
 
     if (streaming && !turn) streams.observe(session, history);
-    const completion = streams.send(session, text, currentAttachments, runId);
-    if (!completion) return;
-    if (!promptOverride) {
-      setInput("");
-      setAttachments([]);
+    const submittedInput = promptOverride ?? input;
+    const completion = streams.send(session, text, currentAttachments, runId, () => {
+      if (!consumeDraft) return;
+      setInput(current => current === submittedInput ? "" : current);
+      setAttachments(current => current.filter(item => !currentAttachments.includes(item)));
       requestAnimationFrame(() => composerRef.current?.focus());
-    }
+    });
+    if (!completion) return;
     isNearBottomRef.current = true;
     try {
       await completion;
       if (session.sandbox_mode === "workspace-write") void loadContextCatalog();
     } catch (err) {
+      void refreshRuntime();
       toast.error(err instanceof Error ? err.message : "发送失败");
     }
   };
@@ -768,25 +800,7 @@ export function CodexChatView({
   }
 
   const currentAgents = runtimeInfo?.agents ?? [];
-  const hasReadyLocalForCurrent = (() => {
-    const checkAgent = (agentId: string) => {
-      const agent = currentAgents.find((a) => a.id === agentId);
-      if (!agent?.online || !agent.runtimes[currentRuntime]?.available) return false;
-      const binding = agent.bindings.find((b) => b.project_id === project.id);
-      return Boolean(binding?.enabled && binding?.path_ok);
-    };
-    if (currentTarget.startsWith("local:")) return checkAgent(currentTarget.slice("local:".length));
-    if (currentTarget === "cloud") return false;
-    return currentAgents.some((a) => checkAgent(a.id));
-  })();
-  const currentAuthMode =
-    currentTarget === "cloud"
-      ? (runtimeInfo?.auth_mode[currentRuntime] ?? "unavailable")
-      : hasReadyLocalForCurrent
-        ? "local_cli"
-        : currentTarget.startsWith("local:")
-          ? "unavailable"
-          : (runtimeInfo?.auth_mode[currentRuntime] ?? "unavailable");
+  const { mode: currentAuthMode, reason: targetUnavailableReason } = chatTargetAvailability(runtimeInfo, project.id, currentTarget, currentRuntime);
   const resolvedTargetLabel = (() => {
     const resolved = activeSession?.resolved_target;
     if (!resolved) return null;
@@ -1305,7 +1319,7 @@ export function CodexChatView({
                   </div>
                 )}
 
-                {currentAuthMode === "unavailable" && (
+                {runtimeInfo && currentAuthMode === "unavailable" && !targetUnavailableReason && (
                   <div className="rounded-xl border border-amber-500/30 bg-amber-500/8 px-3.5 py-3 text-[12.5px] text-amber-700 dark:text-amber-300 flex items-center justify-between gap-3">
                     <span>
                       当前服务器未检测到本机 <code className="font-mono">{currentRuntime}</code> 可执行文件，请在下方切换引擎或检查 CLI 设置。
@@ -1413,7 +1427,7 @@ export function CodexChatView({
                           </div>
                           {turn?.pending?.id === msg.id && (
                             <div role="status" className="flex items-center gap-2 text-[11.5px] text-[var(--text-muted)]">
-                              {turn.running ? "待发送 · 上一轮保存后自动发送" : "未发送 · 未能确认上一轮已保存"}
+                              {turn.running ? "待发送 · 上一轮保存后自动发送" : "追问未发送"}
                               {!turn.running && (
                                 <button type="button" className="underline" onClick={restoreUnsent}>放回输入框</button>
                               )}
@@ -1424,9 +1438,7 @@ export function CodexChatView({
                     );
                   }
 
-                  const { thinkingBlocks, visibleContent, hasOpenThink } = splitInlineThinkContent(
-                    msg.content,
-                  );
+                  const { thinkingBlocks, visibleContent, hasOpenThink, errorReason } = chatMessageContent(msg);
                   const mergedTraceEntries: TraceEntry[] = [
                     ...(trace?.entries ?? []),
                     ...thinkingBlocks.map((text, tIdx) => ({
@@ -1487,14 +1499,8 @@ export function CodexChatView({
 
                       {/* Streamed Markdown Prose */}
                       {visibleContent && (
-                        <div
-                          className={
-                            msg.status === "error"
-                              ? "rounded-xl border border-rose-500/25 bg-rose-500/6 px-3.5 py-2.5 text-[13px] text-rose-700 dark:text-rose-300"
-                              : "text-[14px] leading-[1.7] text-[var(--text-primary)]"
-                          }
-                        >
-                          <MarkdownContent content={visibleContent} projectId={project.id} />
+                        <div className="text-[14px] leading-[1.7] text-[var(--text-primary)]">
+                          <MarkdownContent content={visibleContent} projectId={project.id} streaming={isStreamingMsg} />
                           {isStreamingMsg && (
                             <span
                               aria-hidden="true"
@@ -1504,12 +1510,14 @@ export function CodexChatView({
                         </div>
                       )}
 
+                      {errorReason && <ChatFailureNotice reason={errorReason} />}
+
                       {/* Clean Action Row */}
-                      {!isStreamingMsg && msg.content && (
+                      {!isStreamingMsg && (visibleContent || prevUserMsg) && (
                         <div className="pt-2 flex items-center gap-1 text-[11.5px] text-[var(--text-muted)]">
-                          <button
+                          {visibleContent && <button
                             type="button"
-                            onClick={() => handleCopyMessage(msg.id, msg.content)}
+                            onClick={() => handleCopyMessage(msg.id, visibleContent)}
                             className="inline-flex items-center gap-1 h-7 px-2 rounded-md hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
                           >
                             <Icon
@@ -1518,7 +1526,7 @@ export function CodexChatView({
                               className={copiedMsgId === msg.id ? "text-emerald-500" : ""}
                             />
                             <span>{copiedMsgId === msg.id ? "已复制" : "复制"}</span>
-                          </button>
+                          </button>}
 
                           {prevUserMsg && (
                             <button
@@ -1534,7 +1542,7 @@ export function CodexChatView({
                             </button>
                           )}
 
-                          <button
+                          {visibleContent && <button
                             type="button"
                             disabled={convertingMsgId === msg.id}
                             onClick={() => void handleConvertToTask(msg)}
@@ -1546,7 +1554,7 @@ export function CodexChatView({
                               className={convertingMsgId === msg.id ? "animate-spin" : ""}
                             />
                             <span>转为工单</span>
-                          </button>
+                          </button>}
                         </div>
                       )}
 
@@ -1626,7 +1634,9 @@ export function CodexChatView({
                 </span>
               </div>
             )}
+            {targetUnavailableReason && <p role="status" className="px-3 text-xs text-amber-700 dark:text-amber-300">{targetUnavailableReason}</p>}
             <PromptBar
+              contextSession={activeSession}
               projectId={project.id}
               input={input}
               onInputChange={setInput}
@@ -1649,19 +1659,26 @@ export function CodexChatView({
               composerRef={composerRef}
               model={activeConfiguredModel}
               effort={currentEffort}
+              fastMode={currentFast}
+              onChangeFastMode={(mode) => {
+                if (activeSession) void handleUpdateSession({ fast_mode: mode });
+                else setDraftFast(mode);
+              }}
               executionTarget={currentTarget}
               settingsBusy={settingsBusy}
-              onChangeModel={(rt, model, effort) => {
+              onChangeModel={(rt, model, effort, fast) => {
                 if (activeSession) {
                   void handleUpdateSession({
                     ...(rt !== currentRuntime && { runtime: rt }),
                     model,
                     ...(effort !== currentEffort && { reasoning_effort: effort }),
+                    ...(fast !== currentFast && { fast_mode: fast }),
                   });
                 } else {
                   setDraftRuntime(rt);
                   setDraftModel(model);
                   setDraftEffort(effort);
+                  setDraftFast(fast);
                 }
               }}
               onChangeEffort={(effort) => {
@@ -1683,14 +1700,9 @@ export function CodexChatView({
                 });
                 const modelStillValid =
                   !currentModel || nextCatalog.some((item) => item.id === currentModel);
-                const nextModel = modelStillValid
-                  ? currentModel
-                  : resolveDefaultModelForTarget(
-                      currentRuntime,
-                      nextLocalAgent,
-                      runtimeInfo?.project_cli,
-                    );
-                const nextEntry = nextCatalog.find((item) => item.id === nextModel);
+                const nextDefault = resolveDefaultModelForTarget(currentRuntime, nextLocalAgent, runtimeInfo?.project_cli);
+                const nextModel = modelStillValid ? currentModel : nextDefault;
+                const nextEntry = nextCatalog.find((item) => item.id === (nextModel || nextDefault));
                 const nextEffort =
                   nextEntry?.supports_effort === false ||
                   (currentEffort !== "default" &&
@@ -1699,13 +1711,16 @@ export function CodexChatView({
                     ? "default"
                     : currentEffort;
 
+                const nextFast = fastSupportForTarget(nextEntry, nextLocalAgent, target, runtimeInfo) ? currentFast : "default";
                 setDraftTarget(target);
+                setDraftFast(nextFast);
                 if (!modelStillValid) setDraftModel(nextModel);
                 if (nextEffort !== currentEffort) setDraftEffort(nextEffort);
 
                 if (activeSession) {
                   const patch: Parameters<typeof api.updateCodexChatSession>[2] = {};
                   if (target !== activeSession.execution_target) patch.execution_target = target;
+                  if (nextFast !== currentFast) patch.fast_mode = nextFast;
                   if (!modelStillValid && nextModel !== activeSession.model) patch.model = nextModel;
                   if (nextEffort !== currentEffort) patch.reasoning_effort = nextEffort;
                   if (Object.keys(patch).length > 0) {
@@ -1729,7 +1744,7 @@ export function CodexChatView({
               onOpenCliSettings={onOpenCliSettings}
               onOpenWorkspace={onOpenWorkspace}
               onNewSession={startDraft}
-              onSend={(override) => void handleSend(override)}
+              onSend={(override) => void handleSend(override, undefined, true)}
               onAbort={() => void handleAbort()}
             />
           </div>

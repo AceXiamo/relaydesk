@@ -50,7 +50,7 @@ describe("chat session routing storage", () => {
     });
     expect(store.getChatSession("p", "resumed")).toMatchObject({
       model: "custom/old", execution_target: "auto", resolved_target: "cloud",
-      reasoning_effort: "default", external_session_id: "old-thread", updated_at: "t",
+      reasoning_effort: "default", fast_mode: "default", external_session_id: "old-thread", updated_at: "t",
     });
     expect(store.getChatSession("p", "empty")).toMatchObject({
       execution_target: "auto", resolved_target: "", reasoning_effort: "default", external_session_id: "",
@@ -87,6 +87,18 @@ describe("chat session routing storage", () => {
     expect(store.listChatSessions(project.id)).toContainEqual({ ...detail, message_count: 1, last_message_preview: "First turn" });
     store.deleteChatSession(project.id, session.id);
     expect(store.listChatSessions(project.id).map((row) => row.id)).toEqual([defaults.id]);
+  });
+
+  it("persists Fast without breaking resume and resets it when leaving Codex", () => {
+    store = new Store(path);
+    const { id } = store.createProject({ name: "Fast", repo: "example/chat" });
+    const session = store.createChatSession(id, { fast_mode: "on" });
+    expect(session.fast_mode).toBe("on");
+    store.updateChatSession(id, session.id, { external_session_id: "thread-1", fast_mode: "off" });
+    store.close();
+    store = new Store(path);
+    expect(store.listChatSessions(id)[0]).toMatchObject({ fast_mode: "off", external_session_id: "thread-1" });
+    expect(store.updateChatSession(id, session.id, { runtime: "claude" }).fast_mode).toBe("default");
   });
 
   it("resumes across model and effort changes and clears the thread when switching runtimes", () => {

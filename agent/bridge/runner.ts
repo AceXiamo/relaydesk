@@ -12,7 +12,7 @@ import {
   type RelaydeskMcpHandle,
   type RelaydeskMcpTaskClient,
 } from "../../server/relaydesk-mcp.ts";
-import type { ChatReasoningEffort, ChatRuntime, ChatSandboxMode, ChatStreamEvent, WorkspaceDatabaseKind } from "../../app/lib/types.ts";
+import type { ChatFastMode, ChatReasoningEffort, ChatRuntime, ChatSandboxMode, ChatStreamEvent, WorkspaceDatabaseKind } from "../../app/lib/types.ts";
 import type { BridgeCatalog, BridgeCatalogConfig } from "./catalog.ts";
 import type { SpaceManifest } from "./space-sync.ts";
 
@@ -23,6 +23,7 @@ export interface ChatStart {
   runtime: ChatRuntime;
   model?: string;
   reasoning_effort?: ChatReasoningEffort;
+  fast_mode?: ChatFastMode;
   sandbox_mode: ChatSandboxMode;
   network_access?: boolean;
   resume_session_id?: string;
@@ -72,6 +73,7 @@ export function checkChat(p: ChatStart) {
     throw new Error("Invalid model ID");
   if (p.reasoning_effort && !["default", "off", "low", "medium", "high", "max"].includes(p.reasoning_effort))
     throw new Error("Invalid reasoning effort");
+  if (p.fast_mode !== undefined && !["default", "on", "off"].includes(p.fast_mode)) throw new Error("Invalid Fast mode");
   if (p.image_paths !== undefined) {
     if (!Array.isArray(p.image_paths) || p.image_paths.length > 8) throw new Error("Invalid image paths");
     for (const rel of p.image_paths) {
@@ -157,6 +159,10 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   if (!bin) throw new Error("Configured local CLI is unavailable");
   const model = p.model || o.catalog.runtimes[runtime].default_model || "";
   const metadata = o.catalog.models.find((m) => m.runtime === runtime && m.id === model);
+  const fastModel = model ? metadata : o.catalog.models.find(m => m.runtime === runtime && m.is_default);
+  if (runtime === "codex" && p.fast_mode && p.fast_mode !== "default" && fastModel?.supports_fast !== true) {
+    throw new Error("当前模型未确认支持 GPT Fast。请在会话模型设置中选择「跟随 Harness」或更换模型。");
+  }
   let effort =
     p.reasoning_effort && p.reasoning_effort !== "default"
       ? p.reasoning_effort
@@ -168,7 +174,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     effort = "default";
   const datasource = datasourceValues(p.datasource_env);
   const secrets = [...datasource.secrets, String(o.config.agent_token || "")].filter(Boolean);
-  const write = p.sandbox_mode === "workspace-write";
+  const fullAccess = runtime === "codex" ? o.config.codex_full_access : o.config.claude_full_access;
   let mcpHandle: RelaydeskMcpHandle | null = null;
   let claudeMcpConfigPath: string | null = null;
   if (o.enableMcp) {
@@ -200,8 +206,10 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     bin,
     model,
     reasoningEffort: effort,
+    fastMode: p.fast_mode,
     sandboxMode: p.sandbox_mode,
-    networkAccess: write && p.network_access === true,
+    networkAccess: p.network_access === true,
+    localAccess: fullAccess === true ? "full" : "restricted",
     workspaceDir: o.cwd,
     // Fresh turns mount the shadow dir; Claude also accepts --add-dir on resume.
     reposDir: runtime === "claude" && p.resume_session_id ? o.spaceDir : null,
@@ -219,15 +227,6 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
         }
       : {}),
   });
-  if (p.resume_session_id && write && runtime === "codex")
-    args.splice(-2, 0, "-c", `sandbox_workspace_write.writable_roots=${JSON.stringify([o.spaceDir])}`);
-  if (!write && runtime === "claude") {
-    // Bash is an arbitrary writer even if Edit and Write are absent.
-    args[args.indexOf("--tools") + 1] = "Read,Grep,Glob";
-    args[args.indexOf("--allowedTools") + 1] = claudeMcpConfigPath
-      ? "Read,Grep,Glob,mcp__relaydesk__*"
-      : "Read,Grep,Glob";
-  }
   env.HOME = o.homeDir;
   if (runtime === "codex" && !process.env.CODEX_HOME) env.CODEX_HOME = join(o.homeDir, ".codex");
   for (const [k, v] of Object.entries(cfg?.extra_env ?? {})) if (typeof v === "string") env[k] = v;
@@ -293,7 +292,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     "image/avif": "avif",
   };
   let savedToolImages = 0;
-  const saveToolImage = write
+  const saveToolImage = p.sandbox_mode === "workspace-write"
     ? (img: { mime: string; data: string; toolName?: string }) => {
         if (savedToolImages >= 12) return null;
         const ext = IMAGE_MIME_EXT[img.mime.toLowerCase()];
@@ -324,6 +323,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     },
     saveToolImage,
     attachedImages.lookup,
+    { env, resumeId: p.resume_session_id || "" },
   );
   if (o.signal.aborted) return { status: "aborted", content: "", events: [], externalSessionId: p.resume_session_id || "" };
   const child = spawn(bin, args, { cwd: o.cwd, env, detached: true, stdio: "pipe" });
@@ -381,7 +381,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     const code = await closed;
     await stopGroup();
     const success = code === 0 && !o.signal.aborted && !overflow;
-    parser.finish(success);
+    await parser.finish(success);
     emitText(true);
     const { state } = parser;
     const error = overflow

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { ChatRuntimeInfo } from "../app/lib/types.ts";
+import { chatMessageContent } from "../app/lib/chat-content.ts";
+import { chatTargetAvailability } from "../app/lib/model-catalog.ts";
 import { fixture, type Fixture } from "./bridge-fixture.ts";
 
 let f: Fixture;
@@ -6,6 +9,51 @@ beforeEach(async () => { f = await fixture(); });
 afterEach(async () => { await f.close(); });
 
 describe("chat interruption and continuation", () => {
+  it("keeps partial output and rejects offline submissions until a manual send after reconnect", async () => {
+    const projectId = await f.project();
+    const { token, id } = await f.register();
+    const target = `local:${id}`;
+    const projects = [{ project_id: projectId, workdir: "/fixture", path_ok: true }];
+    const runtime = () => f.ok(`/projects/${projectId}/codex-chat/runtime`);
+    const first = await f.connect(token);
+    await first.hello(projects);
+    const session = await f.session(projectId, id);
+    const response = await session.turn("first");
+    const { run_id } = (await first.next("chat.start")).payload;
+    first.send("chat.event", { run_id, session_id: session.id, event: { type: "text_delta", delta: "**partial**" } });
+    first.ws.close(1000);
+    expect(await response.text()).toContain("event: error");
+    const before = await session.detail();
+    const failed = before.messages.at(-1);
+    expect(failed).toMatchObject({ content: "**partial**", status: "error", error_reason: expect.stringContaining("中断") });
+    expect(chatMessageContent(failed)).toMatchObject({ visibleContent: "**partial**", errorReason: failed.error_reason });
+    expect(chatMessageContent({ ...failed, error_reason: undefined, content: "执行失败：本机节点离线" })).toMatchObject({ visibleContent: "", errorReason: "本机节点离线" });
+
+    const offline = await runtime();
+    expect(chatTargetAvailability(offline, projectId, target, "codex")).toMatchObject({ mode: "unavailable", reason: expect.stringContaining("手动发送") });
+    const fixedPrimary: ChatRuntimeInfo = { ...offline, effective_priority: [target, "cloud"], routing: { ...offline.routing, auto_fallback: false },
+      local_clis: { codex: true, claude: false }, auth_mode: { codex: "local_cli", claude: "unavailable" } };
+    expect(chatTargetAvailability(fixedPrimary, projectId, "auto", "codex").mode).toBe("unavailable");
+    expect(chatTargetAvailability({ ...fixedPrimary, routing: { ...offline.routing, auto_fallback: true } }, projectId, "auto", "codex").mode).toBe("local_cli");
+    const draft = { content: "draft", attachments: [{ kind: "task", label: "task", ref: "t" }] };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const rejected = await f.api(`${session.path}/messages`, "POST", draft);
+      expect(rejected.status).toBe(409);
+    }
+    const second = await f.connect(token);
+    await second.hello(projects);
+    expect(chatTargetAvailability(await runtime(), projectId, target, "codex").mode).toBe("local_cli");
+    expect(await session.detail()).toEqual(before);
+    const manual = await session.turn(draft.content, draft.attachments);
+    const next = (await second.next("chat.start")).payload;
+    second.send("chat.event", { run_id: next.run_id, session_id: session.id, event: { type: "done" },
+      result: { content: "completed", events: [], status: "done", externalSessionId: "" } });
+    expect(await manual.text()).toContain("event: done");
+    const after = await session.detail();
+    expect(after.messages).toHaveLength(4);
+    expect(after.messages[2]).toMatchObject(draft);
+  });
+
   it.each(["early-thread", ""])('continues the interrupted first request (thread=%j) and ignores stale stops', async thread => {
     const p = await f.project();
     const { token, id } = await f.register();

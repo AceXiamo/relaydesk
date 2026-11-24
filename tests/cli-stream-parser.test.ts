@@ -68,6 +68,31 @@ describe("CLI invocation", () => {
     expect(dirs(resumed.args)).not.toContain("/space");
   });
 
+  it.each(["", "saved-thread"])("applies only explicit Codex Fast overrides (resume=%s)", resumeSessionId => {
+    for (const [fastMode, tier] of [["default", null], ["on", "priority"], ["off", "default"]] as const) {
+      const params = { ...base, resumeSessionId, fastMode };
+      const { args } = buildCliInvocation(params);
+      expect(args.filter(arg => arg.startsWith("service_tier="))).toEqual(tier ? [`service_tier="${tier}"`] : []);
+      if (tier) expect(args[args.indexOf(`service_tier="${tier}"`) - 1]).toBe("-c");
+      expect(buildCliInvocation({ ...params, runtime: "claude" }).args.join(" ")).not.toContain("service_tier");
+    }
+  });
+
+  it.each(["", "existing-thread"])("keeps cloud, read-only and offline Codex turns sandboxed (resume %j)", resumeSessionId => {
+    const cases = [
+      { localAccess: undefined, sandboxMode: "workspace-write", networkAccess: true },
+      { localAccess: "full", sandboxMode: "read-only", networkAccess: true },
+      { localAccess: "full", sandboxMode: "workspace-write", networkAccess: false },
+    ] as const;
+    for (const policy of cases) {
+      const { args } = buildCliInvocation({ ...base, ...policy, resumeSessionId });
+      expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+      if (resumeSessionId) expect(args).toContain(`sandbox_mode="${policy.sandboxMode}"`);
+      else expect(args[args.indexOf("--sandbox") + 1]).toBe(policy.sandboxMode);
+      if (policy.localAccess) expect(args).toContain("sandbox_workspace_write.network_access=false");
+    }
+  });
+
   it("sets Codex relaydesk MCP approval mode to approve on fresh and resumed turns", () => {
     for (const resumeSessionId of ["", "existing-thread"]) {
       const { args } = buildCliInvocation({
@@ -96,6 +121,7 @@ describe("CLI invocation", () => {
         { runtime: "codex", id: "custom/default", label: "Project default" },
         { runtime: "codex", id: "fixed", supports_effort: false },
         { runtime: "codex", id: "limited", effort_levels: ["low"] },
+        { runtime: "codex", id: "fast-capable", supports_fast: true },
         { runtime: "codex", id: "per-model", effort_levels: ["low", "medium"], default_effort: "medium" },
       ];
       projectCliConfiguration(dbPath, id, { runtime: "codex", model: "custom/default", default_effort: "high", models: catalog });
@@ -118,6 +144,12 @@ describe("CLI invocation", () => {
       const override = await turn("codex", "custom/override", "max");
       expect(override).toEqual(expect.arrayContaining(["resume", "saved-thread", "custom/override", 'model_reasoning_effort="xhigh"']));
       expect(override).not.toContain("custom/default");
+      const fastTurn = (model: string) => runWebCliChatTurn({
+        project, dbPath, session: { ...session, model, fast_mode: "on", external_session_id: "saved-thread" },
+        prompt: "check Fast", attachments: [], priorMessages: [], signal: new AbortController().signal, onEvent() {},
+      });
+      expect((await fastTurn("fast-capable")).content.split("\n")).toContain('service_tier="priority"');
+      expect(await fastTurn("fixed")).toMatchObject({ status: "error", error: expect.stringContaining("GPT Fast") });
       const otherRuntime = await turn("claude", "", "default");
       expect(otherRuntime).not.toContain("--effort");
       expect(otherRuntime).not.toContain("--model");

@@ -1,3 +1,4 @@
+import { ChatWorkspaceImage, ImageTurnStreaming } from "./ChatWorkspaceImage.tsx";
 import {
   Children,
   isValidElement,
@@ -224,6 +225,7 @@ function CodeBlockCard({
 }
 
 export interface MarkdownContentProps {
+  streaming?: boolean;
   content: string;
   compact?: boolean;
   preserveLineBreaks?: boolean;
@@ -235,6 +237,7 @@ export function MarkdownContent({
   content,
   compact = false,
   preserveLineBreaks = false,
+  streaming = false,
   className,
   projectId,
 }: MarkdownContentProps) {
@@ -486,21 +489,8 @@ export function MarkdownContent({
       img: ({ src, alt }) => {
         const safeSrc = src ? safeUrlTransform(src, "src", projectId) : "";
         if (!safeSrc) return null;
-        return (
-          <a
-            href={safeSrc}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="block my-2 group"
-          >
-            <img
-              src={safeSrc}
-              alt={alt || "截图附件"}
-              loading="lazy"
-              className="max-h-80 w-auto max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] object-contain shadow-2xs group-hover:border-indigo-500/50 transition-colors"
-            />
-          </a>
-        );
+        return <ChatWorkspaceImage key={safeSrc} url={safeSrc} alt={alt || "截图附件"} linkClassName="block my-2 group"
+          className="max-h-80 w-auto max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] object-contain shadow-2xs group-hover:border-indigo-500/50 transition-colors" />;
       },
     }),
     [compact, projectId],
@@ -518,6 +508,7 @@ export function MarkdownContent({
         className,
       )}
     >
+      <ImageTurnStreaming.Provider value={streaming}>
       <Markdown
         remarkPlugins={[remarkGfm]}
         urlTransform={urlTransform}
@@ -525,6 +516,7 @@ export function MarkdownContent({
       >
         {renderedContent}
       </Markdown>
+      </ImageTurnStreaming.Provider>
     </div>
   );
 }

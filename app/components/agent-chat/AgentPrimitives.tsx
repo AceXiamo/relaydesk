@@ -1,6 +1,9 @@
+import { ChatWorkspaceImage } from "../ChatWorkspaceImage.tsx";
+import { ContextUsageLabel } from "./ContextUsageLabel.tsx";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   effortLabels,
+  fastSupportForTarget,
   resolveActiveLocalAgent,
   resolveCatalogForTarget,
   resolveDefaultModelForTarget,
@@ -8,6 +11,7 @@ import {
 } from "~/lib/model-catalog.ts";
 import type {
   ChatContextRef,
+  ChatFastMode,
   ChatReasoningEffort,
   ModelCatalogItem,
   ChatRuntime,
@@ -133,6 +137,10 @@ export interface TraceEntry {
   id: string;
   kind: "status" | "reasoning" | "tool";
   text: string;
+}
+
+export function ChatFailureNotice({ reason }: { reason: string }) {
+  return <p role="status" className="break-words whitespace-pre-wrap rounded-lg border border-rose-500/25 bg-rose-500/5 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">失败原因：{reason}</p>;
 }
 
 export function ThinkingTrace({
@@ -298,18 +306,6 @@ function renderOutputLines(output: string) {
         );
       })}
     </pre>
-  );
-}
-
-function ToolImagePreview({ url, alt }: { url: string; alt: string }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) return <span className="text-[12px] text-[var(--text-muted)]">图片预览不可用</span>;
-  return (
-    <a href={url} target="_blank" rel="noopener noreferrer" className="block group">
-      <img src={url} alt={alt} loading="lazy" onError={() => setFailed(true)}
-        className="max-h-64 w-auto max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] object-contain shadow-2xs group-hover:border-indigo-500/50 transition-colors"
-      />
-    </a>
   );
 }
 
@@ -482,7 +478,7 @@ export function ToolChipsGroup({
                 {ev.images && ev.images.length > 0 && (
                   <div className="px-3 pb-2.5 pt-1 flex flex-wrap gap-2">
                     {ev.images.map((img, idx) => (
-                      <ToolImagePreview key={`${idx}:${img.url}`} url={img.url} alt={img.alt || `${ev.tool} 图片`} />
+                      <ChatWorkspaceImage key={`${idx}:${img.url}`} url={img.url} alt={img.alt || `${ev.tool} 图片`} streaming={isStreaming} linkClassName="block group" className="max-h-64 w-auto max-w-full rounded-xl border border-[var(--border-subtle)] object-contain" />
                     ))}
                   </div>
                 )}
@@ -776,14 +772,74 @@ function ExecutionTargetSelect({
   );
 }
 
+function FastModeButton({
+  mode, harnessDefault, supported, busy, onChange,
+}: {
+  mode: ChatFastMode;
+  harnessDefault?: "on" | "off";
+  supported?: boolean;
+  busy: boolean;
+  onChange: (mode: ChatFastMode) => void;
+}) {
+  const hintId = useId();
+  const [hintDismissed, setHintDismissed] = useState(false);
+  const effective = mode === "default" ? harnessDefault : mode;
+  const pressed = supported === true && effective === "on";
+  const disabled = busy || supported !== true;
+  const next = pressed ? "off" : "on";
+  const nextMode = next === harnessDefault ? "default" : next;
+  const source = mode === "default" ? "跟随 Codex 默认设置" : "当前会话";
+  let hint: string;
+  if (supported === false) hint = "当前模型不支持 GPT Fast。";
+  else if (supported !== true) hint = "当前模型的 GPT Fast 能力未知。";
+  else {
+    const state = effective === undefined ? "默认状态未知" : pressed ? "已开启" : "已关闭";
+    const action = nextMode === "default" ? "，恢复跟随默认设置" : "";
+    hint = `GPT Fast · ${source}（${state}）。${busy ? "暂时无法切换。" : `点击${pressed ? "关闭" : "开启"}${action}。`}`;
+  }
+
+  return (
+    <span className="group/fast relative inline-flex shrink-0" onMouseEnter={() => setHintDismissed(false)}>
+      <button
+        type="button"
+        aria-label="GPT Fast"
+        aria-pressed={pressed}
+        aria-disabled={disabled}
+        aria-describedby={hintId}
+        onFocus={() => setHintDismissed(false)}
+        onKeyDown={(e) => { if (e.key === "Escape") setHintDismissed(true); }}
+        onClick={() => { if (!disabled) onChange(nextMode); }}
+        className={cn(
+          "rd-focus-ring inline-flex size-8 sm:size-7 items-center justify-center rounded-lg cursor-pointer aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
+          pressed ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300 [&_path]:fill-current"
+            : "text-[var(--text-muted)]",
+          !pressed && !disabled && "hover:bg-[var(--surface-hover)]",
+        )}
+      >
+        <Icon name="zap" size={15} />
+      </button>
+      <span
+        id={hintId}
+        role="tooltip"
+        className={cn(
+          "invisible absolute right-0 bottom-full z-40 w-max max-w-52 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] px-2 py-1.5 text-xs text-[var(--text-secondary)] shadow-sm",
+          !hintDismissed && "group-hover/fast:visible group-focus-within/fast:visible",
+        )}
+      >{hint}</span>
+    </span>
+  );
+}
+
 interface ModelControlsProps {
   projectId?: string;
   runtime: ChatRuntime;
   runtimeInfo: ChatRuntimeInfo | null;
   model: string;
   effort: ChatReasoningEffort;
+  fastMode: ChatFastMode;
+  onChangeFastMode: (mode: ChatFastMode) => void;
   executionTarget?: string;
-  onChangeModel: (runtime: ChatRuntime, model: string, effort: ChatReasoningEffort) => void;
+  onChangeModel: (runtime: ChatRuntime, model: string, effort: ChatReasoningEffort, fast: ChatFastMode) => void;
   onChangeEffort: (effort: ChatReasoningEffort) => void;
   onChangeExecutionTarget?: (target: string) => void;
 }
@@ -794,6 +850,8 @@ function ModelControls({
   runtimeInfo,
   model,
   effort,
+  fastMode,
+  onChangeFastMode,
   executionTarget = "auto",
   onChangeModel,
   onChangeEffort,
@@ -845,6 +903,8 @@ function ModelControls({
   const current = catalog.find((item) => item.id === model);
   const levels = current?.effort_levels ?? effortLevels;
   const adjustable = current?.supports_effort !== false && levels.length > 0;
+  const fastSupported = fastSupportForTarget(current, activeLocalAgent, executionTarget, runtimeInfo);
+  const harnessFast = activeLocalAgent?.runtimes.codex?.default_fast_mode;
   const displayedEffort =
     adjustable && (effort === "default" || levels.includes(effort)) ? effort : "default";
   const configuredModel = resolveDefaultModelForTarget(runtime, activeLocalAgent, settings);
@@ -921,7 +981,10 @@ function ModelControls({
       (effort !== "default" && entry?.effort_levels && !entry.effort_levels.includes(effort))
         ? "default"
         : effort;
-    if (rt !== runtime || id !== model || effort !== nextEffort) onChangeModel(rt, id, nextEffort);
+    if (rt !== runtime || id !== model || effort !== nextEffort) {
+      const nextFast = fastSupportForTarget(entry, targetAgent, executionTarget, runtimeInfo) ? fastMode : "default";
+      onChangeModel(rt, id, nextEffort, nextFast);
+    }
     setQuery("");
     setIndex(0);
     if (closeAfter) close();
@@ -1144,6 +1207,18 @@ function ModelControls({
           </button>
         </div>
       )}
+      {runtime === "codex" && (
+        <FastModeButton
+          mode={fastMode}
+          harnessDefault={harnessFast}
+          supported={fastSupported}
+          busy={disabled}
+          onChange={(mode) => {
+            setOpen(false);
+            onChangeFastMode(mode);
+          }}
+        />
+      )}
       <Select
         value={displayedEffort}
         onChange={(next) => {
@@ -1175,6 +1250,7 @@ function ModelControls({
 }
 
 export interface PromptBarProps extends ModelControlsProps {
+  contextSession?: import("../../lib/types.ts").ChatSessionRecord | null;
   input: string;
   onInputChange: (value: string) => void;
   attachments: ChatContextRef[];
@@ -1203,6 +1279,7 @@ export interface PromptBarProps extends ModelControlsProps {
 }
 
 export function PromptBar({
+  contextSession,
   projectId,
   input,
   onInputChange,
@@ -1225,6 +1302,8 @@ export function PromptBar({
   composerRef,
   model,
   effort,
+  fastMode,
+  onChangeFastMode,
   executionTarget,
   settingsBusy,
   onChangeModel,
@@ -1375,7 +1454,7 @@ export function PromptBar({
       return;
     }
     if (cmd.prompt && !sendBlocked && !settingsBusy && !uploadingImages && !authUnavailable) {
-      onInputChange("");
+      onInputChange(cmd.prompt);
       onSend(cmd.prompt);
     }
   };
@@ -1693,6 +1772,7 @@ export function PromptBar({
             : "border-[var(--border-subtle)]",
         )}
       >
+        <ContextUsageLabel session={contextSession} />
         {/* Attached Context Chips inside Composer */}
         {attachments.length > 0 && (
           <div className="px-3 pt-2.5 pb-0.5 flex flex-wrap items-center gap-1.5">
@@ -1855,6 +1935,8 @@ export function PromptBar({
               runtimeInfo={runtimeInfo}
               model={model}
               effort={effort}
+              fastMode={fastMode}
+              onChangeFastMode={onChangeFastMode}
               executionTarget={executionTarget}
               onChangeModel={onChangeModel}
               onChangeEffort={onChangeEffort}

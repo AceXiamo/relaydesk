@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type {
+  ChatContextUsage,
+  ChatFastMode,
   ChatReasoningEffort,
   ChatRuntime,
   ChatSandboxMode,
@@ -10,6 +12,7 @@ import type {
   ChatToolImage,
 } from "../app/lib/types.ts";
 import type { readProjectCliSettings } from "./project-cli-config.ts";
+import { claudeContextTracker, codexContextUsage, codexRolloutMonitor } from "./cli-context-usage.ts";
 
 const MAX_OUTPUT_CHARS = 120_000;
 const MAX_TOOL_OUTPUT_CHARS = 3000;
@@ -84,9 +87,11 @@ export function buildCliInvocation(params: {
   bin: string;
   model: string;
   reasoningEffort?: ChatReasoningEffort;
+  fastMode?: ChatFastMode;
   extraAddDirs?: string[];
   imagePaths?: string[];
   claudeSupportsEffort?: boolean;
+  localAccess?: "restricted" | "full";
   sandboxMode: ChatSandboxMode;
   networkAccess: boolean;
   workspaceDir: string;
@@ -107,7 +112,6 @@ export function buildCliInvocation(params: {
     runtime,
     model,
     sandboxMode,
-    networkAccess,
     workspaceDir,
     reposDir,
     resumeSessionId,
@@ -146,6 +150,8 @@ export function buildCliInvocation(params: {
   const addDirs = new Set([reposDir, ...(resumeSessionId ? [] : params.extraAddDirs ?? [])]
     .filter((dir): dir is string => !!dir?.trim()));
   const addDirArgs = Array.from(addDirs).flatMap((dir) => ["--add-dir", dir]);
+  const networkAccess = params.networkAccess === true && (!params.localAccess || sandboxMode === "workspace-write");
+  const fullAccess = params.localAccess === "full" && networkAccess;
 
   if (runtime === "codex") {
     if (cliHome && !env.CODEX_HOME) {
@@ -184,11 +190,18 @@ export function buildCliInvocation(params: {
       }
     }
 
-    if (networkAccess) {
-      overrides.push("-c", "sandbox_workspace_write.network_access=true");
+    // Local turns explicitly override the node's network default, including on resume.
+    if (!fullAccess && (params.localAccess || networkAccess)) {
+      overrides.push("-c", `sandbox_workspace_write.network_access=${networkAccess}`);
+    }
+    if (params.localAccess && !fullAccess && resumeSessionId && sandboxMode === "workspace-write" && params.extraAddDirs?.length) {
+      overrides.push("-c", `sandbox_workspace_write.writable_roots=${JSON.stringify(params.extraAddDirs)}`);
     }
 
     if (effectiveModel) overrides.push("-m", effectiveModel);
+    if (params.fastMode === "on" || params.fastMode === "off") {
+      overrides.push("-c", params.fastMode === "on" ? 'service_tier="priority"' : 'service_tier="default"');
+    }
     if (effort !== "default") {
       overrides.push("-c", `model_reasoning_effort=${JSON.stringify(codexEffort[effort])}`);
     }
@@ -218,8 +231,7 @@ export function buildCliInvocation(params: {
         "resume",
         "--json",
         "--skip-git-repo-check",
-        "-c",
-        `sandbox_mode=${JSON.stringify(effectiveCodexSandbox)}`,
+        ...(fullAccess ? ["--dangerously-bypass-approvals-and-sandbox"] : ["-c", `sandbox_mode=${JSON.stringify(effectiveCodexSandbox)}`]),
         ...(useProjectKey ? ["--ignore-user-config"] : []),
         ...overrides,
         ...imageArgs,
@@ -230,16 +242,14 @@ export function buildCliInvocation(params: {
     }
 
     const args = [
-      "-a",
-      "never",
+      ...(fullAccess ? [] : ["-a", "never"]),
       "exec",
       "--json",
-      "--sandbox",
-      effectiveCodexSandbox,
+      ...(fullAccess ? ["--dangerously-bypass-approvals-and-sandbox"] : ["--sandbox", effectiveCodexSandbox]),
       "--skip-git-repo-check",
       "-C",
       workspaceDir,
-      ...addDirArgs,
+      ...(fullAccess ? [] : addDirArgs),
       ...(useProjectKey ? ["--ignore-user-config"] : []),
       ...overrides,
       ...imageArgs,
@@ -271,7 +281,7 @@ export function buildCliInvocation(params: {
   const tools =
     sandboxMode === "workspace-write"
       ? "Read,Grep,Glob,Bash,Edit,Write,Agent"
-      : "Read,Grep,Glob,Bash";
+      : params.localAccess ? "Read,Grep,Glob" : "Read,Grep,Glob,Bash";
   const allowedTools = params.mcp?.claudeConfigPath ? `${tools},mcp__relaydesk__*` : tools;
   const args = [
     "-p",
@@ -280,11 +290,7 @@ export function buildCliInvocation(params: {
     "--verbose",
     "--include-partial-messages",
     "--permission-mode",
-    "dontAsk",
-    "--tools",
-    tools,
-    "--allowedTools",
-    allowedTools,
+    ...(fullAccess ? ["bypassPermissions"] : ["dontAsk", "--tools", tools, "--allowedTools", allowedTools]),
     ...(params.mcp?.claudeConfigPath ? ["--mcp-config", params.mcp.claudeConfigPath] : []),
     ...addDirArgs,
     ...(effectiveModel ? ["--model", effectiveModel] : []),
@@ -751,7 +757,19 @@ export function createCliStreamParser(
   onEvent: (event: ChatStreamEvent) => void,
   onImage?: CliStreamImageHandler,
   lookupAttachment?: (path: string) => ChatToolImage | undefined,
+  sessionFiles?: { env: NodeJS.ProcessEnv; resumeId: string },
 ) {
+  let lastUsage: ChatContextUsage | undefined;
+  function publish(usage: ChatContextUsage) {
+    if (lastUsage?.used_tokens === usage.used_tokens && lastUsage.window_tokens === usage.window_tokens) return;
+    lastUsage = usage;
+    onEvent({ type: "context_usage", usage });
+  }
+  const trackClaude = claudeContextTracker(publish);
+  let nativeCodexSnapshot = false;
+  const rollout = runtime === "codex" && sessionFiles ? codexRolloutMonitor(sessionFiles.env, sessionFiles.resumeId, usage => {
+    if (!nativeCodexSnapshot) publish(usage);
+  }) : undefined;
   const state: StreamParseState = {
     externalSessionId: "",
     text: "",
@@ -764,18 +782,24 @@ export function createCliStreamParser(
   const processLine = (rawLine: string) => {
     const line = rawLine.trim();
     if (!line) return;
-    try {
-      const parsed = JSON.parse(line) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(line); } catch { /* Fall back to plain text for non-JSON CLI output. */ }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const obj = parsed as Record<string, unknown>;
+      try {
         if (runtime === "codex") {
-          handleCodexJsonLine(parsed as Record<string, unknown>, state, secrets, onEvent, onImage);
+          handleCodexJsonLine(obj, state, secrets, onEvent, onImage);
+          if (obj.type === "thread.started") rollout?.start(state.externalSessionId);
+          if (obj.type === "token_count") {
+            const usage = codexContextUsage(obj.info);
+            if (usage) { nativeCodexSnapshot = true; publish(usage); }
+          }
         } else {
-          handleClaudeJsonLine(parsed as Record<string, unknown>, state, secrets, onEvent, onImage, lookupAttachment);
+          trackClaude(obj);
+          handleClaudeJsonLine(obj, state, secrets, onEvent, onImage, lookupAttachment);
         }
-        return;
-      }
-    } catch {
-      // Plain-text fallback when a CLI emits raw text instead of JSONL.
+      } catch { /* Never forward a malformed structured event as raw chat text. */ }
+      return;
     }
     const clean = redactSecrets(rawLine, secrets);
     state.text = (state.text + (state.text ? "\n" : "") + clean).slice(0, MAX_OUTPUT_CHARS);
@@ -801,6 +825,7 @@ export function createCliStreamParser(
           );
         }
       }
+      return rollout?.finish();
     },
   };
 }

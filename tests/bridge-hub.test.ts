@@ -153,6 +153,50 @@ describe("BridgeHub registration and connection lifecycle", () => {
     await expect.poll(binding).toMatchObject({ path_ok: false, allow_datasource_secrets: false, enabled: false });
   });
 
+  it.each(["process", "binding", "cancel"])("does not transfer a detached write lease after a change to %s", async change => {
+    const { id, token } = await f.register();
+    const p = await f.project(), original = await f.connect(token);
+    const instance = crypto.randomUUID();
+    await original.hello(bindings(p), { chat_instance: instance });
+    const session = await f.session(p, id, "workspace-write");
+    const stream = (await session.turn("work")).text();
+    const { payload: { run_id } } = await original.next("chat.start");
+    original.ws.terminate();
+    await expect.poll(async () => (await f.ok("/bridge/agents")).agents[0].online).toBe(false);
+    expect(f.srv.bridgeHub.hasActiveWriteLease(id, p)).toBe(false);
+    if (change === "cancel") expect(f.srv.bridgeHub.abortChatSessionRun(session.id)).toBe(true);
+    const next = await f.connect(token);
+    const reports = change === "binding" ? [{ ...bindings(p)[0], workdir: "/elsewhere" }] : bindings(p);
+    const ack = await next.hello(reports, { chat_instance: change === "process" ? crypto.randomUUID() : instance, resume_runs: [run_id] });
+    expect(ack.payload.resumed_runs).toEqual([]);
+    expect(f.srv.bridgeHub.hasActiveWriteLease(id, p)).toBe(false);
+    await stream;
+    expect((await session.detail()).messages.at(-1).status).toBe(change === "cancel" ? "aborted" : "error");
+  });
+
+  it("streams the latest context sample, persists it on reload, and clears it on model changes", async () => {
+    const { id, token } = await f.register(), p = await f.project();
+    const conn = await f.connect(token);
+    expect((await conn.hello(bindings(p))).payload.context_usage).toBe(true);
+    const s = await f.session(p, id);
+    const response = (await s.turn("report context")).text();
+    const ids = { run_id: (await conn.next("chat.start")).payload.run_id, session_id: s.id };
+    conn.send("chat.event", { ...ids, event: { type: "context_usage", usage: { used_tokens: -1 } } });
+    for (const used_tokens of [18000, 6000]) {
+      conn.send("chat.event", { ...ids, event: { type: "context_usage", usage: { used_tokens, window_tokens: 24000 } } });
+    }
+    const barrier = conn.send("workspace.fetch", { project_id: p, path: "HANDBOOK.md" });
+    await conn.next("workspace.fetch.result", barrier);
+    const restored = await f.api(`${s.path}/stream`);
+    conn.send("chat.event", { ...ids, event: { type: "done" }, result: { status: "done", content: "ok", events: [], externalSessionId: "thread" } });
+    expect(await response).toContain('"used_tokens":6000');
+    const snapshot = (await restored.text()).split("\n").find(line => line.startsWith("data:") && line.includes('"type":"snapshot"'))!;
+    expect(JSON.parse(snapshot.slice(5)).session).toMatchObject({ context_used_tokens: 6000, context_window_tokens: 24000 });
+    expect((await s.detail()).session).toMatchObject({ context_used_tokens: 6000, context_window_tokens: 24000 });
+    await f.ok(s.path, "PATCH", { model: "another-model" });
+    expect((await s.detail()).session.context_used_tokens).toBeNull();
+  });
+
   it("deletes an active session without leaving the SSE response or lease open", async () => {
     const { id, token } = await f.register();
     const p = await f.project();

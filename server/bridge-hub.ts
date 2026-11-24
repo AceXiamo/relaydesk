@@ -5,7 +5,7 @@ import { chatWatchdog, chatTimeoutMessage, type ChatTimeoutReason } from "../age
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { sanitizeBridgeModels } from "../app/lib/model-catalog.ts";
-import type { BridgeAgentSummary, ChatReasoningEffort, ChatRuntime, ChatSandboxMode, ChatStreamEvent } from "../app/lib/types.ts";
+import type { BridgeAgentSummary, ChatFastMode, ChatReasoningEffort, ChatRuntime, ChatSandboxMode, ChatStreamEvent } from "../app/lib/types.ts";
 import type { RunChatTurnResult } from "./codex-chat.ts";
 import { redactSecrets } from "./cli-stream-parser.ts";
 import { ApiError } from "./errors.ts";
@@ -19,6 +19,7 @@ export interface BridgeChatStart {
   runtime: ChatRuntime;
   model: string;
   reasoning_effort: ChatReasoningEffort;
+  fast_mode?: ChatFastMode;
   sandbox_mode: ChatSandboxMode;
   network_access: boolean;
   resume_session_id: string;
@@ -48,7 +49,7 @@ export interface BridgeCliRunEvent {
   sha?: string;
 }
 
-export interface BridgeHubOptions { pingIntervalMs?: number; pongTimeoutMs?: number }
+export interface BridgeHubOptions { pingIntervalMs?: number; pongTimeoutMs?: number; chatReconnectMs?: number }
 const RPC_BYTES = 2 * 1024 * 1024;
 const RUN_TIMEOUT_MS = 8 * 60_000;
 const text = (max: number) => z.string().max(max);
@@ -58,7 +59,7 @@ const report = z.object({
 });
 type Report = z.infer<typeof report>;
 type Binding = Omit<Report, "project_id">;
-const runtime = z.object({ available: z.boolean(), version: text(150).optional(), default_model: text(160).optional(),
+const runtime = z.object({ default_fast_mode: z.enum(["on", "off"]).optional(), available: z.boolean(), version: text(150).optional(), default_model: text(160).optional(),
   default_effort: z.enum(["default", "off", "low", "medium", "high", "max"]).optional() });
 const catalog = z.object({
   hostname: text(200).optional(), platform: text(80).optional(), bridge_version: text(64).optional(),
@@ -73,7 +74,11 @@ const toolImage = z.object({ url: text(2048), alt: text(256).optional() });
 const tool = z.object({ id: text(256), tool: text(128), summary: text(4096), status: z.enum(["running", "done", "error"]),
   output: text(32_768).optional(), exit_code: z.number().int().nullable().optional(),
   images: z.array(toolImage).max(4).optional() });
+const contextUsageFrame = z.object({ type: z.literal("context_usage"), usage: z.object({
+  used_tokens: z.number().int().nonnegative(), window_tokens: z.number().int().positive().optional(),
+}) });
 const intermediate = z.discriminatedUnion("type", [
+  contextUsageFrame,
   z.object({ type: z.literal("tool"), event: tool }),
   z.object({ type: z.literal("status"), message: text(4096), external_session_id: text(512).optional() }),
   z.object({ type: z.literal("text_delta"), delta: text(120_000) }),
@@ -144,6 +149,9 @@ function streamOutput(onEvent: (event: ChatStreamEvent) => void, secrets: string
 }
 interface Run {
   id: string; project: string; session: string; write: boolean; owner: Connection; workdir: string;
+  grace?: NodeJS.Timeout;
+  grantedSecrets: boolean;
+  status: (message: string) => void;
   onEvent: ReturnType<typeof streamOutput>;
   emitTaskUpdated: (mutated: { task_id?: string; action: string }) => void;
   secrets: string[];
@@ -156,6 +164,7 @@ interface CliRunHandle {
   stop: (reason: string) => void;
 }
 interface Connection {
+  instance?: string;
   accounts: Map<AccountProvider, NonNullable<ReturnType<typeof sanitizeSidebarAccount>>>;
   id: string; ws: WebSocket; ready: boolean; lastPong: number; projects: Map<string, Binding>;
   binds: Map<string, { project: string; workdir: string; settle: (value: Binding | Error) => void }>;
@@ -169,15 +178,17 @@ export class BridgeHub {
   private readonly availabilityListeners = new Set<(projectIds?: string[]) => void>();
   private readonly heartbeat: NodeJS.Timeout;
   private readonly timeout: number;
+  private readonly reconnectMs: number;
   private closing?: Promise<void>;
   private readonly store: Store;
   constructor(store: Store, opts: BridgeHubOptions = {}) {
     this.store = store;
     this.timeout = opts.pongTimeoutMs ?? 35_000;
+    this.reconnectMs = opts.chatReconnectMs ?? 30_000;
     this.heartbeat = setInterval(() => {
       for (const conn of this.connections.values()) {
         if (Date.now() - conn.lastPong >= this.timeout) {
-          this.drop(conn, "本机节点心跳超时");
+          this.drop(conn, "本机节点心跳超时", true);
           conn.ws.terminate();
         } else if (conn.ws.readyState === WebSocket.OPEN) conn.ws.ping();
       }
@@ -194,7 +205,11 @@ export class BridgeHub {
       return true;
     }
     this.wss.handleUpgrade(req, socket, head, ws => {
-      this.disconnect(agent.id, 4001, "Replaced by newer connection");
+      const previous = this.connections.get(agent.id);
+      if (previous) {
+        this.drop(previous, "本机节点连接已被替换", true);
+        previous.ws.close(4001, "Replaced by newer connection");
+      }
       const conn: Connection = { id: agent.id, ws, ready: false, accounts: new Map(), lastPong: Date.now(), projects: new Map(), binds: new Map() };
       this.connections.set(conn.id, conn);
       ws.on("pong", () => {
@@ -213,8 +228,8 @@ export class BridgeHub {
           this.disconnect(conn.id, 1008, "Invalid bridge frame");
         }
       });
-      ws.on("error", () => { this.drop(conn, "本机节点连接异常"); ws.terminate(); });
-      ws.on("close", () => this.drop(conn, "本机节点连接中断"));
+      ws.on("error", () => { /* The close code distinguishes transport loss from invalid frames. */ });
+      ws.on("close", code => this.drop(conn, `本机节点连接中断（WebSocket ${code}）`, code === 1006));
     });
     return true;
   }
@@ -223,22 +238,31 @@ export class BridgeHub {
     if (conn.ws.readyState !== WebSocket.OPEN) throw new ApiError(409, "本机节点已离线");
     conn.ws.send(JSON.stringify({ type, id, ts: new Date().toISOString(), payload }));
   }
-  private drop(conn: Connection, reason: string) {
+  private drop(conn: Connection, reason: string, transient = false) {
     if (this.connections.get(conn.id) !== conn) return;
     this.connections.delete(conn.id);
     for (const bind of conn.binds.values()) bind.settle(new ApiError(409, reason));
-    for (const run of this.runs.values()) if (run.owner === conn) run.stop(reason);
+    for (const run of this.runs.values()) if (run.owner === conn) {
+      console.info(`[bridge] ${reason}; run=${run.id} last_pong_ms=${Date.now() - conn.lastPong} buffered_bytes=${conn.ws.bufferedAmount}`);
+      if (!transient || !conn.instance || this.reconnectMs <= 0) run.stop(reason);
+      else {
+        run.grace = setTimeout(() => run.stop(`${reason}。未能及时接回原执行；已保留收到的进度，不会自动重跑。`), this.reconnectMs).unref();
+        run.status("本机节点暂时离线，正在等待接回原执行…");
+      }
+    }
     for (const cli of this.cliRuns.values()) if (cli.owner === conn) cli.stop(reason);
   }
   disconnect(agentId: string, code = 4000, reason = "Bridge disconnected") {
+    for (const run of this.runs.values()) if (run.owner.id === agentId && run.grace) run.stop("本机节点连接已撤销");
     const conn = this.connections.get(agentId);
     if (!conn) return;
-    this.drop(conn, "本机节点连接中断");
+    this.drop(conn, code === 1008 ? "本机节点发送了无效协议帧" : "本机节点连接已撤销");
     conn.ws.close(code, reason);
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
     clearInterval(this.heartbeat);
+    for (const run of this.runs.values()) if (run.grace) run.stop("服务端正在关闭");
     for (const conn of this.connections.values()) this.drop(conn, "服务端正在关闭");
     this.closing = new Promise<void>(resolve => {
       for (const ws of this.wss.clients) ws.close(1001, "Server shutting down");
@@ -347,7 +371,25 @@ export class BridgeHub {
       if (hello) {
         conn.ready = true;
         const agent = this.agent(conn.id);
-        this.send(conn, "hello.ack", { agent_id: conn.id, agent_name: agent.name, sidebar_accounts: true, bindings: agent.bindings }, id);
+        const resumed: string[] = [];
+        if (this.reconnectMs > 0 && typeof p.chat_instance === "string" && z.uuid().safeParse(p.chat_instance).success) conn.instance = p.chat_instance;
+        const offered = new Set(z.array(z.uuid()).max(128).optional().parse(p.resume_runs));
+        for (const run of this.runs.values()) {
+          if (!run.grace || run.owner.id !== conn.id) continue;
+          const binding = this.store.getProjectAgentBinding(run.project, conn.id);
+          if (!conn.instance || conn.instance !== run.owner.instance || !offered.has(run.id) || !binding?.enabled || !binding.path_ok ||
+              !conn.projects.get(run.project)?.path_ok || binding.workdir !== run.workdir || (run.grantedSecrets && !binding.allow_datasource_secrets)) {
+            run.stop("本机节点未能接回原执行；不会自动重跑。");
+            continue;
+          }
+          clearTimeout(run.grace);
+          run.grace = undefined;
+          run.owner = conn;
+          resumed.push(run.id);
+          run.status("本机节点已重连，继续原执行。");
+        }
+        this.send(conn, "hello.ack", { agent_id: conn.id, agent_name: agent.name, sidebar_accounts: true, context_usage: true, bindings: agent.bindings,
+          ...(conn.instance && { chat_reconnect_ms: this.reconnectMs, resumed_runs: resumed }) }, id);
       }
       if (conn.ready) {
         const readyProjects = Array.from(conn.projects.entries())
@@ -430,6 +472,9 @@ export class BridgeHub {
         this.notifyAvailability([value.project_id]);
       }
       pending.settle({ workdir: value.workdir, path_error: value.path_error, path_ok: value.path_ok });
+    } else if (type === "chat.lost" && conn.instance) {
+      const run = typeof p.run_id === "string" && this.runs.get(p.run_id);
+      if (run && run.owner === conn) run.stop("重连时原执行已结束；不会自动重跑。");
     } else if (type === "chat.event") {
       const run = typeof p.run_id === "string" && this.runs.get(p.run_id);
       if (!run || run.owner !== conn || p.session_id !== run.session) return;
@@ -442,6 +487,11 @@ export class BridgeHub {
         if (tag === "error" && result.status === "done") throw new Error();
         // The HTTP caller persists the result before emitting the authoritative terminal event.
         run.finish(redact(result, run.secrets));
+        if (conn.instance) this.send(conn, "chat.received", { run_id: run.id });
+      } else if (tag === "context_usage") {
+        // Optional telemetry must never tear down the execution connection.
+        const sample = contextUsageFrame.safeParse(p.event);
+        if (sample.success) run.onEvent(sample.data);
       } else run.onEvent(intermediate.parse(p.event));
     } else if (type === "cli_run.event") {
       const ev = cliRunEventSchema.parse(p);
@@ -518,6 +568,13 @@ export class BridgeHub {
   async runChatTurn(agentId: string, payload: BridgeChatStart, onEvent: (event: ChatStreamEvent) => void, signal: AbortSignal, secrets: string[] = []): Promise<RunChatTurnResult> {
     if (signal.aborted) return { status: "aborted", content: "", events: [], externalSessionId: payload.resume_session_id };
     const binding = this.assertCanRun(agentId, payload.project_id, payload.runtime);
+    if (payload.runtime === "codex" && payload.fast_mode && payload.fast_mode !== "default") {
+      const agent = this.store.getBridgeAgent(agentId);
+      const model = payload.model || agent?.runtimes.codex?.default_model;
+      if (!agent?.models.some(m => m.runtime === "codex" && (model ? m.id === model : m.is_default) && m.supports_fast)) {
+        throw new ApiError(409, "该节点未确认模型支持 GPT Fast。请选择「跟随 Harness」或更换模型。");
+      }
+    }
     if (this.isChatSessionRunning(payload.session_id)) throw new ApiError(409, "会话正在运行");
     const conn = this.live(agentId)!;
     const id = randomUUID();
@@ -528,7 +585,10 @@ export class BridgeHub {
       let externalSessionId = payload.resume_session_id;
       const tools = new Map<string, RunChatTurnResult["events"][number]>();
       const finish = (result: RunChatTurnResult) => {
-        if (!this.runs.delete(id)) return;
+        const current = this.runs.get(id);
+        if (!current) return;
+        this.runs.delete(id);
+        clearTimeout(current.grace);
         clock.close();
         signal.removeEventListener("abort", abort);
         if (result.status !== "done") {
@@ -542,10 +602,11 @@ export class BridgeHub {
         if (boundProjects.length > 0) this.notifyAvailability(boundProjects);
       };
       const stop = (reason: string, aborted = false, stopReason?: ChatTimeoutReason) => {
+        const owner = this.runs.get(id)?.owner;
         finish({ status: aborted ? "aborted" : "error", content: "", error: reason, events: [], externalSessionId,
           ...(stopReason && { stopReason }) });
-        if (this.connections.get(agentId) === conn && conn.ws.readyState === WebSocket.OPEN) {
-          this.send(conn, "chat.abort", { run_id: id, session_id: payload.session_id });
+        if (owner && this.connections.get(agentId) === owner && owner.ws.readyState === WebSocket.OPEN) {
+          this.send(owner, "chat.abort", { run_id: id, session_id: payload.session_id });
         }
       };
       const abort = () => stop("对话已中止", true);
@@ -558,7 +619,8 @@ export class BridgeHub {
         onEvent(event);
       }, secrets);
       this.runs.set(id, { id, session: payload.session_id, project: payload.project_id, workdir: binding.workdir,
-        owner: conn, write: payload.sandbox_mode === "workspace-write", onEvent: event => { clock.progress(); publish(event); },
+        owner: conn, grantedSecrets: !!(binding.allow_datasource_secrets && Object.keys(datasource_env ?? {}).length),
+        status: message => onEvent({ type: "status", message }), write: payload.sandbox_mode === "workspace-write", onEvent: event => { clock.progress(); publish(event); },
         emitTaskUpdated: (mutated) => onEvent({ type: "task_updated", task_id: mutated.task_id, action: mutated.action }),
         secrets, finish, stop });
       if (signal.aborted) { abort(); return; }
