@@ -38,6 +38,16 @@ export interface FeedbackDiagnoseResponse {
 }
 
 export type FeedbackDiagnoseStreamEvent =
+  | { type: "started"; run_id: string; started_at: number }
+  | {
+      type: "snapshot";
+      run_id: string;
+      status_label: string;
+      steps: string[];
+      reasoning: string;
+      text: string;
+      started_at: number;
+    }
   | { type: "status"; label: string }
   | { type: "reasoning"; text: string }
   | { type: "delta"; text: string };

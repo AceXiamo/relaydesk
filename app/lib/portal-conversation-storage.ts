@@ -31,6 +31,7 @@ export interface StoredPortalConversation {
   turns: PortalConversationTurn[];
   draft: PortalEditableDraftState | null;
   submittedTaskCode?: string;
+  pendingRunId?: string;
   pendingDiagnoseAt?: number;
   createdAt: number;
   updatedAt: number;
@@ -191,6 +192,11 @@ function sanitizeSession(raw: unknown): StoredPortalConversation | null {
     typeof obj.submittedTaskCode === "string" && obj.submittedTaskCode.trim()
       ? obj.submittedTaskCode.trim()
       : undefined;
+  const pendingRunId =
+    typeof obj.pendingRunId === "string" &&
+    /^[a-zA-Z0-9_-]{8,80}$/.test(obj.pendingRunId)
+      ? obj.pendingRunId
+      : undefined;
   const pendingDiagnoseAt =
     typeof obj.pendingDiagnoseAt === "number" &&
     Number.isFinite(obj.pendingDiagnoseAt) &&
@@ -204,6 +210,7 @@ function sanitizeSession(raw: unknown): StoredPortalConversation | null {
     turns,
     draft,
     ...(submittedTaskCode ? { submittedTaskCode } : {}),
+    ...(pendingRunId ? { pendingRunId } : {}),
     ...(pendingDiagnoseAt !== undefined ? { pendingDiagnoseAt } : {}),
     createdAt,
     updatedAt,

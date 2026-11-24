@@ -1531,6 +1531,8 @@ function PortalContent() {
                   onClearStagedImages={clearStagedImages}
                   onOpenLightbox={(src) => setLightboxSrc(src)}
                   onDiagnose={portalApi.diagnose}
+                  onAttachDiagnoseRun={portalApi.attachDiagnoseRun}
+                  onAbortDiagnoseRun={portalApi.abortDiagnoseRun}
                   onCreateTask={handleCreateFromConversation}
                   onSwitchToManual={handleSwitchToManual}
                   onRefreshConfig={handleRecheckAvailability}

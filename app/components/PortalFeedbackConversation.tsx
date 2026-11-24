@@ -58,10 +58,20 @@ interface PortalFeedbackConversationProps {
   onClearStagedImages: () => void;
   onOpenLightbox: (src: string) => void;
   onDiagnose: (
-    payload: { messages: FeedbackDiagnoseMessage[]; images?: string[] },
+    payload: {
+      messages: FeedbackDiagnoseMessage[];
+      images?: string[];
+      run_id?: string;
+    },
     signal?: AbortSignal,
     onEvent?: (event: FeedbackDiagnoseStreamEvent) => void,
   ) => Promise<FeedbackDiagnoseResponse>;
+  onAttachDiagnoseRun?: (
+    runId: string,
+    signal?: AbortSignal,
+    onEvent?: (event: FeedbackDiagnoseStreamEvent) => void,
+  ) => Promise<FeedbackDiagnoseResponse>;
+  onAbortDiagnoseRun?: (runId: string) => Promise<{ ok: boolean }>;
   onCreateTask: (payload: {
     title: string;
     body: string;
@@ -80,6 +90,10 @@ interface PortalFeedbackConversationProps {
 
 function makeTurnId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function makeRunId(): string {
+  return `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function dedupeUrls(urls: string[]): string[] {
@@ -121,6 +135,8 @@ export function PortalFeedbackConversation({
   onClearStagedImages,
   onOpenLightbox,
   onDiagnose,
+  onAttachDiagnoseRun,
+  onAbortDiagnoseRun,
   onCreateTask,
   onSwitchToManual,
   onRefreshConfig,
@@ -150,6 +166,9 @@ export function PortalFeedbackConversation({
   );
   const [submittedTaskCode, setSubmittedTaskCode] = useState<string | undefined>(
     () => initialActive?.submittedTaskCode,
+  );
+  const [pendingRunId, setPendingRunId] = useState<string | undefined>(
+    () => initialActive?.pendingRunId,
   );
   const [pendingDiagnoseAt, setPendingDiagnoseAt] = useState<number | undefined>(
     () => initialActive?.pendingDiagnoseAt,
@@ -182,6 +201,9 @@ export function PortalFeedbackConversation({
   const [dragOver, setDragOver] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
+  const activeRunIdRef = useRef<string | null>(initialActive?.pendingRunId ?? null);
+  const detachingRef = useRef(false);
+  const diagnoseStartedAtRef = useRef<number>(Date.now());
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
@@ -203,6 +225,7 @@ export function PortalFeedbackConversation({
     if (hydratedProjectRef.current === projectId) return;
     hydratedProjectRef.current = projectId;
     autoResumedRef.current = null;
+    detachingRef.current = true;
     abortRef.current?.abort();
     const loaded = projectId
       ? loadPortalConversationStore(projectId)
@@ -214,6 +237,8 @@ export function PortalFeedbackConversation({
     setSessionId(active?.id ?? null);
     setSessionCreatedAt(active?.createdAt ?? Date.now());
     setSubmittedTaskCode(active?.submittedTaskCode);
+    setPendingRunId(active?.pendingRunId);
+    activeRunIdRef.current = active?.pendingRunId ?? null;
     setPendingDiagnoseAt(active?.pendingDiagnoseAt);
     setTurns(active?.turns ?? []);
     setDraft(active?.draft ?? null);
@@ -238,6 +263,7 @@ export function PortalFeedbackConversation({
         turns,
         draft,
         ...(submittedTaskCode ? { submittedTaskCode } : {}),
+        ...(pendingRunId ? { pendingRunId } : {}),
         ...(pendingDiagnoseAt !== undefined ? { pendingDiagnoseAt } : {}),
         createdAt: sessionCreatedAt,
         updatedAt: Date.now(),
@@ -250,6 +276,7 @@ export function PortalFeedbackConversation({
     sessionId,
     sessionCreatedAt,
     submittedTaskCode,
+    pendingRunId,
     pendingDiagnoseAt,
     turns,
     draft,
@@ -260,9 +287,9 @@ export function PortalFeedbackConversation({
       setElapsedMs(0);
       return;
     }
-    const startedAt = Date.now();
+    setElapsedMs(Math.max(0, Date.now() - diagnoseStartedAtRef.current));
     const timer = window.setInterval(() => {
-      setElapsedMs(Date.now() - startedAt);
+      setElapsedMs(Math.max(0, Date.now() - diagnoseStartedAtRef.current));
     }, 100);
     return () => window.clearInterval(timer);
   }, [diagnosing]);
@@ -306,73 +333,38 @@ export function PortalFeedbackConversation({
     });
   }, []);
 
-  const runDiagnoseTurn = useCallback(
-    async (
-      nextTurns: ConversationTurn[],
-      allImageUrls: string[],
-      options?: { isAutoResume?: boolean },
-    ) => {
+  const runDiagnoseStream = useCallback(
+    async (opts: {
+      runId: string;
+      allImageUrls: string[];
+      initialLabel: string;
+      mode: "start" | "attach";
+      execute: (
+        signal: AbortSignal,
+        onEvent: (ev: FeedbackDiagnoseStreamEvent) => void,
+      ) => Promise<FeedbackDiagnoseResponse>;
+    }) => {
+      detachingRef.current = true;
       abortRef.current?.abort();
+      detachingRef.current = false;
+
       const controller = new AbortController();
       abortRef.current = controller;
-
-      const normalized = normalizeDiagnosePayload(
-        nextTurns
-          .filter((t) => !t.streaming)
-          .map((t) => ({ role: t.role, text: t.text })),
-        allImageUrls,
-      );
-      if (normalized.messages.length === 0) return;
+      activeRunIdRef.current = opts.runId;
 
       const assistantTurnId = makeTurnId();
-      const thinkingStartedAt = Date.now();
-      const initialLabel = options?.isAutoResume
-        ? "检测到上次诊断中断，正在自动恢复…"
-        : "正在分析问题与上下文…";
+      let thinkingStartedAt = Date.now();
+      diagnoseStartedAtRef.current = thinkingStartedAt;
 
-      // Synchronously persist pendingDiagnoseAt before starting the network request
-      // so an immediate page refresh still knows a diagnosis was in-flight.
-      let activeId = sessionIdRef.current;
-      let createdAt = sessionCreatedAtRef.current;
-      if (!activeId) {
-        activeId = makeTurnId();
-        createdAt = thinkingStartedAt;
-        sessionIdRef.current = activeId;
-        sessionCreatedAtRef.current = createdAt;
-        setSessionId(activeId);
-        setSessionCreatedAt(createdAt);
-      }
-      setPendingDiagnoseAt(thinkingStartedAt);
-      if (projectId) {
-        const persisted = upsertPortalConversation(
-          projectId,
-          {
-            id: activeId,
-            title: deriveConversationTitle(nextTurns),
-            turns: nextTurns,
-            draft: draftRef.current,
-            ...(submittedTaskCodeRef.current
-              ? { submittedTaskCode: submittedTaskCodeRef.current }
-              : {}),
-            pendingDiagnoseAt: thinkingStartedAt,
-            createdAt,
-            updatedAt: thinkingStartedAt,
-          },
-          true,
-        );
-        setHistorySessions(persisted.sessions);
-      }
-
-      setHistoryTrimmedHint(normalized.trimmedHistory);
       setDiagnosing(true);
-      setStatusLabel(initialLabel);
-      setLiveSteps([initialLabel]);
+      setStatusLabel(opts.initialLabel);
+      setLiveSteps([opts.initialLabel]);
       setLiveReasoning("");
       setDiagnoseError(null);
 
       let streamed = "";
       let streamedReasoning = "";
-      let collectedSteps: string[] = [initialLabel];
+      let collectedSteps: string[] = [opts.initialLabel];
       let thinkingDurationMs: number | undefined;
       let streamStarted = false;
 
@@ -385,98 +377,125 @@ export function PortalFeedbackConversation({
         }
       };
 
-      const executeDiagnose = () =>
-        onDiagnose(
-          {
-            messages: normalized.messages,
-            ...(normalized.images.length ? { images: normalized.images } : {}),
-          },
-          controller.signal,
-          (ev) => {
-            if (controller.signal.aborted || !mountedRef.current) return;
-            if (ev.type === "status") {
-              const nextLabel = ev.label || "正在排查问题…";
-              setStatusLabel(nextLabel);
-              pushStep(nextLabel);
-              if (streamStarted) {
-                const stepsSnapshot = collectedSteps;
-                setTurns((prev) =>
-                  prev.map((item) =>
-                    item.id === assistantTurnId
-                      ? { ...item, traceSteps: stepsSnapshot }
-                      : item,
-                  ),
-                );
-              }
-            } else if (ev.type === "reasoning" && ev.text) {
-              streamedReasoning += ev.text;
-              setLiveReasoning(streamedReasoning);
-              setStatusLabel("正在深度推理…");
-              if (streamStarted) {
-                const currentReasoning = streamedReasoning;
-                setTurns((prev) =>
-                  prev.map((item) =>
-                    item.id === assistantTurnId
-                      ? { ...item, reasoning: currentReasoning }
-                      : item,
-                  ),
-                );
-              }
-              scrollToLatest("auto");
-            } else if (ev.type === "delta" && ev.text) {
-              streamed += ev.text;
-              if (!streamStarted) {
-                streamStarted = true;
-                thinkingDurationMs = Math.max(100, Date.now() - thinkingStartedAt);
-                const stepsSnapshot = collectedSteps;
-                const reasoningSnapshot = streamedReasoning.trim() || undefined;
-                const durationSnapshot = thinkingDurationMs;
-                setTurns((prev) => [
-                  ...prev,
-                  {
-                    id: assistantTurnId,
-                    role: "assistant",
-                    text: streamed,
-                    ...(reasoningSnapshot ? { reasoning: reasoningSnapshot } : {}),
-                    ...(stepsSnapshot.length ? { traceSteps: stepsSnapshot } : {}),
-                    thinkingDurationMs: durationSnapshot,
-                    streaming: true,
-                  },
-                ]);
-              } else {
-                const currentText = streamed;
-                setTurns((prev) =>
-                  prev.map((item) =>
-                    item.id === assistantTurnId
-                      ? { ...item, text: currentText }
-                      : item,
-                  ),
-                );
-              }
-              scrollToLatest("auto");
+      const handleStreamEvent = (ev: FeedbackDiagnoseStreamEvent) => {
+        if (controller.signal.aborted || !mountedRef.current) return;
+        if (ev.type === "started") {
+          thinkingStartedAt = ev.started_at;
+          diagnoseStartedAtRef.current = ev.started_at;
+          return;
+        }
+        if (ev.type === "snapshot") {
+          thinkingStartedAt = ev.started_at;
+          diagnoseStartedAtRef.current = ev.started_at;
+          setElapsedMs(Math.max(0, Date.now() - ev.started_at));
+          if (ev.status_label) {
+            setStatusLabel(ev.status_label);
+          }
+          if (ev.steps.length > 0) {
+            collectedSteps = ev.steps.slice(-20);
+            setLiveSteps(collectedSteps);
+          }
+          if (ev.reasoning) {
+            streamedReasoning = ev.reasoning;
+            setLiveReasoning(streamedReasoning);
+          }
+          if (ev.text) {
+            streamed = ev.text;
+            if (!streamStarted) {
+              streamStarted = true;
+              thinkingDurationMs = Math.max(100, Date.now() - thinkingStartedAt);
+              const stepsSnapshot = collectedSteps;
+              const reasoningSnapshot = streamedReasoning.trim() || undefined;
+              const durationSnapshot = thinkingDurationMs;
+              setTurns((prev) => [
+                ...prev.filter((t) => !(t.role === "assistant" && !t.outcome)),
+                {
+                  id: assistantTurnId,
+                  role: "assistant",
+                  text: streamed,
+                  ...(reasoningSnapshot ? { reasoning: reasoningSnapshot } : {}),
+                  ...(stepsSnapshot.length ? { traceSteps: stepsSnapshot } : {}),
+                  thinkingDurationMs: durationSnapshot,
+                  streaming: true,
+                },
+              ]);
+            } else {
+              const currentText = streamed;
+              setTurns((prev) =>
+                prev.map((item) =>
+                  item.id === assistantTurnId ? { ...item, text: currentText } : item,
+                ),
+              );
             }
-          },
-        );
+          }
+          scrollToLatest("auto");
+          return;
+        }
+        if (ev.type === "status") {
+          const nextLabel = ev.label || "正在排查问题…";
+          setStatusLabel(nextLabel);
+          pushStep(nextLabel);
+          if (streamStarted) {
+            const stepsSnapshot = collectedSteps;
+            setTurns((prev) =>
+              prev.map((item) =>
+                item.id === assistantTurnId
+                  ? { ...item, traceSteps: stepsSnapshot }
+                  : item,
+              ),
+            );
+          }
+        } else if (ev.type === "reasoning" && ev.text) {
+          streamedReasoning += ev.text;
+          setLiveReasoning(streamedReasoning);
+          setStatusLabel("正在深度推理…");
+          if (streamStarted) {
+            const currentReasoning = streamedReasoning;
+            setTurns((prev) =>
+              prev.map((item) =>
+                item.id === assistantTurnId
+                  ? { ...item, reasoning: currentReasoning }
+                  : item,
+              ),
+            );
+          }
+          scrollToLatest("auto");
+        } else if (ev.type === "delta" && ev.text) {
+          streamed += ev.text;
+          if (!streamStarted) {
+            streamStarted = true;
+            thinkingDurationMs = Math.max(100, Date.now() - thinkingStartedAt);
+            const stepsSnapshot = collectedSteps;
+            const reasoningSnapshot = streamedReasoning.trim() || undefined;
+            const durationSnapshot = thinkingDurationMs;
+            setTurns((prev) => [
+              ...prev,
+              {
+                id: assistantTurnId,
+                role: "assistant",
+                text: streamed,
+                ...(reasoningSnapshot ? { reasoning: reasoningSnapshot } : {}),
+                ...(stepsSnapshot.length ? { traceSteps: stepsSnapshot } : {}),
+                thinkingDurationMs: durationSnapshot,
+                streaming: true,
+              },
+            ]);
+          } else {
+            const currentText = streamed;
+            setTurns((prev) =>
+              prev.map((item) =>
+                item.id === assistantTurnId
+                  ? { ...item, text: currentText }
+                  : item,
+              ),
+            );
+          }
+          scrollToLatest("auto");
+        }
+      };
 
       try {
-        let res: FeedbackDiagnoseResponse;
-        try {
-          res = await executeDiagnose();
-        } catch (firstErr) {
-          // On immediate page refresh, the server may still be closing the previous SSE
-          // connection and briefly return 409 ("上一条诊断消息仍在处理中"). Retry once.
-          const isTransientInFlight =
-            options?.isAutoResume &&
-            firstErr instanceof PortalApiError &&
-            firstErr.status === 409 &&
-            firstErr.message.includes("仍在处理中");
-          if (!isTransientInFlight || controller.signal.aborted) {
-            throw firstErr;
-          }
-          await delayAbortable(700, controller.signal);
-          if (controller.signal.aborted || !mountedRef.current) return;
-          res = await executeDiagnose();
-        }
+        const res = await opts.execute(controller.signal, handleStreamEvent);
         if (controller.signal.aborted || !mountedRef.current) return;
 
         const finalText = (res.reply || streamed).trim();
@@ -503,7 +522,7 @@ export function PortalFeedbackConversation({
             );
           }
           return [
-            ...prev,
+            ...prev.filter((t) => !(t.role === "assistant" && !t.outcome)),
             {
               id: assistantTurnId,
               role: "assistant",
@@ -522,7 +541,7 @@ export function PortalFeedbackConversation({
             turnId: assistantTurnId,
             title: res.draft.title.trim(),
             body: res.draft.body.trim(),
-            images: dedupeUrls(allImageUrls).slice(0, 6),
+            images: dedupeUrls(opts.allImageUrls).slice(0, 6),
             releasePreference: "default",
             expanded: false,
             dismissed: false,
@@ -533,15 +552,23 @@ export function PortalFeedbackConversation({
 
         scrollToLatest();
       } catch (err) {
-        // If unmounted (e.g. page reload), leave pendingDiagnoseAt intact in storage
-        // so the reloaded page can automatically resume the interrupted request.
-        if (!mountedRef.current) return;
+        // Unmounting (page reload) or switching away to another conversation:
+        // leave pendingRunId / pendingDiagnoseAt intact so returning or reloading can reattach seamlessly.
+        if (!mountedRef.current || detachingRef.current) return;
         if (streamStarted) {
           setTurns((prev) =>
             prev.map((item) =>
               item.id === assistantTurnId ? { ...item, streaming: false } : item,
             ),
           );
+        }
+        if (
+          opts.mode === "attach" &&
+          err instanceof PortalApiError &&
+          err.status === 404
+        ) {
+          // Server restarted or run expired: clear pending state so the clean interrupted banner offers one-click retry.
+          return;
         }
         if (
           controller.signal.aborted ||
@@ -566,46 +593,167 @@ export function PortalFeedbackConversation({
         if (abortRef.current === controller) {
           abortRef.current = null;
         }
-        if (mountedRef.current) {
+        if (mountedRef.current && !detachingRef.current) {
+          if (activeRunIdRef.current === opts.runId) {
+            activeRunIdRef.current = null;
+          }
           setDiagnosing(false);
+          setPendingRunId(undefined);
           setPendingDiagnoseAt(undefined);
           setLiveReasoning("");
           setLiveSteps([]);
         }
       }
     },
-    [onDiagnose, onPossibleAuthError, projectId, scrollToLatest],
+    [onPossibleAuthError, scrollToLatest],
   );
 
-  // Automatically resume an in-flight diagnosis interrupted by a page refresh.
+  const runDiagnoseTurn = useCallback(
+    async (
+      nextTurns: ConversationTurn[],
+      allImageUrls: string[],
+      options?: { isAutoResume?: boolean },
+    ) => {
+      const normalized = normalizeDiagnosePayload(
+        nextTurns
+          .filter((t) => !t.streaming)
+          .map((t) => ({ role: t.role, text: t.text })),
+        allImageUrls,
+      );
+      if (normalized.messages.length === 0) return;
+
+      const runId = makeRunId();
+      const startedAt = Date.now();
+      const initialLabel = options?.isAutoResume
+        ? "检测到上次诊断中断，正在自动恢复…"
+        : "正在分析问题与上下文…";
+
+      // Synchronously persist pendingRunId + pendingDiagnoseAt before starting the network request
+      // so an immediate page refresh can reattach to the exact same server run without re-calling AI.
+      let activeId = sessionIdRef.current;
+      let createdAt = sessionCreatedAtRef.current;
+      if (!activeId) {
+        activeId = makeTurnId();
+        createdAt = startedAt;
+        sessionIdRef.current = activeId;
+        sessionCreatedAtRef.current = createdAt;
+        setSessionId(activeId);
+        setSessionCreatedAt(createdAt);
+      }
+      setPendingRunId(runId);
+      setPendingDiagnoseAt(startedAt);
+      if (projectId) {
+        const persisted = upsertPortalConversation(
+          projectId,
+          {
+            id: activeId,
+            title: deriveConversationTitle(nextTurns),
+            turns: nextTurns,
+            draft: draftRef.current,
+            ...(submittedTaskCodeRef.current
+              ? { submittedTaskCode: submittedTaskCodeRef.current }
+              : {}),
+            pendingRunId: runId,
+            pendingDiagnoseAt: startedAt,
+            createdAt,
+            updatedAt: startedAt,
+          },
+          true,
+        );
+        setHistorySessions(persisted.sessions);
+      }
+
+      setHistoryTrimmedHint(normalized.trimmedHistory);
+
+      await runDiagnoseStream({
+        runId,
+        allImageUrls,
+        initialLabel,
+        mode: "start",
+        execute: async (signal, onEvent) => {
+          const callOnce = () =>
+            onDiagnose(
+              {
+                messages: normalized.messages,
+                ...(normalized.images.length ? { images: normalized.images } : {}),
+                ...(onAttachDiagnoseRun ? { run_id: runId } : {}),
+              },
+              signal,
+              onEvent,
+            );
+          try {
+            return await callOnce();
+          } catch (firstErr) {
+            const isTransientInFlight =
+              options?.isAutoResume &&
+              firstErr instanceof PortalApiError &&
+              firstErr.status === 409 &&
+              firstErr.message.includes("仍在处理中");
+            if (!isTransientInFlight || signal.aborted) {
+              throw firstErr;
+            }
+            await delayAbortable(700, signal);
+            return await callOnce();
+          }
+        },
+      });
+    },
+    [onAttachDiagnoseRun, onDiagnose, projectId, runDiagnoseStream],
+  );
+
+  // Seamlessly reattach to an in-flight server run after page refresh or switching back to a running session.
   useEffect(() => {
-    if (!sessionId || pendingDiagnoseAt === undefined) return;
+    if (!sessionId) return;
+    if (!pendingRunId && pendingDiagnoseAt === undefined) return;
     if (diagnosing) return;
-    if (autoResumedRef.current === sessionId) return;
+    const resumeKey = `${sessionId}:${pendingRunId ?? pendingDiagnoseAt}`;
+    if (autoResumedRef.current === resumeKey) return;
     if (!hasUnansweredUserTurn(turns)) {
+      setPendingRunId(undefined);
       setPendingDiagnoseAt(undefined);
       return;
     }
+
+    const imgs = dedupeUrls(turns.flatMap((t) => t.images ?? [])).slice(-6);
+
+    // Prefer true server-side run reattachment (replays snapshot + live stream without re-calling AI).
+    if (pendingRunId && onAttachDiagnoseRun) {
+      autoResumedRef.current = resumeKey;
+      void runDiagnoseStream({
+        runId: pendingRunId,
+        allImageUrls: imgs,
+        initialLabel: "正在恢复诊断连接…",
+        mode: "attach",
+        execute: (signal, onEvent) =>
+          onAttachDiagnoseRun(pendingRunId, signal, onEvent),
+      });
+      return;
+    }
+
+    // Fallback when run attachment is unavailable: auto-resume if pending flag is fresh.
     if (
       !isPendingDiagnoseFresh(pendingDiagnoseAt) ||
       config.agent_available === false
     ) {
+      setPendingRunId(undefined);
       setPendingDiagnoseAt(undefined);
       return;
     }
-    autoResumedRef.current = sessionId;
+    autoResumedRef.current = resumeKey;
     const cleanTurns = turns.filter(
       (t) => !(t.role === "assistant" && !t.outcome),
     );
     if (cleanTurns.length !== turns.length) {
       setTurns(cleanTurns);
     }
-    const imgs = dedupeUrls(cleanTurns.flatMap((t) => t.images ?? [])).slice(-6);
     void runDiagnoseTurn(cleanTurns, imgs, { isAutoResume: true });
   }, [
     config.agent_available,
     diagnosing,
+    onAttachDiagnoseRun,
     pendingDiagnoseAt,
+    pendingRunId,
+    runDiagnoseStream,
     runDiagnoseTurn,
     sessionId,
     turns,
@@ -670,44 +818,39 @@ export function PortalFeedbackConversation({
     void runDiagnoseTurn(cleanTurns, conversationImages);
   };
 
-  const clearOutgoingPendingFlag = useCallback(() => {
-    if (!projectId || !sessionIdRef.current || turns.length === 0) return;
-    if (pendingDiagnoseAt === undefined && !diagnosing) return;
-    upsertPortalConversation(
-      projectId,
-      {
-        id: sessionIdRef.current,
-        title: deriveConversationTitle(turns),
-        turns,
-        draft,
-        ...(submittedTaskCode ? { submittedTaskCode } : {}),
-        createdAt: sessionCreatedAt,
-        updatedAt: Date.now(),
-      },
-      false,
-    );
-  }, [
-    diagnosing,
-    draft,
-    pendingDiagnoseAt,
-    projectId,
-    sessionCreatedAt,
-    submittedTaskCode,
-    turns,
-  ]);
+  const detachCurrentStream = useCallback(() => {
+    detachingRef.current = true;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    activeRunIdRef.current = null;
+    setDiagnosing(false);
+    setLiveReasoning("");
+    setLiveSteps([]);
+    // Reset detaching flag on next microtask after abort callbacks settle.
+    queueMicrotask(() => {
+      detachingRef.current = false;
+    });
+  }, []);
 
   const handleStop = () => {
+    const runId = activeRunIdRef.current ?? pendingRunId;
+    if (runId && onAbortDiagnoseRun) {
+      void onAbortDiagnoseRun(runId).catch(() => {});
+    }
+    setPendingRunId(undefined);
     setPendingDiagnoseAt(undefined);
     abortRef.current?.abort();
   };
 
   const handleResetConversation = () => {
-    clearOutgoingPendingFlag();
-    abortRef.current?.abort();
+    // Detach local reader without killing a background server run;
+    // the previous conversation keeps its pendingRunId so switching back reattaches seamlessly.
+    detachCurrentStream();
     autoResumedRef.current = null;
     setSessionId(null);
     setSessionCreatedAt(Date.now());
     setSubmittedTaskCode(undefined);
+    setPendingRunId(undefined);
     setPendingDiagnoseAt(undefined);
     setTurns([]);
     setDraft(null);
@@ -726,15 +869,27 @@ export function PortalFeedbackConversation({
   };
 
   const handleSelectHistorySession = (session: StoredPortalConversation) => {
-    clearOutgoingPendingFlag();
-    abortRef.current?.abort();
-    // Mark as already handled so switching to a historical session never auto-fires a network call;
-    // if its last turn is unanswered, the inline recovery banner offers one-click retry.
-    autoResumedRef.current = session.id;
+    if (session.id === sessionId) {
+      if (typeof window !== "undefined" && window.innerWidth < 768) {
+        setSidebarOpen(false);
+      }
+      return;
+    }
+    detachCurrentStream();
+    // If the target session has a pendingRunId (still running or just finished on server),
+    // allow the reattach effect to attach to its stream cleanly; otherwise mark as handled
+    // so browsing old interrupted sessions shows the one-click retry banner without auto-calling AI.
+    autoResumedRef.current =
+      session.pendingRunId && onAttachDiagnoseRun ? null : `${session.id}:browse`;
     setSessionId(session.id);
     setSessionCreatedAt(session.createdAt);
     setSubmittedTaskCode(session.submittedTaskCode);
-    setPendingDiagnoseAt(undefined);
+    setPendingRunId(session.pendingRunId);
+    setPendingDiagnoseAt(
+      session.pendingRunId && onAttachDiagnoseRun
+        ? session.pendingDiagnoseAt
+        : undefined,
+    );
     setTurns(session.turns);
     setDraft(session.draft);
     setDiagnoseError(null);
@@ -751,14 +906,19 @@ export function PortalFeedbackConversation({
 
   const handleDeleteHistorySession = (targetId: string) => {
     if (!projectId) return;
+    const target = historySessions.find((s) => s.id === targetId);
+    if (target?.pendingRunId && onAbortDiagnoseRun) {
+      void onAbortDiagnoseRun(target.pendingRunId).catch(() => {});
+    }
     const updated = deletePortalConversation(projectId, targetId);
     setHistorySessions(updated.sessions);
     if (sessionId === targetId) {
-      abortRef.current?.abort();
+      detachCurrentStream();
       autoResumedRef.current = null;
       setSessionId(null);
       setSessionCreatedAt(Date.now());
       setSubmittedTaskCode(undefined);
+      setPendingRunId(undefined);
       setPendingDiagnoseAt(undefined);
       setTurns([]);
       setDraft(null);
@@ -768,13 +928,19 @@ export function PortalFeedbackConversation({
 
   const handleClearAllHistory = () => {
     if (!projectId) return;
-    abortRef.current?.abort();
+    for (const s of historySessions) {
+      if (s.pendingRunId && onAbortDiagnoseRun) {
+        void onAbortDiagnoseRun(s.pendingRunId).catch(() => {});
+      }
+    }
+    detachCurrentStream();
     autoResumedRef.current = null;
     clearPortalConversations(projectId);
     setHistorySessions([]);
     setSessionId(null);
     setSessionCreatedAt(Date.now());
     setSubmittedTaskCode(undefined);
+    setPendingRunId(undefined);
     setPendingDiagnoseAt(undefined);
     setTurns([]);
     setDraft(null);
@@ -1105,7 +1271,8 @@ export function PortalFeedbackConversation({
               <div className="flex-1 min-h-0 overflow-y-auto rd-scroll p-1.5 space-y-0.5">
                 {historySessions.map((session) => {
                   const isActive = session.id === sessionId;
-                  const isRunningThis = isActive && diagnosing;
+                  const isRunningThis =
+                    (isActive && diagnosing) || Boolean(session.pendingRunId);
                   const lastAssistant = [...session.turns]
                     .reverse()
                     .find((t) => t.role === "assistant");

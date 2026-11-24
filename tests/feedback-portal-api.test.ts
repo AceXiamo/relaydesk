@@ -514,6 +514,157 @@ describe("project feedback diagnosis over HTTP", () => {
     ).toBe("我确认的标题");
     expect(srv.store.listTasks(project)).toHaveLength(1);
   });
+
+  it("keeps a run_id SSE diagnosis alive across client disconnect, replays snapshot on reattach, and aborts only on explicit abort", async () => {
+    const l1 = await link({ label: "Device A" });
+    const h1 = { Cookie: (await redeem(l1.url)).cookie };
+    const l2 = await link({ label: "Device B" });
+    const h2 = { Cookie: (await redeem(l2.url)).cookie };
+    vi.spyOn(feedbackAgent, "feedbackAgentAvailability").mockReturnValue({
+      enabled: true,
+      available: true,
+    });
+
+    type EmitFn = NonNullable<Parameters<typeof feedbackAgent.diagnoseFeedback>[4]>["onEvent"];
+    let emit!: NonNullable<EmitFn>;
+    let finish!: (res: { reply: string; outcome: "usage"; reasoning?: string }) => void;
+    let started!: () => void;
+    const entered = new Promise<void>((r) => {
+      started = r;
+    });
+    const diagnoseSpy = vi
+      .spyOn(feedbackAgent, "diagnoseFeedback")
+      .mockImplementationOnce(
+        (_s, _hub, _p, _d, opts) =>
+          new Promise((resolve, reject) => {
+            emit = opts?.onEvent ?? (() => {});
+            finish = resolve;
+            opts?.signal?.addEventListener(
+              "abort",
+              () => reject(new Error("aborted")),
+              { once: true },
+            );
+            started();
+          }),
+      );
+
+    const runId = "run_refresh_reattach_1";
+    const firstAbort = new AbortController();
+    const firstReq = fetch(new URL(base + "/portal/diagnose", srv.url), {
+      method: "POST",
+      headers: {
+        ...h1,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({
+        run_id: runId,
+        messages: [{ role: "user", text: "刷新后不要重跑 AI" }],
+      }),
+      signal: firstAbort.signal,
+    }).catch(() => null);
+
+    await entered;
+    emit({ type: "status", label: "正在读取代码…" });
+    emit({ type: "reasoning", text: "先排查刷新逻辑。" });
+    emit({ type: "delta", text: "前半段回复，" });
+
+    // Simulate page refresh (HTTP connection drops) — must NOT abort the background diagnosis
+    firstAbort.abort();
+    await firstReq;
+
+    // Another visitor cannot hijack or view this run
+    const otherRes = await fetch(
+      new URL(`${base}/portal/diagnose/${runId}/stream`, srv.url),
+      { headers: { ...h2, Accept: "text/event-stream" } },
+    );
+    const otherFrames = parseSseFrames(await otherRes.text());
+    expect(otherFrames.some((f) => f.event === "error" && f.data.status === 404)).toBe(true);
+
+    // Same visitor reattaches after reload
+    const reattachPromise = fetch(
+      new URL(`${base}/portal/diagnose/${runId}/stream`, srv.url),
+      { headers: { ...h1, Accept: "text/event-stream" } },
+    );
+    await new Promise((r) => setTimeout(r, 40));
+    emit({ type: "delta", text: "后半段回复。" });
+    finish({
+      reply: "前半段回复，后半段回复。",
+      outcome: "usage",
+      reasoning: "先排查刷新逻辑。",
+    });
+
+    const reattachRes = await reattachPromise;
+    const frames = parseSseFrames(await reattachRes.text());
+    expect(diagnoseSpy).toHaveBeenCalledTimes(1);
+    const snap = frames.find((f) => f.event === "snapshot");
+    expect(snap?.data).toMatchObject({
+      run_id: runId,
+      reasoning: "先排查刷新逻辑。",
+      text: "前半段回复，",
+    });
+    const done = frames.find((f) => f.event === "done");
+    expect(done?.data).toMatchObject({
+      reply: "前半段回复，后半段回复。",
+      outcome: "usage",
+    });
+
+    // Reattaching after completion immediately replays cached done without calling AI again
+    const lateRes = await fetch(
+      new URL(`${base}/portal/diagnose/${runId}/stream`, srv.url),
+      { headers: { ...h1, Accept: "text/event-stream" } },
+    );
+    const lateFrames = parseSseFrames(await lateRes.text());
+    expect(lateFrames.some((f) => f.event === "done" && f.data.reply === "前半段回复，后半段回复。")).toBe(true);
+    expect(diagnoseSpy).toHaveBeenCalledTimes(1);
+
+    // Explicit abort stops a running background diagnosis
+    let abortedFlag = false;
+    let started2!: () => void;
+    const entered2 = new Promise<void>((r) => {
+      started2 = r;
+    });
+    diagnoseSpy.mockImplementationOnce(
+      (_s, _hub, _p, _d, opts) =>
+        new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener(
+            "abort",
+            () => {
+              abortedFlag = true;
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+          started2();
+        }),
+    );
+
+    const runId2 = "run_explicit_abort_2";
+    const run2Stream = fetch(new URL(base + "/portal/diagnose", srv.url), {
+      method: "POST",
+      headers: {
+        ...h1,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({
+        run_id: runId2,
+        messages: [{ role: "user", text: "手动停止测试" }],
+      }),
+    });
+    await entered2;
+    const abortRes = await call(
+      `${base}/portal/diagnose/${runId2}/abort`,
+      "POST",
+      h1,
+      {},
+    );
+    expect(abortRes.res.status).toBe(200);
+    expect(abortRes.json).toEqual({ ok: true });
+    const run2Frames = parseSseFrames(await (await run2Stream).text());
+    expect(abortedFlag).toBe(true);
+    expect(run2Frames.some((f) => f.event === "aborted")).toBe(true);
+  });
 });
 
 describe("feedback access links over HTTP", () => {

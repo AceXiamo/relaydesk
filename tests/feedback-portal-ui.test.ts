@@ -15,7 +15,11 @@ import { FeedbackAgentSettingsCard } from "../app/components/FeedbackAgentSettin
 import { ToastProvider } from "../app/components/ui.tsx";
 import { PortalApiError } from "../app/lib/portal-api.ts";
 import { upsertPortalConversation } from "../app/lib/portal-conversation-storage.ts";
-import type { PortalConfig, PortalTaskDetail } from "../app/lib/portal-types.ts";
+import type {
+  FeedbackDiagnoseStreamEvent,
+  PortalConfig,
+  PortalTaskDetail,
+} from "../app/lib/portal-types.ts";
 import type { ProjectDetail } from "../app/lib/types.ts";
 
 const mockApi = vi.hoisted(() => ({
@@ -872,6 +876,145 @@ describe("PortalFeedbackConversation UI", () => {
       vi.useRealTimers();
       window.localStorage.clear();
     }
+  });
+
+  it("reattaches to the existing server run on refresh without re-invoking onDiagnose and calls onAbortDiagnoseRun on stop", async () => {
+    window.localStorage.clear();
+    const projectId = "proj-reattach-no-rerun";
+
+    let capturedRunId = "";
+    const onDiagnose = vi.fn(
+      (payload: { run_id?: string }, signal?: AbortSignal) => {
+        capturedRunId = payload.run_id ?? "";
+        return new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        });
+      },
+    );
+
+    let resolveAttach!: (res: {
+      reply: string;
+      outcome: "usage";
+      reasoning?: string;
+    }) => void;
+    let emitAttach!: (ev: FeedbackDiagnoseStreamEvent) => void;
+    const onAttachDiagnoseRun = vi.fn(
+      (_runId: string, _signal?: AbortSignal, onEvent?: typeof emitAttach) => {
+        if (onEvent) emitAttach = onEvent;
+        return new Promise<{ reply: string; outcome: "usage"; reasoning?: string }>(
+          (resolve) => {
+            resolveAttach = resolve;
+          },
+        );
+      },
+    );
+    const onAbortDiagnoseRun = vi.fn(async () => ({ ok: true }));
+
+    const renderPortal = async () => {
+      await act(async () => {
+        root.render(
+          createElement(
+            ToastProvider,
+            null,
+            createElement(PortalFeedbackConversation, {
+              projectId,
+              config: baseConfig,
+              stagedImages: [],
+              onUploadFiles: vi.fn(),
+              onRemoveStagedImage: vi.fn(),
+              onClearStagedImages: vi.fn(),
+              onOpenLightbox: vi.fn(),
+              onDiagnose,
+              onAttachDiagnoseRun,
+              onAbortDiagnoseRun,
+              onCreateTask: vi.fn(),
+              onSwitchToManual: vi.fn(),
+              onPossibleAuthError: () => false,
+            }),
+          ),
+        );
+      });
+    };
+
+    await renderPortal();
+
+    const input = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="portal-agent-input"]',
+    )!;
+    await act(async () => {
+      setReactValue(input, "对齐内部对话体验，刷新不重跑");
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-agent-send"]')!
+        .click();
+    });
+
+    expect(onDiagnose).toHaveBeenCalledTimes(1);
+    expect(capturedRunId).toMatch(/^run_/);
+
+    // Simulate page refresh mid-reply
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await renderPortal();
+
+    // Must NOT call onDiagnose again; must attach to the exact same runId!
+    expect(onDiagnose).toHaveBeenCalledTimes(1);
+    expect(onAttachDiagnoseRun).toHaveBeenCalledTimes(1);
+    expect(onAttachDiagnoseRun).toHaveBeenCalledWith(
+      capturedRunId,
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+
+    // Replay snapshot and complete live
+    await act(async () => {
+      emitAttach({
+        type: "snapshot",
+        run_id: capturedRunId,
+        status_label: "正在查阅代码…",
+        steps: ["正在查阅代码…"],
+        reasoning: "已在服务端继续推理。",
+        text: "前半段正文，",
+        started_at: Date.now() - 2000,
+      });
+    });
+    expect(container.textContent).toContain("前半段正文，");
+
+    await act(async () => {
+      emitAttach({ type: "delta", text: "后半段正文。" });
+      resolveAttach({
+        reply: "前半段正文，后半段正文。",
+        outcome: "usage",
+        reasoning: "已在服务端继续推理。",
+      });
+    });
+    expect(container.textContent).toContain("前半段正文，后半段正文。");
+
+    // Start another turn and click Stop -> must invoke onAbortDiagnoseRun with the new runId
+    const input2 = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="portal-agent-input"]',
+    )!;
+    await act(async () => {
+      setReactValue(input2, "测试显式停止");
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-agent-send"]')!
+        .click();
+    });
+    const stopBtn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="portal-agent-stop"]',
+    )!;
+    await act(async () => {
+      stopBtn.click();
+    });
+    expect(onAbortDiagnoseRun).toHaveBeenCalledWith(capturedRunId);
+    window.localStorage.clear();
   });
 });
 

@@ -54,23 +54,10 @@ async function portalRequest<T>(
   return data as T;
 }
 
-async function portalDiagnoseStream(
-  path: string,
-  payload: { messages: FeedbackDiagnoseMessage[]; images?: string[] },
-  signal?: AbortSignal,
+async function consumeDiagnoseSseResponse(
+  response: Response,
   onEvent?: (event: FeedbackDiagnoseStreamEvent) => void,
 ): Promise<FeedbackDiagnoseResponse> {
-  const response = await fetch(path, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream, application/json",
-    },
-    body: JSON.stringify(payload),
-    signal,
-  });
-
   const contentType = (response.headers.get("content-type") || "").toLowerCase();
 
   if (!response.ok) {
@@ -121,7 +108,41 @@ async function portalDiagnoseStream(
       return;
     }
 
-    if (eventName === "status" && typeof parsed.label === "string") {
+    if (
+      eventName === "started" &&
+      typeof parsed.run_id === "string" &&
+      typeof parsed.started_at === "number"
+    ) {
+      onEvent?.({
+        type: "started",
+        run_id: parsed.run_id,
+        started_at: parsed.started_at,
+      });
+    } else if (eventName === "snapshot" && typeof parsed.run_id === "string") {
+      const snapText = typeof parsed.text === "string" ? parsed.text : "";
+      const snapReasoning =
+        typeof parsed.reasoning === "string" ? parsed.reasoning : "";
+      const snapSteps = Array.isArray(parsed.steps)
+        ? parsed.steps.filter((s): s is string => typeof s === "string")
+        : [];
+      const snapLabel =
+        typeof parsed.status_label === "string"
+          ? parsed.status_label
+          : "正在排查问题…";
+      const snapStartedAt =
+        typeof parsed.started_at === "number" ? parsed.started_at : Date.now();
+      accumulatedText = snapText;
+      accumulatedReasoning = snapReasoning;
+      onEvent?.({
+        type: "snapshot",
+        run_id: parsed.run_id,
+        status_label: snapLabel,
+        steps: snapSteps,
+        reasoning: snapReasoning,
+        text: snapText,
+        started_at: snapStartedAt,
+      });
+    } else if (eventName === "status" && typeof parsed.label === "string") {
       onEvent?.({ type: "status", label: parsed.label });
     } else if (eventName === "reasoning" && typeof parsed.text === "string") {
       accumulatedReasoning += parsed.text;
@@ -131,6 +152,11 @@ async function portalDiagnoseStream(
       onEvent?.({ type: "delta", text: parsed.text });
     } else if (eventName === "done") {
       finalResult = parsed as unknown as FeedbackDiagnoseResponse;
+    } else if (eventName === "aborted") {
+      throw new DOMException(
+        typeof parsed.message === "string" ? parsed.message : "Aborted",
+        "AbortError",
+      );
     } else if (eventName === "error") {
       throw new PortalApiError(
         typeof parsed.status === "number" ? parsed.status : 500,
@@ -176,6 +202,45 @@ async function portalDiagnoseStream(
     };
   }
   throw new PortalApiError(502, "诊断流意外结束，请重试或直接提交反馈。");
+}
+
+async function portalDiagnoseStream(
+  path: string,
+  payload: {
+    messages: FeedbackDiagnoseMessage[];
+    images?: string[];
+    run_id?: string;
+  },
+  signal?: AbortSignal,
+  onEvent?: (event: FeedbackDiagnoseStreamEvent) => void,
+): Promise<FeedbackDiagnoseResponse> {
+  const response = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream, application/json",
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  return consumeDiagnoseSseResponse(response, onEvent);
+}
+
+async function portalDiagnoseAttachStream(
+  path: string,
+  signal?: AbortSignal,
+  onEvent?: (event: FeedbackDiagnoseStreamEvent) => void,
+): Promise<FeedbackDiagnoseResponse> {
+  const response = await fetch(path, {
+    method: "GET",
+    credentials: "same-origin",
+    headers: {
+      Accept: "text/event-stream",
+    },
+    signal,
+  });
+  return consumeDiagnoseSseResponse(response, onEvent);
 }
 
 export function createPortalApi(projectId: string) {
@@ -233,10 +298,32 @@ export function createPortalApi(projectId: string) {
       ),
 
     diagnose: (
-      payload: { messages: FeedbackDiagnoseMessage[]; images?: string[] },
+      payload: {
+        messages: FeedbackDiagnoseMessage[];
+        images?: string[];
+        run_id?: string;
+      },
       signal?: AbortSignal,
       onEvent?: (event: FeedbackDiagnoseStreamEvent) => void,
     ) => portalDiagnoseStream(`${base}/diagnose`, payload, signal, onEvent),
+
+    attachDiagnoseRun: (
+      runId: string,
+      signal?: AbortSignal,
+      onEvent?: (event: FeedbackDiagnoseStreamEvent) => void,
+    ) =>
+      portalDiagnoseAttachStream(
+        `${base}/diagnose/${encodeURIComponent(runId)}/stream`,
+        signal,
+        onEvent,
+      ),
+
+    abortDiagnoseRun: (runId: string) =>
+      portalRequest<{ ok: boolean }>(
+        `${base}/diagnose/${encodeURIComponent(runId)}/abort`,
+        "POST",
+        {},
+      ),
 
     clarify: (body: string) =>
       portalRequest<{ reply: string }>(`${base}/clarify`, "POST", { body }),

@@ -8,6 +8,7 @@ import { ChatRunManager } from "./chat-run-manager.ts";
 import { ReleaseDispatcher } from "./release-dispatcher.ts";
 import { TaskDispatcher } from "./task-dispatcher.ts";
 import { getFeedbackAgentStatus, patchFeedbackAgent, diagnoseFeedback, feedbackAgentAvailability, validateFeedbackDiagnosePayload } from "./feedback-agent.ts";
+import { PortalDiagnoseRunManager, type PortalDiagnoseRunEvent } from "./portal-diagnose-runs.ts";
 import { manageLinks, portalIdentity, PortalAccessError } from "./portal-access.ts";
 import { createFeedbackTicket, listFeedbackTickets, getFeedbackTicket, replyFeedbackTicket, acceptFeedbackTicket, authorizeFeedbackDeployRequest, addPublicFeedbackQuestion, widgetVisitorDigest } from "./feedback-tickets.ts";
 import { deployGateAvailable, latestDeployGate, listDeployGates, requestDeployGate } from "./deploy-gate.ts";
@@ -205,6 +206,7 @@ export class ApiRouter {
   private cliPresence = new Map<string, { seen: number; runtime: string; ready: boolean; managed: boolean; runId?: string }>();
   private assistantInFlight = 0;
   private readonly diagnosing = new Set<string>();
+  private readonly portalDiagnoseRuns = new PortalDiagnoseRunManager();
   private prescreenInFlight = 0;
   private readonly maxAssistantSlots = 4;
 
@@ -2640,6 +2642,89 @@ export class ApiRouter {
     const data = method === "POST" ? await this.readJson(req) : {};
     // Body streaming yields to revocations and policy changes. Reauthorize before committing.
     const actor = method === "POST" ? authenticate() : id;
+    const writeDiagnoseSseHeaders = () => {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      if (meta.corsOrigin) {
+        res.setHeader("Access-Control-Allow-Origin", meta.corsOrigin);
+        res.setHeader("Vary", "Origin");
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Visitor-Id");
+      }
+      res.flushHeaders?.();
+    };
+    const writeDiagnoseSse = (eventName: string, payload: unknown) => {
+      if (res.writableEnded || res.destroyed) return;
+      res.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
+    };
+    const forwardManagedDiagnoseEvent = (ev: PortalDiagnoseRunEvent) => {
+      if (ev.type === "started") {
+        writeDiagnoseSse("started", { run_id: ev.run_id, started_at: ev.started_at });
+      } else if (ev.type === "snapshot") {
+        writeDiagnoseSse("snapshot", ev.snapshot);
+      } else if (ev.type === "status") {
+        writeDiagnoseSse("status", { label: ev.label });
+      } else if (ev.type === "reasoning") {
+        writeDiagnoseSse("reasoning", { text: ev.text });
+      } else if (ev.type === "delta") {
+        writeDiagnoseSse("delta", { text: ev.text });
+      } else if (ev.type === "aborted") {
+        writeDiagnoseSse("aborted", { message: ev.message });
+      } else if (ev.type === "error") {
+        writeDiagnoseSse("error", { status: ev.status, error: ev.error });
+      } else if (ev.type === "done") {
+        try {
+          const postAvailability = feedbackAgentAvailability(this.store, this.bridgeHub, projectId);
+          if (!postAvailability.enabled) throw new ApiError(409, "项目反馈 Agent 已停用。");
+          authenticate();
+          writeDiagnoseSse("done", ev.result);
+        } catch (err) {
+          const status = err instanceof ApiError ? err.status : 500;
+          const error = err instanceof ApiError ? err.message : "诊断过程中断，请重试或直接提交反馈。";
+          writeDiagnoseSse("error", { status, error });
+        }
+      }
+    };
+
+    if (parts.length === 6 && resource === "diagnose" && action === "stream" && method === "GET") {
+      const runId = taskId;
+      const actorKey = `${projectId}:diagnose:${key}`;
+      writeDiagnoseSseHeaders();
+      let unsubscribe = () => {};
+      const onClose = () => {
+        unsubscribe();
+      };
+      const sub = this.portalDiagnoseRuns.subscribeRun(runId, projectId, actorKey, {
+        onEvent: forwardManagedDiagnoseEvent,
+        onClose: () => {
+          res.off("close", onClose);
+          if (!res.writableEnded) res.end();
+        },
+      });
+      if (!sub) {
+        writeDiagnoseSse("error", { status: 404, error: "该诊断任务已结束或不存在。" });
+        if (!res.writableEnded) res.end();
+        return undefined;
+      }
+      unsubscribe = sub.unsubscribe;
+      if (!sub.finished) {
+        res.once("close", onClose);
+      }
+      return undefined;
+    }
+
+    if (parts.length === 6 && resource === "diagnose" && action === "abort" && method === "POST") {
+      const runId = taskId;
+      const actorKey = `${projectId}:diagnose:${key}`;
+      const ok = this.portalDiagnoseRuns.abortRun(runId, projectId, actorKey);
+      return { ok };
+    }
+
     if (parts.length === 4 && resource === "diagnose" && method === "POST") {
       const availability = feedbackAgentAvailability(this.store, this.bridgeHub, projectId);
       if (!availability.enabled) {
@@ -2648,7 +2733,18 @@ export class ApiRouter {
       if (!availability.available) {
         throw new ApiError(503, "反馈诊断助手当前离线，暂不接受在线诊断，请稍后再试或直接提交反馈。");
       }
-      validateFeedbackDiagnosePayload(data);
+      let runId: string | undefined;
+      let payloadForValidation: unknown = data;
+      if (data && typeof data === "object" && !Array.isArray(data) && "run_id" in data) {
+        const rawRunId = (data as Record<string, unknown>).run_id;
+        if (typeof rawRunId !== "string" || !/^[a-zA-Z0-9_-]{8,80}$/.test(rawRunId)) {
+          throw new ApiError(400, "诊断任务标识无效。");
+        }
+        runId = rawRunId;
+        const { run_id: _omit, ...rest } = data as Record<string, unknown>;
+        payloadForValidation = rest;
+      }
+      validateFeedbackDiagnosePayload(payloadForValidation);
       if (res.destroyed) return undefined;
       authenticate();
       const actorKey = `${projectId}:diagnose:${key}`;
@@ -2658,58 +2754,87 @@ export class ApiRouter {
       if (this.assistantInFlight >= this.maxAssistantSlots) throw new ApiError(429, "反馈 Agent 正忙，请稍后再试。");
       this.assistantInFlight++;
       this.diagnosing.add(actorKey);
+      const wantsSse =
+        typeof req.headers.accept === "string" &&
+        req.headers.accept.toLowerCase().includes("text/event-stream");
+
+      if (wantsSse && runId) {
+        writeDiagnoseSseHeaders();
+        let unsubscribe = () => {};
+        const onClose = () => {
+          // Detach this HTTP connection only; the background run keeps executing so a page refresh can reattach.
+          unsubscribe();
+        };
+        try {
+          const started = this.portalDiagnoseRuns.startRun({
+            runId,
+            projectId,
+            actorKey,
+            execute: ({ signal, onEvent }) =>
+              diagnoseFeedback(
+                this.store,
+                this.bridgeHub,
+                projectId,
+                payloadForValidation,
+                { signal, onEvent },
+              ),
+            onRelease: () => {
+              this.diagnosing.delete(actorKey);
+              this.assistantInFlight = Math.max(0, this.assistantInFlight - 1);
+            },
+            initialSubscriber: {
+              onEvent: forwardManagedDiagnoseEvent,
+              onClose: () => {
+                res.off("close", onClose);
+                if (!res.writableEnded) res.end();
+              },
+            },
+          });
+          unsubscribe = started.unsubscribe;
+          res.once("close", onClose);
+        } catch (err) {
+          this.diagnosing.delete(actorKey);
+          this.assistantInFlight = Math.max(0, this.assistantInFlight - 1);
+          const status = err instanceof ApiError ? err.status : 500;
+          const error = err instanceof ApiError ? err.message : "启动诊断任务失败。";
+          writeDiagnoseSse("error", { status, error });
+          if (!res.writableEnded) res.end();
+        }
+        return undefined;
+      }
+
       const abort = new AbortController();
       const cancel = () => {
         if (!res.writableEnded) abort.abort();
       };
       res.once("close", cancel);
-      const wantsSse =
-        typeof req.headers.accept === "string" &&
-        req.headers.accept.toLowerCase().includes("text/event-stream");
 
       if (wantsSse) {
-        res.statusCode = 200;
-        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-        res.setHeader("Cache-Control", "no-cache, no-transform");
-        res.setHeader("Connection", "keep-alive");
-        res.setHeader("X-Accel-Buffering", "no");
-        res.setHeader("X-Content-Type-Options", "nosniff");
-        res.setHeader("Referrer-Policy", "no-referrer");
-        if (meta.corsOrigin) {
-          res.setHeader("Access-Control-Allow-Origin", meta.corsOrigin);
-          res.setHeader("Vary", "Origin");
-          res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-          res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Visitor-Id");
-        }
-        res.flushHeaders?.();
-        const writeSse = (eventName: string, payload: unknown) => {
-          if (res.writableEnded || res.destroyed) return;
-          res.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
-        };
+        writeDiagnoseSseHeaders();
         try {
           const result = await diagnoseFeedback(
             this.store,
             this.bridgeHub,
             projectId,
-            data,
+            payloadForValidation,
             {
               signal: abort.signal,
               onEvent: (ev) => {
-                if (ev.type === "status") writeSse("status", { label: ev.label });
-                else if (ev.type === "reasoning") writeSse("reasoning", { text: ev.text });
-                else if (ev.type === "delta") writeSse("delta", { text: ev.text });
+                if (ev.type === "status") writeDiagnoseSse("status", { label: ev.label });
+                else if (ev.type === "reasoning") writeDiagnoseSse("reasoning", { text: ev.text });
+                else if (ev.type === "delta") writeDiagnoseSse("delta", { text: ev.text });
               },
             },
           );
           const postAvailability = feedbackAgentAvailability(this.store, this.bridgeHub, projectId);
           if (!postAvailability.enabled) throw new ApiError(409, "项目反馈 Agent 已停用。");
           authenticate();
-          writeSse("done", result);
+          writeDiagnoseSse("done", result);
         } catch (err) {
           if (!abort.signal.aborted && !res.writableEnded && !res.destroyed) {
             const status = err instanceof ApiError ? err.status : 500;
             const error = err instanceof ApiError ? err.message : "诊断过程中断，请重试或直接提交反馈。";
-            writeSse("error", { status, error });
+            writeDiagnoseSse("error", { status, error });
           }
         } finally {
           res.off("close", cancel);
@@ -2725,7 +2850,7 @@ export class ApiRouter {
           this.store,
           this.bridgeHub,
           projectId,
-          data,
+          payloadForValidation,
           { signal: abort.signal },
         );
         const postAvailability = feedbackAgentAvailability(this.store, this.bridgeHub, projectId);
