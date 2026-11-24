@@ -46,6 +46,7 @@ export const RELEASE_TRIGGER_LABELS: Record<ReleaseTrigger, string> = {
   scheduled: "窗口期自动",
   urgent: "紧急穿透",
   manual: "手动触发",
+  ai_gate: "AI 门禁放行",
 };
 
 export function releaseCode(num: number): string {

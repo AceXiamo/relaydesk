@@ -14,6 +14,7 @@
   const chatEndpoint = baseUrl + "/chat";
   const uploadEndpoint = baseUrl + "/uploads";
   const intakeEndpoint = baseUrl + "/intake";
+  const feedbackBaseEndpoint = baseUrl + "/widget-feedback";
   const captureLibUrl = origin + "/widget-capture.js";
   const ASSET_VER = "2";
   const ASSETS = {
@@ -112,7 +113,118 @@
       '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>',
     alert:
       '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>',
+    inbox:
+      '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
+    arrowLeft:
+      '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.95" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>',
+    sparkles:
+      '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>',
+    rocket:
+      '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/></svg>',
+    clock:
+      '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    shieldCheck:
+      '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>',
   };
+
+  const VISITOR_STORAGE_KEY = "relaydesk_widget_visitor_" + project;
+  let memoryVisitorSecret = "";
+
+  function generateVisitorSecret() {
+    if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+      return Array.from(crypto.getRandomValues(new Uint8Array(32)), (n) =>
+        n.toString(16).padStart(2, "0"),
+      ).join("");
+    }
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    // No WebCrypto available: never fall back to Math.random; disable visitor tracking instead.
+    return "";
+  }
+
+  function getVisitorSecret() {
+    const validRe = /^(?:[a-f0-9]{64}|[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})$/i;
+    try {
+      const saved = window.localStorage.getItem(VISITOR_STORAGE_KEY);
+      if (saved && validRe.test(saved)) {
+        memoryVisitorSecret = saved;
+        return saved;
+      }
+      const next = memoryVisitorSecret && validRe.test(memoryVisitorSecret)
+        ? memoryVisitorSecret
+        : generateVisitorSecret();
+      if (!next || !validRe.test(next)) return "";
+      window.localStorage.setItem(VISITOR_STORAGE_KEY, next);
+      memoryVisitorSecret = next;
+      return next;
+    } catch {
+      if (!memoryVisitorSecret || !validRe.test(memoryVisitorSecret)) {
+        memoryVisitorSecret = generateVisitorSecret();
+      }
+      return validRe.test(memoryVisitorSecret) ? memoryVisitorSecret : "";
+    }
+  }
+
+  function getSanitizedSourceUrl() {
+    try {
+      if (window.location && window.location.origin && window.location.origin !== "null") {
+        return window.location.origin + (window.location.pathname || "/");
+      }
+      return window.location?.pathname || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function widgetFeedbackHeaders(withJson = false) {
+    const visitorId = getVisitorSecret();
+    const headers = {
+      Authorization: "Bearer " + key,
+    };
+    if (visitorId) headers["X-Visitor-Id"] = visitorId;
+    if (withJson) headers["Content-Type"] = "application/json";
+    return headers;
+  }
+
+  function formatRelativeTime(iso) {
+    if (!iso) return "";
+    const ts = Date.parse(iso);
+    if (Number.isNaN(ts)) return "";
+    const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (sec < 45) return "刚刚";
+    const min = Math.floor(sec / 60);
+    if (min < 60) return min + " 分钟前";
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return hr + " 小时前";
+    const day = Math.floor(hr / 24);
+    if (day === 1) return "昨天";
+    if (day < 30) return day + " 天前";
+    const d = new Date(ts);
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  }
+
+  function resolveFeedbackStatusMeta(label) {
+    if (label === "已确认解决" || label === "已完成处理") {
+      return { step: 4, tone: "success" };
+    }
+    if (label === "已上线") {
+      return { step: 3, tone: "success" };
+    }
+    if (label === "正在发布上线" || label === "已修复，等待发布") {
+      return { step: 2, tone: "accent" };
+    }
+    if (label === "发布暂缓" || label === "等待补充信息") {
+      return { step: label === "等待补充信息" ? 1 : 2, tone: "warn" };
+    }
+    if (label === "排查与修复中" || label === "内部复核中") {
+      return { step: 1, tone: "accent" };
+    }
+    if (label === "已关联处理" || label === "已结束处理") {
+      return { step: 4, tone: "muted" };
+    }
+    return { step: 0, tone: "muted" };
+  }
 
   function uid() {
     if (typeof crypto !== "undefined" && crypto.getRandomValues) {
@@ -548,6 +660,388 @@
           gap: 10px;
           min-width: 0;
         }
+
+        /* Segmented Tab Bar */
+        .tabs-wrap {
+          padding: 8px 14px;
+          background: var(--rd-header-bg);
+          border-bottom: 1px solid var(--rd-border);
+          flex-shrink: 0;
+        }
+        .tabs-track {
+          position: relative;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          padding: 3px;
+          border-radius: 12px;
+          background: var(--rd-surface);
+          border: 1px solid var(--rd-border);
+        }
+        .tabs-pill {
+          position: absolute;
+          top: 3px;
+          bottom: 3px;
+          left: 3px;
+          width: calc(50% - 3px);
+          border-radius: 9px;
+          background: var(--rd-card-bg);
+          border: 1px solid var(--rd-border-strong);
+          box-shadow: 0 2px 8px -2px rgba(0, 0, 0, 0.14);
+          transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+          pointer-events: none;
+        }
+        .tabs-track.is-feedback .tabs-pill {
+          transform: translateX(100%);
+        }
+        .tab-btn {
+          position: relative;
+          z-index: 1;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          height: 30px;
+          border: 0;
+          border-radius: 9px;
+          background: transparent;
+          color: var(--rd-text-muted);
+          font-size: 12px;
+          font-weight: 600;
+          transition: color 160ms ease;
+        }
+        .tab-btn svg { width: 13px; height: 13px; }
+        .tab-btn.is-active { color: var(--rd-text); }
+        .tab-btn.is-active svg { color: var(--rd-accent); }
+        .tab-count {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 17px;
+          height: 17px;
+          padding: 0 5px;
+          border-radius: 999px;
+          font-size: 10.5px;
+          font-weight: 650;
+          background: var(--rd-surface-2);
+          color: var(--rd-text-secondary);
+        }
+        .tab-btn.is-active .tab-count {
+          background: var(--rd-accent-soft);
+          color: var(--rd-accent-text);
+        }
+        .tab-dot {
+          width: 6px;
+          height: 6px;
+          border-radius: 999px;
+          background: #f59e0b;
+          flex-shrink: 0;
+        }
+
+        /* My Feedback List & Detail */
+        .fb-view {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          animation: rd-fb-enter 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        }
+        @keyframes rd-fb-enter {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes rd-fb-scan {
+          0% { transform: translateX(-110%); }
+          100% { transform: translateX(260%); }
+        }
+        .fb-toolbar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+        .fb-toolbar-title {
+          font-size: 12px;
+          font-weight: 600;
+          color: var(--rd-text-muted);
+        }
+        .fb-refresh-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          height: 26px;
+          padding: 0 9px;
+          border-radius: 8px;
+          border: 1px solid var(--rd-border);
+          background: var(--rd-surface);
+          color: var(--rd-text-secondary);
+          font-size: 11.5px;
+          font-weight: 550;
+          transition: background-color 140ms ease, color 140ms ease;
+        }
+        .fb-refresh-btn:hover { background: var(--rd-surface-hover); color: var(--rd-text); }
+        .fb-refresh-btn svg { width: 12px; height: 12px; }
+        .fb-empty {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          text-align: center;
+          gap: 8px;
+          padding: 32px 16px;
+          border-radius: 15px;
+          border: 1px dashed var(--rd-border-strong);
+          background: var(--rd-card-bg);
+        }
+        .fb-empty-icon {
+          width: 38px;
+          height: 38px;
+          border-radius: 11px;
+          background: var(--rd-surface);
+          border: 1px solid var(--rd-border);
+          color: var(--rd-text-muted);
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .fb-empty-icon svg { width: 18px; height: 18px; }
+        .fb-empty-title { font-size: 13.5px; font-weight: 630; color: var(--rd-text); margin: 0; }
+        .fb-empty-sub { font-size: 12px; color: var(--rd-text-muted); margin: 0; line-height: 1.5; max-width: 280px; }
+        .fb-card {
+          display: flex;
+          flex-direction: column;
+          gap: 7px;
+          width: 100%;
+          padding: 11px 12px;
+          border-radius: 14px;
+          border: 1px solid var(--rd-border);
+          background: var(--rd-card-bg);
+          text-align: left;
+          transition: transform 150ms cubic-bezier(0.22, 1, 0.36, 1), border-color 150ms ease, background-color 150ms ease;
+        }
+        .fb-card:hover {
+          transform: translateY(-1px);
+          border-color: var(--rd-border-strong);
+          background: var(--rd-surface);
+        }
+        .fb-card-top {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+        .fb-code {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+          font-size: 11px;
+          font-weight: 600;
+          color: var(--rd-text-muted);
+        }
+        .fb-time { font-size: 11px; color: var(--rd-text-muted); }
+        .fb-title {
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--rd-text);
+          line-height: 1.4;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .fb-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+        .fb-status {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          padding: 2px 8px;
+          border-radius: 999px;
+          font-size: 11px;
+          font-weight: 600;
+          border: 1px solid var(--rd-border);
+          background: var(--rd-surface);
+          color: var(--rd-text-secondary);
+        }
+        .fb-status.is-success { background: var(--rd-success-soft); border-color: rgba(16, 185, 129, 0.28); color: var(--rd-success); }
+        .fb-status.is-accent { background: var(--rd-accent-soft); border-color: var(--rd-accent-border); color: var(--rd-accent-text); }
+        .fb-status.is-warn { background: var(--rd-idea-bg); border-color: var(--rd-idea-ring); color: var(--rd-idea-fg); }
+        .fb-action-tag {
+          padding: 2px 7px;
+          border-radius: 999px;
+          font-size: 10.5px;
+          font-weight: 600;
+          background: var(--rd-idea-bg);
+          color: var(--rd-idea-fg);
+        }
+        .fb-back-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+        .fb-back-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          height: 28px;
+          padding: 0 10px 0 7px;
+          border-radius: 9px;
+          border: 1px solid var(--rd-border);
+          background: var(--rd-surface);
+          color: var(--rd-text);
+          font-size: 12px;
+          font-weight: 560;
+        }
+        .fb-back-btn:hover { background: var(--rd-surface-hover); }
+        .fb-back-btn svg { width: 13px; height: 13px; }
+        .fb-detail-head {
+          padding: 12px;
+          border-radius: 14px;
+          border: 1px solid var(--rd-border);
+          background: var(--rd-card-bg);
+          display: flex;
+          flex-direction: column;
+          gap: 9px;
+        }
+        .fb-detail-title { font-size: 14px; font-weight: 650; color: var(--rd-text); margin: 0; line-height: 1.45; }
+        .fb-steps {
+          display: grid;
+          grid-template-columns: repeat(5, 1fr);
+          gap: 5px;
+        }
+        .fb-step { display: flex; flex-direction: column; gap: 4px; }
+        .fb-step-bar {
+          height: 4px;
+          border-radius: 999px;
+          background: var(--rd-surface-2);
+          overflow: hidden;
+        }
+        .fb-step-fill {
+          height: 100%;
+          border-radius: 999px;
+          background: var(--rd-accent);
+          width: 0;
+          transition: width 360ms cubic-bezier(0.22, 1, 0.36, 1);
+        }
+        .fb-step.is-done .fb-step-fill { width: 100%; background: var(--rd-success); }
+        .fb-step.is-active .fb-step-fill { width: 100%; }
+        .fb-step-lbl { font-size: 10px; color: var(--rd-text-muted); text-align: center; white-space: nowrap; }
+        .fb-step.is-active .fb-step-lbl { color: var(--rd-text); font-weight: 600; }
+        .fb-step.is-done .fb-step-lbl { color: var(--rd-success); }
+        .fb-box {
+          position: relative;
+          overflow: hidden;
+          padding: 11px 12px;
+          border-radius: 13px;
+          border: 1px solid var(--rd-border);
+          background: var(--rd-surface);
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .fb-box.is-success { border-color: rgba(16, 185, 129, 0.3); background: var(--rd-success-soft); }
+        .fb-box.is-accent { border-color: var(--rd-accent-border); background: var(--rd-accent-soft); }
+        .fb-box.is-warn { border-color: var(--rd-idea-ring); background: var(--rd-idea-bg); }
+        .fb-scan-line {
+          position: absolute;
+          top: 0; left: 0; right: 0;
+          height: 2px;
+          overflow: hidden;
+          background: var(--rd-accent-soft);
+        }
+        .fb-scan-bar {
+          width: 35%;
+          height: 100%;
+          background: linear-gradient(90deg, transparent, var(--rd-accent), transparent);
+          animation: rd-fb-scan 2s linear infinite;
+        }
+        .fb-box-head {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 12.5px;
+          font-weight: 630;
+          color: var(--rd-text);
+        }
+        .fb-box-head svg { width: 14px; height: 14px; flex-shrink: 0; }
+        .fb-box-desc { font-size: 12px; color: var(--rd-text-secondary); line-height: 1.5; margin: 0; }
+        .fb-box-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+        .fb-msg-list { display: flex; flex-direction: column; gap: 8px; }
+        .fb-msg {
+          padding: 10px 11px;
+          border-radius: 12px;
+          border: 1px solid var(--rd-border);
+          background: var(--rd-card-bg);
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+        }
+        .fb-msg.is-team {
+          border-color: var(--rd-accent-border);
+          background: var(--rd-accent-soft);
+        }
+        .fb-msg-meta {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          font-size: 11px;
+          color: var(--rd-text-muted);
+        }
+        .fb-msg-author { font-weight: 620; color: var(--rd-text); }
+        .fb-msg-body { font-size: 12.5px; line-height: 1.55; color: var(--rd-text); word-break: break-word; }
+        .fb-msg-body img { max-width: 100%; border-radius: 8px; margin-top: 4px; cursor: zoom-in; }
+        .fb-textarea {
+          width: 100%;
+          min-height: 64px;
+          padding: 8px 10px;
+          border-radius: 10px;
+          border: 1px solid var(--rd-border-strong);
+          background: var(--rd-input-bg);
+          color: var(--rd-text);
+          font-size: 12.5px;
+          line-height: 1.5;
+          resize: vertical;
+          outline: none;
+        }
+        .fb-textarea:focus { border-color: var(--rd-accent); }
+        .fb-input {
+          width: 100%;
+          height: 34px;
+          padding: 0 10px;
+          border-radius: 10px;
+          border: 1px solid var(--rd-border-strong);
+          background: var(--rd-input-bg);
+          color: var(--rd-text);
+          font-size: 12.5px;
+          outline: none;
+        }
+        .fb-input:focus { border-color: var(--rd-accent); }
+        .ticket-deploy-opt {
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
+          padding: 8px 10px;
+          border-radius: 10px;
+          border: 1px solid var(--rd-border);
+          background: var(--rd-surface);
+          font-size: 11.5px;
+          line-height: 1.45;
+          color: var(--rd-text-secondary);
+          cursor: pointer;
+        }
+        .ticket-deploy-opt input {
+          margin-top: 2px;
+          accent-color: var(--rd-accent);
+        }
+        .ticket-view-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          margin-top: 6px;
+          padding: 4px 10px;
+          border-radius: 8px;
+          border: 1px solid var(--rd-border-strong);
+          background: var(--rd-surface);
+          color: var(--rd-text);
+          font-size: 11.5px;
+          font-weight: 600;
+        }
+        .ticket-view-btn:hover { background: var(--rd-surface-hover); }
 
         .brand-logo {
           position: relative;
@@ -1695,6 +2189,20 @@
             </div>
           </header>
 
+          <div class="tabs-wrap" data-role="tabs-wrap">
+            <div class="tabs-track" data-role="tabs-track" role="tablist" aria-label="功能切换">
+              <div class="tabs-pill" aria-hidden="true"></div>
+              <button type="button" class="tab-btn is-active" role="tab" aria-selected="true" data-tab="chat">
+                ${ICONS.chat}<span>AI 助手</span>
+              </button>
+              <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="feedback">
+                ${ICONS.inbox}<span>我的反馈</span>
+                <span class="tab-count" data-role="fb-count" hidden>0</span>
+                <span class="tab-dot" data-role="fb-dot" hidden></span>
+              </button>
+            </div>
+          </div>
+
           <div class="body" data-role="body"></div>
 
           <div class="notice" data-role="notice" hidden>
@@ -1703,7 +2211,7 @@
             <button type="button" class="icon-btn" data-action="dismiss-notice" aria-label="关闭提示">${ICONS.close}</button>
           </div>
 
-          <footer class="composer">
+          <footer class="composer" data-role="composer">
             <div class="att-strip" data-role="att-strip" hidden></div>
             <div class="input-box">
               <textarea
@@ -1781,6 +2289,11 @@
     const titleEl = q('[data-role="title"]');
     const subtitleEl = q('[data-role="subtitle"]');
     const resetBtn = q('[data-action="reset"]');
+    const tabsWrap = q('[data-role="tabs-wrap"]');
+    const tabsTrack = q('[data-role="tabs-track"]');
+    const fbCountEl = q('[data-role="fb-count"]');
+    const fbDotEl = q('[data-role="fb-dot"]');
+    const composerEl = q('[data-role="composer"]');
     const bodyEl = q('[data-role="body"]');
     const noticeEl = q('[data-role="notice"]');
     const noticeText = q('[data-role="notice-text"]');
@@ -1807,10 +2320,16 @@
 
     const state = {
       open: false,
+      activeTab: "chat",
       configLoaded: false,
+      configReady: false,
+      configPromise: null,
       config: {
         project_name: "",
         ai_enabled: true,
+        tracking_enabled: false,
+        can_request_deploy: false,
+        release_window: "",
         code_context_enabled: false,
         upload_enabled: true,
         max_upload_bytes: MAX_UPLOAD_BYTES,
@@ -1821,7 +2340,479 @@
       streaming: false,
       abortController: null,
       noticeTimer: null,
+      feedbackTasks: [],
+      feedbackLoaded: false,
+      feedbackLoading: false,
+      selectedFeedbackId: null,
+      feedbackDetail: null,
+      feedbackDetailLoading: false,
+      feedbackDetailSeq: 0,
+      feedbackReplyDraft: "",
+      feedbackReplySending: false,
+      feedbackAcceptMode: "idle",
+      feedbackBrokenNote: "",
+      feedbackAcceptBusy: false,
+      feedbackDeployOpen: false,
+      feedbackDeployReason: "",
+      feedbackDeployBusy: false,
+      feedbackPollTimer: null,
     };
+
+    function isTrackingAvailable() {
+      return state.config.tracking_enabled === true && Boolean(getVisitorSecret());
+    }
+
+    function syncTabsUi() {
+      const tracking = isTrackingAvailable();
+      tabsWrap.hidden = !tracking;
+      if (!tracking && state.activeTab !== "chat") {
+        state.activeTab = "chat";
+        stopFeedbackPoll();
+      }
+      tabsTrack.classList.toggle("is-feedback", state.activeTab === "feedback");
+      root.querySelectorAll("[data-tab]").forEach((btn) => {
+        const isAct = btn.getAttribute("data-tab") === state.activeTab;
+        btn.classList.toggle("is-active", isAct);
+        btn.setAttribute("aria-selected", String(isAct));
+      });
+      const count = state.feedbackTasks.length;
+      fbCountEl.hidden = count === 0;
+      fbCountEl.textContent = String(count);
+      const hasAction = state.feedbackTasks.some((t) => t.can_reply || t.can_accept);
+      fbDotEl.hidden = !hasAction;
+      composerEl.hidden = state.activeTab !== "chat";
+      resetBtn.hidden = state.activeTab !== "chat" || state.items.length === 0;
+    }
+
+    function stopFeedbackPoll() {
+      if (state.feedbackPollTimer) {
+        clearInterval(state.feedbackPollTimer);
+        state.feedbackPollTimer = null;
+      }
+    }
+
+    function ensureFeedbackPoll() {
+      stopFeedbackPoll();
+      if (
+        isTrackingAvailable() &&
+        state.open &&
+        state.activeTab === "feedback" &&
+        state.selectedFeedbackId &&
+        state.feedbackDetail?.gate?.status === "evaluating"
+      ) {
+        state.feedbackPollTimer = setInterval(() => {
+          if (!document.hidden && state.selectedFeedbackId) {
+            void fetchFeedbackDetail(state.selectedFeedbackId, true);
+          }
+        }, 4000);
+      }
+    }
+
+    async function fetchFeedbackTasks(silent = false) {
+      if (!isTrackingAvailable()) return;
+      if (!silent) {
+        state.feedbackLoading = true;
+        if (state.activeTab === "feedback") renderBody();
+      }
+      try {
+        const res = await fetch(feedbackBaseEndpoint + "/tasks", {
+          headers: widgetFeedbackHeaders(false),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `加载反馈失败（HTTP ${res.status}）`);
+        state.feedbackTasks = Array.isArray(data.tasks) ? data.tasks : [];
+        state.feedbackLoaded = true;
+      } catch (err) {
+        if (!silent) showNotice(err instanceof Error ? err.message : "加载我的反馈失败");
+      } finally {
+        state.feedbackLoading = false;
+        syncTabsUi();
+        if (state.activeTab === "feedback") renderBody();
+      }
+    }
+
+    async function fetchFeedbackDetail(taskId, silent = false) {
+      if (!taskId || !isTrackingAvailable()) return;
+      const reqSeq = ++state.feedbackDetailSeq;
+      if (!silent) {
+        state.feedbackDetailLoading = true;
+        renderBody();
+      }
+      try {
+        const res = await fetch(
+          feedbackBaseEndpoint + "/tasks/" + encodeURIComponent(taskId),
+          { headers: widgetFeedbackHeaders(false) },
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `加载详情失败（HTTP ${res.status}）`);
+        if (reqSeq !== state.feedbackDetailSeq || state.selectedFeedbackId !== taskId) {
+          return;
+        }
+        state.feedbackDetail = data;
+        if (data.task) {
+          state.feedbackTasks = state.feedbackTasks.map((t) =>
+            t.id === data.task.id ? data.task : t,
+          );
+        }
+      } catch (err) {
+        if (reqSeq !== state.feedbackDetailSeq || state.selectedFeedbackId !== taskId) {
+          return;
+        }
+        if (!silent) showNotice(err instanceof Error ? err.message : "加载工单详情失败");
+      } finally {
+        if (reqSeq === state.feedbackDetailSeq) {
+          state.feedbackDetailLoading = false;
+          syncTabsUi();
+          if (state.activeTab === "feedback") renderBody();
+          ensureFeedbackPoll();
+        }
+      }
+    }
+
+    async function submitFeedbackReply() {
+      const taskId = state.selectedFeedbackId;
+      const body = state.feedbackReplyDraft.trim();
+      if (!taskId || !body || state.feedbackReplySending) return;
+      state.feedbackReplySending = true;
+      showNotice("");
+      renderBody();
+      try {
+        const res = await fetch(
+          feedbackBaseEndpoint + "/tasks/" + encodeURIComponent(taskId) + "/reply",
+          {
+            method: "POST",
+            headers: widgetFeedbackHeaders(true),
+            body: JSON.stringify({ body }),
+          },
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `发送失败（HTTP ${res.status}）`);
+        state.feedbackDetail = {
+          ...data,
+          gate: data.gate !== undefined ? data.gate : state.feedbackDetail?.gate || null,
+        };
+        if (data.task) {
+          state.feedbackTasks = state.feedbackTasks.map((t) =>
+            t.id === data.task.id ? data.task : t,
+          );
+        }
+        state.feedbackReplyDraft = "";
+      } catch (err) {
+        showNotice(err instanceof Error ? err.message : "发送补充信息失败");
+      } finally {
+        state.feedbackReplySending = false;
+        syncTabsUi();
+        renderBody();
+      }
+    }
+
+    async function submitFeedbackAccept(resolved) {
+      const taskId = state.selectedFeedbackId;
+      if (!taskId || state.feedbackAcceptBusy) return;
+      state.feedbackAcceptBusy = true;
+      showNotice("");
+      renderBody();
+      try {
+        const payload = { resolved };
+        if (!resolved && state.feedbackBrokenNote.trim()) {
+          payload.body = state.feedbackBrokenNote.trim();
+        }
+        const res = await fetch(
+          feedbackBaseEndpoint + "/tasks/" + encodeURIComponent(taskId) + "/accept",
+          {
+            method: "POST",
+            headers: widgetFeedbackHeaders(true),
+            body: JSON.stringify(payload),
+          },
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `提交验收失败（HTTP ${res.status}）`);
+        state.feedbackDetail = {
+          ...data,
+          gate: data.gate !== undefined ? data.gate : state.feedbackDetail?.gate || null,
+        };
+        if (data.task) {
+          state.feedbackTasks = state.feedbackTasks.map((t) =>
+            t.id === data.task.id ? data.task : t,
+          );
+        }
+        state.feedbackAcceptMode = "idle";
+        state.feedbackBrokenNote = "";
+      } catch (err) {
+        showNotice(err instanceof Error ? err.message : "提交验收结果失败");
+      } finally {
+        state.feedbackAcceptBusy = false;
+        syncTabsUi();
+        renderBody();
+      }
+    }
+
+    async function submitFeedbackDeployRequest() {
+      const taskId = state.selectedFeedbackId;
+      if (!taskId || state.feedbackDeployBusy) return;
+      state.feedbackDeployBusy = true;
+      showNotice("");
+      renderBody();
+      try {
+        const reason = state.feedbackDeployReason.trim();
+        const res = await fetch(
+          feedbackBaseEndpoint + "/tasks/" + encodeURIComponent(taskId) + "/deploy-request",
+          {
+            method: "POST",
+            headers: widgetFeedbackHeaders(true),
+            body: JSON.stringify(reason ? { reason } : {}),
+          },
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `申请即时发布失败（HTTP ${res.status}）`);
+        if (state.feedbackDetail) {
+          state.feedbackDetail = { ...state.feedbackDetail, gate: data.gate || null };
+        }
+        state.feedbackDeployOpen = false;
+        state.feedbackDeployReason = "";
+      } catch (err) {
+        showNotice(err instanceof Error ? err.message : "申请即时发布失败");
+      } finally {
+        state.feedbackDeployBusy = false;
+        renderBody();
+        ensureFeedbackPoll();
+      }
+    }
+
+    function openFeedbackDetail(taskId) {
+      if (!isTrackingAvailable() || !taskId) return;
+      state.activeTab = "feedback";
+      state.selectedFeedbackId = taskId;
+      state.feedbackDetail = null;
+      state.feedbackDetailSeq += 1;
+      state.feedbackReplyDraft = "";
+      state.feedbackAcceptMode = "idle";
+      state.feedbackBrokenNote = "";
+      state.feedbackDeployOpen = false;
+      state.feedbackDeployReason = "";
+      syncTabsUi();
+      void fetchFeedbackDetail(taskId, false);
+    }
+
+    function renderFeedbackViewHtml() {
+      if (state.selectedFeedbackId) {
+        if (state.feedbackDetailLoading && !state.feedbackDetail) {
+          return `<div class="fb-view"><div class="fb-back-row"><button type="button" class="fb-back-btn" data-action="fb-back">${ICONS.arrowLeft}<span>返回列表</span></button></div><div class="fb-empty"><span class="fb-empty-icon">${ICONS.spinner}</span><p class="fb-empty-sub">正在加载工单进度…</p></div></div>`;
+        }
+        const d = state.feedbackDetail;
+        if (!d || !d.task) {
+          return `<div class="fb-view"><div class="fb-back-row"><button type="button" class="fb-back-btn" data-action="fb-back">${ICONS.arrowLeft}<span>返回列表</span></button></div><div class="fb-empty"><p class="fb-empty-title">暂时无法加载工单</p><button type="button" class="fb-refresh-btn" data-action="fb-refresh-detail">${ICONS.refresh}<span>重试</span></button></div></div>`;
+        }
+        const t = d.task;
+        const meta = resolveFeedbackStatusMeta(t.status_label);
+        const stepLabels = ["已提交", "排查修复", "等待发布", "已上线", "已确认"];
+        const stepsHtml = stepLabels
+          .map((lbl, idx) => {
+            const cls = idx < meta.step ? "is-done" : idx === meta.step ? "is-active" : "";
+            return `<div class="fb-step ${cls}"><div class="fb-step-bar"><div class="fb-step-fill"></div></div><span class="fb-step-lbl">${lbl}</span></div>`;
+          })
+          .join("");
+
+        let acceptHtml = "";
+        if (t.can_accept) {
+          if (state.feedbackAcceptMode === "broken") {
+            acceptHtml = `
+              <div class="fb-box is-success">
+                <div class="fb-box-head">${ICONS.rocket}<span>请补充仍然存在的问题</span></div>
+                <textarea class="fb-textarea" data-fb-field="brokenNote" placeholder="简述未解决的现象（可选）…">${escapeHtml(state.feedbackBrokenNote)}</textarea>
+                <div class="fb-box-actions">
+                  <button type="button" class="btn-ghost" data-action="fb-accept-cancel" ${state.feedbackAcceptBusy ? "disabled" : ""}>取消</button>
+                  <button type="button" class="btn-submit" data-action="fb-accept-broken-submit" ${state.feedbackAcceptBusy ? "disabled" : ""}>${state.feedbackAcceptBusy ? ICONS.spinner : ICONS.check}<span>提交并重开</span></button>
+                </div>
+              </div>
+            `;
+          } else {
+            acceptHtml = `
+              <div class="fb-box is-success">
+                <div class="fb-box-head">${ICONS.rocket}<span>修复已上线，问题是否已解决？</span></div>
+                <p class="fb-box-desc">确认解决后工单将自动归档；若仍有问题可一键重新进入处理队列。</p>
+                <div class="fb-box-actions">
+                  <button type="button" class="btn-ghost" data-action="fb-accept-broken" ${state.feedbackAcceptBusy ? "disabled" : ""}>仍有问题</button>
+                  <button type="button" class="btn-submit" data-action="fb-accept-resolved" ${state.feedbackAcceptBusy ? "disabled" : ""}>${state.feedbackAcceptBusy ? ICONS.spinner : ICONS.check}<span>确认已解决</span></button>
+                </div>
+              </div>
+            `;
+          }
+        }
+
+        let gateHtml = "";
+        const g = d.gate;
+        if (g) {
+          const isEval = g.status === "evaluating";
+          const toneCls =
+            g.status === "approved"
+              ? "is-success"
+              : g.status === "deferred"
+                ? "is-warn"
+                : isEval || g.status === "escalated"
+                  ? "is-accent"
+                  : "";
+          const gateTitle =
+            isEval
+              ? "AI 正在评估是否可立即发布…"
+              : g.status === "approved"
+                ? "AI 评估通过 · 已放行发布"
+                : g.status === "deferred"
+                  ? "AI 评估暂缓立即发布"
+                  : g.status === "escalated"
+                    ? "已转交项目管理员确认"
+                    : "门禁评估未完成";
+          const gateIcon = isEval
+            ? ICONS.spinner
+            : g.status === "approved"
+              ? ICONS.shieldCheck
+              : g.status === "deferred"
+                ? ICONS.clock
+                : ICONS.sparkles;
+          const gateDesc =
+            g.public_reason ||
+            (isEval
+              ? "正在只读核查线上活跃度与变更风险，结果将自动更新。"
+              : g.status === "deferred"
+                ? "为避免影响当前在线使用，已保持按默认发布窗口上线。"
+                : g.status === "escalated"
+                  ? "已通知项目管理员人工确认后上线。"
+                  : "");
+          gateHtml += `
+            <div class="fb-box ${toneCls}">
+              ${isEval ? '<div class="fb-scan-line"><div class="fb-scan-bar"></div></div>' : ""}
+              <div class="fb-box-head">${gateIcon}<span>${escapeHtml(gateTitle)}</span></div>
+              ${gateDesc ? `<p class="fb-box-desc">${escapeHtml(gateDesc)}</p>` : ""}
+            </div>
+          `;
+        }
+
+        if (t.can_request_deploy && state.config.can_request_deploy && g?.status !== "evaluating") {
+          gateHtml += `
+            <div class="fb-box is-accent">
+              <div class="fb-box-head">${ICONS.sparkles}<span>修复已就绪，需要申请立即上线吗？</span></div>
+              <p class="fb-box-desc">${escapeHtml(state.config.release_window ? `默认发布窗口：${state.config.release_window}。可申请 AI 评估线上空闲后提前发布。` : "可申请 AI 只读评估线上活跃度与变更风险，安全时立即发布。")}</p>
+              ${
+                state.feedbackDeployOpen
+                  ? `
+                    <input type="text" class="fb-input" maxlength="500" data-fb-field="deployReason" value="${escapeHtml(state.feedbackDeployReason)}" placeholder="可选：简述急需上线的原因…" />
+                    <div class="fb-box-actions">
+                      <button type="button" class="btn-ghost" data-action="fb-deploy-cancel" ${state.feedbackDeployBusy ? "disabled" : ""}>取消</button>
+                      <button type="button" class="btn-submit" data-action="fb-deploy-submit" ${state.feedbackDeployBusy ? "disabled" : ""}>${state.feedbackDeployBusy ? ICONS.spinner : ICONS.sparkles}<span>提交评估申请</span></button>
+                    </div>
+                  `
+                  : `<div class="fb-box-actions"><button type="button" class="btn-submit" data-action="fb-deploy-open">${ICONS.sparkles}<span>申请即时发布</span></button></div>`
+              }
+            </div>
+          `;
+        }
+
+        const msgsHtml =
+          Array.isArray(d.messages) && d.messages.length
+            ? `<div class="fb-msg-list">${d.messages
+                .map((m) => {
+                  const isTeam = m.author !== "reporter";
+                  return `
+                    <div class="fb-msg ${isTeam ? "is-team" : ""}">
+                      <div class="fb-msg-meta">
+                        <span class="fb-msg-author">${isTeam ? "项目团队" : "我"}</span>
+                        <span>${escapeHtml(formatRelativeTime(m.created_at))}</span>
+                      </div>
+                      <div class="fb-msg-body">${renderMarkdownLite(m.body || "")}</div>
+                    </div>
+                  `;
+                })
+                .join("")}</div>`
+            : `<p class="fb-box-desc">暂无公开沟通记录。</p>`;
+
+        const replyHtml = t.can_reply
+          ? `
+            <div class="fb-box is-warn">
+              <div class="fb-box-head">${ICONS.chat}<span>团队需要你补充信息</span></div>
+              <textarea class="fb-textarea" data-fb-field="replyDraft" placeholder="输入补充说明或复现步骤，发送后将自动继续处理…">${escapeHtml(state.feedbackReplyDraft)}</textarea>
+              <div class="fb-box-actions">
+                <button type="button" class="btn-submit" data-action="fb-reply-submit" ${state.feedbackReplySending || !state.feedbackReplyDraft.trim() ? "disabled" : ""}>${state.feedbackReplySending ? ICONS.spinner : ICONS.send}<span>发送补充说明</span></button>
+              </div>
+            </div>
+          `
+          : "";
+
+        return `
+          <div class="fb-view">
+            <div class="fb-back-row">
+              <button type="button" class="fb-back-btn" data-action="fb-back">${ICONS.arrowLeft}<span>返回列表</span></button>
+              <button type="button" class="fb-refresh-btn" data-action="fb-refresh-detail">${ICONS.refresh}<span>刷新</span></button>
+            </div>
+            <div class="fb-detail-head">
+              <div class="fb-card-top">
+                <button type="button" class="ticket-code-btn" data-copy-code="${escapeHtml(t.code)}">${ICONS.copy}<span>${escapeHtml(t.code)}</span></button>
+                <span class="fb-time">${escapeHtml(formatRelativeTime(t.created_at))}</span>
+              </div>
+              <h3 class="fb-detail-title">${escapeHtml(t.title)}</h3>
+              <div class="fb-tags">
+                <span class="fb-status is-${meta.tone}">${escapeHtml(t.status_label)}</span>
+              </div>
+              <div class="fb-steps">${stepsHtml}</div>
+            </div>
+            ${acceptHtml}
+            ${gateHtml}
+            ${msgsHtml}
+            ${replyHtml}
+          </div>
+        `;
+      }
+
+      if (state.feedbackLoading && state.feedbackTasks.length === 0) {
+        return `<div class="fb-view"><div class="fb-empty"><span class="fb-empty-icon">${ICONS.spinner}</span><p class="fb-empty-sub">正在加载本机提交的反馈记录…</p></div></div>`;
+      }
+
+      if (state.feedbackTasks.length === 0) {
+        return `
+          <div class="fb-view">
+            <div class="fb-empty">
+              <span class="fb-empty-icon">${ICONS.inbox}</span>
+              <p class="fb-empty-title">还没有本机提交的反馈</p>
+              <p class="fb-empty-sub">在此浏览器提交反馈后，你可以随时回到这里查看处理进度、回复追问或确认上线效果。</p>
+              <button type="button" class="btn-submit" data-action="fb-start-new">${ICONS.ticket}<span>提交第一条反馈</span></button>
+            </div>
+          </div>
+        `;
+      }
+
+      return `
+        <div class="fb-view">
+          <div class="fb-toolbar">
+            <span class="fb-toolbar-title">本机已提交 ${state.feedbackTasks.length} 条反馈</span>
+            <button type="button" class="fb-refresh-btn" data-action="fb-refresh-list">${ICONS.refresh}<span>刷新进度</span></button>
+          </div>
+          ${state.feedbackTasks
+            .map((t) => {
+              const meta = resolveFeedbackStatusMeta(t.status_label);
+              const actionHint = t.can_reply
+                ? "待回复"
+                : t.can_accept
+                  ? "待验收"
+                  : t.can_request_deploy && state.config.can_request_deploy
+                    ? "可申请发布"
+                    : "";
+              return `
+                <button type="button" class="fb-card" data-open-feedback="${escapeHtml(t.id)}">
+                  <div class="fb-card-top">
+                    <span class="fb-code">${escapeHtml(t.code)}</span>
+                    <span class="fb-time">${escapeHtml(formatRelativeTime(t.created_at))}</span>
+                  </div>
+                  <div class="fb-title">${escapeHtml(t.title)}</div>
+                  <div class="fb-tags">
+                    <span class="fb-status is-${meta.tone}">${escapeHtml(t.status_label)}</span>
+                    ${actionHint ? `<span class="fb-action-tag">${escapeHtml(actionHint)}</span>` : ""}
+                  </div>
+                </button>
+              `;
+            })
+            .join("")}
+        </div>
+      `;
+    }
 
     function showNotice(msg, autoClearMs = 6000) {
       if (state.noticeTimer) {
@@ -1949,7 +2940,11 @@
     }
 
     function renderBody() {
-      resetBtn.hidden = state.items.length === 0;
+      syncTabsUi();
+      if (state.activeTab === "feedback") {
+        bodyEl.innerHTML = renderFeedbackViewHtml();
+        return;
+      }
       if (state.items.length === 0) {
         const capHint = state.config.ai_enabled
           ? "随时向助手提问怎么用、框选网页截屏排查问题，或一键提交反馈建议。"
@@ -2015,7 +3010,7 @@
 
           if (item.type === "ticket") {
             if (item.submitted) {
-              const code = formatTicketCode(item.submitted.number);
+              const code = item.submitted.code || formatTicketCode(item.submitted.number);
               return `
                 <div class="ticket-done" data-item-id="${item.id}">
                   <img class="ticket-done-art" src="${escapeHtml(ASSETS.success)}" alt="" width="52" height="52" />
@@ -2029,6 +3024,11 @@
                       }
                     </div>
                     <p class="ticket-done-sub">${escapeHtml(item.draft.title)} · 感谢反馈，团队与自动流水线已收到这条记录。</p>
+                    ${
+                      isTrackingAvailable() && item.submitted.task_id
+                        ? `<button type="button" class="ticket-view-btn" data-open-feedback="${escapeHtml(item.submitted.task_id)}">${ICONS.inbox}<span>查看实时进度</span></button>`
+                        : ""
+                    }
                   </div>
                 </div>
               `;
@@ -2042,6 +3042,15 @@
                         `<img class="msg-thumb" src="${escapeHtml(u)}" alt="工单附图" data-zoom-src="${escapeHtml(u)}" />`,
                     )
                     .join("")}</div>`
+                : "";
+            const deployPrefHtml =
+              isTrackingAvailable() && state.config.can_request_deploy
+                ? `
+                <label class="ticket-deploy-opt">
+                  <input type="checkbox" data-ticket-deploy-pref="${item.id}" ${d.release_preference === "request_immediate" ? "checked" : ""} />
+                  <span>修复完成后，若线上空闲请 AI 评估立即发布${state.config.release_window ? `（默认窗口 ${escapeHtml(state.config.release_window)}）` : ""}</span>
+                </label>
+              `
                 : "";
             return `
               <div class="ticket-card" data-ticket-id="${item.id}">
@@ -2071,8 +3080,9 @@
                   placeholder="详细描述现象、复现步骤或期望效果…"
                 >${escapeHtml(d.summary)}</textarea>
                 ${imgStrip}
+                ${deployPrefHtml}
                 <div class="ticket-meta">
-                  ${ICONS.link}<span>${escapeHtml(window.location.href)}</span>
+                  ${ICONS.link}<span>${escapeHtml(getSanitizedSourceUrl())}</span>
                 </div>
                 <div class="ticket-actions">
                   <button type="button" class="btn-ghost" data-dismiss-ticket="${item.id}">暂不提交</button>
@@ -2090,31 +3100,42 @@
     }
 
     async function fetchWidgetConfig() {
+      if (state.configPromise) return state.configPromise;
       if (state.configLoaded) return;
       state.configLoaded = true;
-      try {
-        const res = await fetch(configEndpoint, {
-          headers: { Authorization: "Bearer " + key },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        state.config = { ...state.config, ...data };
-        if (state.config.project_name) {
-          titleEl.textContent = state.config.project_name;
+      state.configPromise = (async () => {
+        try {
+          const res = await fetch(configEndpoint, {
+            headers: { Authorization: "Bearer " + key },
+          });
+          if (!res.ok) return;
+          const data = await res.json();
+          state.config = { ...state.config, ...data };
+          if (state.config.project_name) {
+            titleEl.textContent = state.config.project_name;
+          }
+          if (state.config.ai_enabled) {
+            subtitleEl.textContent = "在线解答功能疑问，或截屏一键提单";
+          } else {
+            subtitleEl.textContent = "网页截屏反馈 · 直达处理队列";
+          }
+          if (!state.config.upload_enabled) {
+            screenshotBtn.title = "站点尚未配置 R2 图床存储";
+            pickImageBtn.title = "站点尚未配置 R2 图床存储";
+          }
+          syncTabsUi();
+          if (isTrackingAvailable() && !state.feedbackLoaded) {
+            void fetchFeedbackTasks(true);
+          }
+          renderBody();
+        } catch {
+          // fail silently; defaults work
+        } finally {
+          state.configReady = true;
+          state.configPromise = null;
         }
-        if (state.config.ai_enabled) {
-          subtitleEl.textContent = "在线解答功能疑问，或截屏一键提单";
-        } else {
-          subtitleEl.textContent = "网页截屏反馈 · 直达处理队列";
-        }
-        if (!state.config.upload_enabled) {
-          screenshotBtn.title = "站点尚未配置 R2 图床存储";
-          pickImageBtn.title = "站点尚未配置 R2 图床存储";
-        }
-        if (state.items.length === 0) renderBody();
-      } catch {
-        // fail silently; defaults work
-      }
+      })();
+      return state.configPromise;
     }
 
     async function uploadImageBlob(blob, fallbackName = "screenshot.webp") {
@@ -2417,30 +3438,71 @@
       showNotice("");
       renderBody();
 
+      if (state.configPromise) {
+        await state.configPromise;
+      }
+
       const kindLabel = item.draft.kind || "功能异常";
-      const composedBody = `**[${kindLabel}]**\n\n${summary}`;
+      const useTrackedEndpoint = isTrackingAvailable();
+      const sourceUrl = getSanitizedSourceUrl();
       try {
-        const res = await fetch(intakeEndpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: "Bearer " + key,
-          },
-          body: JSON.stringify({
-            source: "widget",
-            title: title || summary.split(/\r?\n/)[0].slice(0, 90),
-            body: composedBody,
-            priority: item.draft.priority || "normal",
-            source_url: window.location.href,
-            external_id: item.draft.external_id,
-            attachments: item.draft.attachments || [],
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          throw new Error(data.error || `提交失败（HTTP ${res.status}）`);
+        if (useTrackedEndpoint) {
+          const res = await fetch(feedbackBaseEndpoint + "/tasks", {
+            method: "POST",
+            headers: widgetFeedbackHeaders(true),
+            body: JSON.stringify({
+              title: title || summary.split(/\r?\n/)[0].slice(0, 90),
+              body: summary,
+              type: kindLabel,
+              images: item.draft.attachments || [],
+              release_preference: state.config.can_request_deploy
+                ? item.draft.release_preference || "default"
+                : "default",
+              source_url: sourceUrl,
+              external_id: item.draft.external_id,
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(data.error || `提交失败（HTTP ${res.status}）`);
+          }
+          const created = data.task;
+          item.submitted = {
+            task_id: created?.id || data.task_id,
+            code: created?.code,
+            number: data.number,
+          };
+          if (created && created.id) {
+            state.feedbackTasks = [
+              created,
+              ...state.feedbackTasks.filter((t) => t.id !== created.id),
+            ];
+            state.feedbackLoaded = true;
+          }
+        } else {
+          const composedBody = `**[${kindLabel}]**\n\n${summary}`;
+          const res = await fetch(intakeEndpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Bearer " + key,
+            },
+            body: JSON.stringify({
+              source: "widget",
+              title: title || summary.split(/\r?\n/)[0].slice(0, 90),
+              body: composedBody,
+              priority: item.draft.priority || "normal",
+              source_url: sourceUrl,
+              external_id: item.draft.external_id,
+              attachments: item.draft.attachments || [],
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(data.error || `提交失败（HTTP ${res.status}）`);
+          }
+          item.submitted = { task_id: data.task_id, number: data.number };
         }
-        item.submitted = { task_id: data.task_id, number: data.number };
       } catch (err) {
         showNotice(err instanceof Error ? err.message : "提交反馈失败，请重试");
       } finally {
@@ -2767,8 +3829,16 @@
       }
       if (next) {
         void fetchWidgetConfig();
+        if (state.configLoaded && isTrackingAvailable()) {
+          void fetchFeedbackTasks(true);
+        }
         renderBody();
-        requestAnimationFrame(() => inputEl.focus());
+        ensureFeedbackPoll();
+        if (state.activeTab === "chat") {
+          requestAnimationFrame(() => inputEl.focus());
+        }
+      } else {
+        stopFeedbackPoll();
       }
     }
 
@@ -2832,6 +3902,46 @@
         return;
       }
 
+      const tabBtn = target.closest("[data-tab]");
+      if (tabBtn) {
+        const nextTab = tabBtn.getAttribute("data-tab");
+        if (nextTab === "chat") {
+          state.activeTab = "chat";
+          showNotice("");
+          syncTabsUi();
+          stopFeedbackPoll();
+          renderBody();
+          ensureFeedbackPoll();
+        } else if (nextTab === "feedback") {
+          const activateFeedbackTab = () => {
+            if (!isTrackingAvailable()) return;
+            state.activeTab = "feedback";
+            showNotice("");
+            syncTabsUi();
+            if (!state.feedbackLoaded) {
+              void fetchFeedbackTasks(false);
+            } else {
+              void fetchFeedbackTasks(true);
+            }
+            renderBody();
+            ensureFeedbackPoll();
+          };
+          if (isTrackingAvailable()) {
+            activateFeedbackTab();
+          } else if (state.configPromise) {
+            void state.configPromise.then(activateFeedbackTab);
+          }
+        }
+        return;
+      }
+
+      const openFbBtn = target.closest("[data-open-feedback]");
+      if (openFbBtn) {
+        const taskId = openFbBtn.getAttribute("data-open-feedback");
+        if (taskId) openFeedbackDetail(taskId);
+        return;
+      }
+
       const copyCodeBtn = target.closest("[data-copy-code]");
       if (copyCodeBtn) {
         const code = copyCodeBtn.getAttribute("data-copy-code") || "";
@@ -2870,7 +3980,44 @@
         showNotice("");
         renderBody();
       } else if (action === "quick-ticket") {
+        state.activeTab = "chat";
+        stopFeedbackPoll();
         openManualTicketCard();
+      } else if (action === "fb-back") {
+        state.selectedFeedbackId = null;
+        state.feedbackDetail = null;
+        state.feedbackDetailSeq += 1;
+        state.feedbackDetailLoading = false;
+        stopFeedbackPoll();
+        renderBody();
+      } else if (action === "fb-refresh-list") {
+        void fetchFeedbackTasks(false);
+      } else if (action === "fb-refresh-detail") {
+        if (state.selectedFeedbackId) void fetchFeedbackDetail(state.selectedFeedbackId, false);
+      } else if (action === "fb-start-new") {
+        state.activeTab = "chat";
+        stopFeedbackPoll();
+        openManualTicketCard();
+      } else if (action === "fb-reply-submit") {
+        void submitFeedbackReply();
+      } else if (action === "fb-accept-resolved") {
+        void submitFeedbackAccept(true);
+      } else if (action === "fb-accept-broken") {
+        state.feedbackAcceptMode = "broken";
+        renderBody();
+      } else if (action === "fb-accept-cancel") {
+        state.feedbackAcceptMode = "idle";
+        renderBody();
+      } else if (action === "fb-accept-broken-submit") {
+        void submitFeedbackAccept(false);
+      } else if (action === "fb-deploy-open") {
+        state.feedbackDeployOpen = true;
+        renderBody();
+      } else if (action === "fb-deploy-cancel") {
+        state.feedbackDeployOpen = false;
+        renderBody();
+      } else if (action === "fb-deploy-submit") {
+        void submitFeedbackDeployRequest();
       } else if (action === "send") {
         void sendChatMessage();
       } else if (action === "screenshot") {
@@ -2930,6 +4077,30 @@
         );
         if (item && fieldName && "value" in target) {
           item.draft[fieldName] = target.value;
+        }
+        return;
+      }
+      if (target instanceof HTMLElement && target.hasAttribute("data-fb-field") && "value" in target) {
+        const f = target.getAttribute("data-fb-field");
+        if (f === "replyDraft") {
+          state.feedbackReplyDraft = target.value;
+          const btn = bodyEl.querySelector('[data-action="fb-reply-submit"]');
+          if (btn) btn.disabled = state.feedbackReplySending || !state.feedbackReplyDraft.trim();
+        } else if (f === "brokenNote") {
+          state.feedbackBrokenNote = target.value;
+        } else if (f === "deployReason") {
+          state.feedbackDeployReason = target.value;
+        }
+      }
+    });
+
+    root.addEventListener("change", (e) => {
+      const target = e.target;
+      if (target instanceof HTMLInputElement && target.hasAttribute("data-ticket-deploy-pref")) {
+        const id = target.getAttribute("data-ticket-deploy-pref");
+        const item = state.items.find((i) => i.id === id && i.type === "ticket");
+        if (item) {
+          item.draft.release_preference = target.checked ? "request_immediate" : "default";
         }
       }
     });

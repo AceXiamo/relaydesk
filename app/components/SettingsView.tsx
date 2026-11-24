@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ProjectCliSettingsCard } from "./ProjectCliSettingsCard.tsx";
 import { ProjectDeployPolicyCard } from "./ProjectDeployPolicyCard.tsx";
 import { ProjectRoutingCard } from "./ProjectRoutingCard.tsx";
+import { PortalLinksSettingsCard } from "./PortalLinksSettingsCard.tsx";
 import { UtilityAiSettingsCard } from "./UtilityAiSettingsCard.tsx";
 import { LocalAgentsSettingsCard } from "./LocalAgentsSettingsCard.tsx";
 import { Icon } from "./Icon.tsx";
@@ -1748,6 +1749,12 @@ export function SettingsView({
               onOpenReleases={onOpenReleases}
             />
 
+            {/* 1.6. Standalone Feedback Portal Access Links & Devices */}
+            <PortalLinksSettingsCard
+              key={`portal-links-${project.id}`}
+              project={project}
+            />
+
             {/* 2. Project Execution Priority & Per-Agent Workdir Binding */}
             <ProjectRoutingCard
               key={`routing-${project.id}`}
@@ -1992,6 +1999,12 @@ export function SettingsView({
           /* Sources Mode */
           snippets && (
             <>
+              {/* Standalone Feedback Portal Access Links & Devices */}
+              <PortalLinksSettingsCard
+                key={`sources-portal-links-${project.id}`}
+                project={project}
+              />
+
               {/* Allowed Origins */}
               <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs">
                 <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex items-center gap-2.5">

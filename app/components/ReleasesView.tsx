@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { DeployGateEvaluationRow } from "./DeployGateSection.tsx";
 import { Icon } from "./Icon.tsx";
 import { MarkdownContent } from "./MarkdownContent.tsx";
 import {
@@ -26,6 +27,7 @@ import type {
   ReleaseRecord,
   TaskRecord,
 } from "~/lib/types.ts";
+import type { DeployGateEvaluation } from "~/lib/portal-types.ts";
 
 interface ReleasesViewProps {
   project: ProjectDetail | null;
@@ -52,6 +54,7 @@ export function ReleasesView({
   const [pendingTasks, setPendingTasks] = useState<TaskRecord[]>([]);
   const [failedTasks, setFailedTasks] = useState<TaskRecord[]>([]);
   const [activeRelease, setActiveRelease] = useState<ReleaseRecord | null>(null);
+  const [gateEvaluations, setGateEvaluations] = useState<DeployGateEvaluation[]>([]);
   const [policy, setPolicy] = useState<ProjectDeployPolicy | null>(
     project?.deploy_policy ?? null,
   );
@@ -73,13 +76,17 @@ export function ReleasesView({
       }
       if (!silent) setLoading(true);
       try {
-        const res = await api.listProjectReleases(projectId, 50);
+        const [res, gatesRes] = await Promise.all([
+          api.listProjectReleases(projectId, 50),
+          api.listProjectDeployGates(projectId).catch(() => ({ evaluations: [] })),
+        ]);
         setReleases(res.releases);
         setPendingTasks(res.pending_tasks);
         setFailedTasks(res.failed_tasks);
         setActiveRelease(res.active_release);
         setPolicy(res.deploy_policy);
         setDeployDocExists(res.deploy_doc_exists);
+        setGateEvaluations(gatesRes.evaluations ?? []);
       } catch (err) {
         if (!silent) {
           toast.error(
@@ -98,14 +105,15 @@ export function ReleasesView({
     void load(false);
   }, [project?.id, project?.deploy_policy, load]);
 
-  // Poll gently while a release is actively running.
+  // Poll gently while a release is actively running or an AI gate is evaluating.
+  const hasEvaluatingGate = gateEvaluations.some((g) => g.status === "evaluating");
   useEffect(() => {
-    if (!activeRelease) return;
+    if (!activeRelease && !hasEvaluatingGate) return;
     const timer = window.setInterval(() => {
       if (!document.hidden) void load(true);
     }, 4000);
     return () => window.clearInterval(timer);
-  }, [activeRelease, load]);
+  }, [activeRelease, hasEvaluatingGate, load]);
 
   if (!project) {
     return (
@@ -126,6 +134,10 @@ export function ReleasesView({
 
   const effectivePolicy = policy ?? project.deploy_policy;
   const queuedCount = pendingTasks.length + failedTasks.length;
+  const pendingTaskIds = new Set(pendingTasks.map((t) => t.id));
+  const escalatedPendingGates = gateEvaluations.filter(
+    (g) => g.status === "escalated" && (queuedCount > 0 ? pendingTaskIds.has(g.task_id) : false),
+  );
 
   const handleTrigger = async (force = forceEmpty) => {
     setTriggering(true);
@@ -286,6 +298,40 @@ export function ReleasesView({
           </div>
         )}
 
+        {/* Escalated AI Deploy Gate manual approval banner */}
+        {escalatedPendingGates.length > 0 && !activeRelease && (
+          <div className="rounded-xl border border-rose-500/30 bg-rose-500/[0.06] px-4 py-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 animate-rd-portal-in">
+            <div className="flex items-start sm:items-center gap-3 min-w-0">
+              <LivePulseDot tone="rose" active />
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-semibold text-[var(--text-primary)]">
+                    有 {escalatedPendingGates.length} 条即时发布申请已转人工确认
+                  </span>
+                  <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-rose-500/12 text-rose-700 dark:text-rose-300 font-medium">
+                    AI 门禁 · escalated
+                  </span>
+                </div>
+                <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
+                  来自「{escalatedPendingGates[0]?.requested_by_label || "反馈成员"}」的申请因风险面或活跃度校验条件不足未自动放行，请查看下方评估记录后决定是否手动发布。
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                variant="primary"
+                size="sm"
+                icon="rocket"
+                loading={triggering}
+                disabled={queuedCount === 0}
+                onClick={() => void handleTrigger(false)}
+              >
+                人工确认并发布 ({queuedCount})
+              </Button>
+            </div>
+          </div>
+        )}
+
         {/* Active release live banner */}
         {activeRelease && (
           <div
@@ -382,6 +428,17 @@ export function ReleasesView({
                     {effectivePolicy.allow_urgent_override
                       ? "已开启（urgent 立即发版）"
                       : "已关闭"}
+                  </p>
+                )}
+                {(effectivePolicy.mode === "scheduled" ||
+                  effectivePolicy.mode === "manual") && (
+                  <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                    AI 门禁即时发布：
+                    {effectivePolicy.allow_ai_immediate_deploy
+                      ? effectivePolicy.allow_widget_deploy_request
+                        ? "已开启（独立面板 + Widget 访客）"
+                        : "已开启（仅独立面板授权链接）"
+                      : "未开启"}
                   </p>
                 )}
               </div>
@@ -489,6 +546,48 @@ export function ReleasesView({
             </ul>
           )}
         </section>
+
+        {/* AI Deploy Gate Pre-flight Evaluations */}
+        {gateEvaluations.length > 0 && (
+          <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden">
+            <div className="px-4 py-3 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Icon
+                  name="sparkles"
+                  size={14}
+                  className="text-indigo-600 dark:text-indigo-400"
+                />
+                <h2 className="text-sm font-semibold text-[var(--text-primary)]">
+                  AI 门禁评估记录（Deploy Gate）
+                </h2>
+                <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-[var(--surface-hover)] text-[var(--text-secondary)] tabular-nums">
+                  {gateEvaluations.length}
+                </span>
+              </div>
+              <span className="text-[11px] text-[var(--text-muted)]">
+                只读预检线上活跃度与变更风险面 · 内部证据仅管理员可见
+              </span>
+            </div>
+            <div className="p-3.5 space-y-2.5">
+              {gateEvaluations.slice(0, 12).map((evaluation) => (
+                <DeployGateEvaluationRow
+                  key={evaluation.id}
+                  evaluation={evaluation}
+                  onSelectTask={onSelectTask}
+                  onTriggerRelease={
+                    evaluation.status === "escalated" &&
+                    !activeRelease &&
+                    queuedCount > 0 &&
+                    pendingTaskIds.has(evaluation.task_id)
+                      ? () => void handleTrigger(false)
+                      : undefined
+                  }
+                  triggeringRelease={triggering}
+                />
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* Release history */}
         <section className="space-y-3">

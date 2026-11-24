@@ -795,7 +795,11 @@ function buildToolDefinitions(hasTasks: boolean) {
             required: ["task", "body"],
             properties: {
               task: { type: ["string", "integer"], description: "Task ID, number, or code such as RD-12" },
-              body: { type: "string", description: "Markdown comment body to add to the task thread" },
+              body: { type: "string", description: "Internal Markdown comment; never shared with the reporter." },
+              public_question: {
+                type: "string", enum: ["steps", "expected", "environment", "frequency", "screenshot", "confirm_fix"],
+                description: "Explicit opt-in: send a reviewed template to the feedback reporter and move the task to waiting. Never copies the internal comment. An agent with an active lease must transition its own task to waiting first.",
+              },
               reopen: {
                 type: "boolean",
                 description: "If true and the task is waiting/review/done, reopen it to ready (default false)",

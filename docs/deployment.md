@@ -51,7 +51,26 @@
     └── .cli-home/               # Web 内置 CLI 的 HOME 目录（含 .codex/）
 ```
 
-### 1.3 Pier 操作铁律
+### 1.3 可选：反馈侧即时发布门禁
+
+Gate 默认关闭，只适用于 `manual` / `scheduled`。先配置部署手册、Utility AI（或项目模型）与正常的本机发布节点，再开放反馈侧申请；匿名 Widget 需要独立开启。评估没有终端、部署工具或写权限。手册中的 shell、任意 SQL、URL、文字声明“当前空闲”均不会执行或用作测量值。
+
+在自定义 `doc_path`、项目空间 `DEPLOY.md`、或其配套 `HANDBOOK.md` 中加入以下章节（按此顺序取首个匹配章节；仍须有自定义部署文档或 `DEPLOY.md`）：
+
+````markdown
+## Live Traffic / Active Usage Check
+
+```deploy-gate
+{"datasource":"usage_monitor","table":"deployment_usage"}
+```
+````
+
+- `datasource` 是本项目的只读数据源 ID 或唯一名称；可用项目空间 SQLite 或配置为只读的 PostgreSQL / MySQL（服务端须安装对应客户端，数据库账号应只有这张指标表的 SELECT 权限）。`table` 是不带 schema 的简单表名。不要把凭据写进手册。
+- 由受信监控持续写入两列：`active_users` 为非负整数，`observed_at` 为带时区的 ISO 时间或 Unix 毫秒。请保证时间格式统一，最新采样唯一，采样间隔小于 2 分钟，空闲时仍有心跳。不要将静态数据库快照、HTTP 200 或容器存活当作在线使用人数；Pier 使用指标也须由可信采集器先汇总到该表。只有发布链路已验证全程零停机时才可额外指定 `"zero_downtime":true`。
+- 风险审核比较上次成功发布的 SHA 与当前项目的已同步单仓库镜像 HEAD；本批次所有待发提交须有对应 `delivery_ref`，且镜像中有基线和中间对象。模型只接收服务端生成的变更类别、行数与使用量，不接收原始 diff、日志、SQL、路径或申请说明。首次发布、历史不足、非线性或不完整批次、敏感变更、无法从脱敏摘要可靠评估的业务逻辑、模型不可用、数据过期都会转人工，**不会**自动尝试获取缺失证据或执行发布。
+- 批准只覆盖记录的批次和固定 SHA；重新测量使用情况、核验授权与队列后才创建标准 `ai_gate` 发布单。人工可在 Releases 与工单事件中查阅转交提醒，按原流程处理。每项目仅允许一个评估，完成后冷却 5 分钟。
+
+### 1.4 Pier 操作铁律
 
 1. **优先只读观察**：若当前会话具备 Pier MCP 权限，先用 `overview` / `get_project` / `get_logs` / `list_events` 核对状态；若无 MCP 权限，通过 `pier-ssh tw-1` 只读检查 `docker compose ps` 和 `docker compose logs`。
 2. **版本变更必须走 `pier deploy`**：严禁手动改 `.env` 的 `IMAGE_TAG` 后直接运行 `docker compose up -d`，否则 Pier 面板丢失部署记录、提交关联与失败自动回滚能力。

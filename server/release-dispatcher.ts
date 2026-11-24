@@ -1,3 +1,4 @@
+import { expireGateLeases, gateInProgress, registerGateDispatcher, tryPresetGate } from "./deploy-gate.ts";
 import type { BridgeHub } from "./bridge-hub.ts";
 import type { ChatRunManager } from "./chat-run-manager.ts";
 import { getChatRuntimeInfo } from "./codex-chat.ts";
@@ -6,7 +7,7 @@ import {
   resolveLocalTaskExecutionTarget,
   type ResolvedChatExecutionTarget,
 } from "./execution-router.ts";
-import { Store, toAgentProject } from "./store.ts";
+import { extractShaFromDeliveryRef, Store, toAgentProject } from "./store.ts";
 import { readWorkspaceDeployDoc } from "./workspace.ts";
 import type {
   AgentProjectInfo,
@@ -111,6 +112,7 @@ export function buildReleaseSystemContext(
     ...docOrder,
     "",
     "### Strict Rules & Safety",
+    ...(release.trigger === "ai_gate" ? [`This approval is for the exact batch below and immutable target ${release.target_sha} only. Verify the running baseline and target before cutover; block if either differs from the approved baseline ${release.verification_context.ai_gate_baseline} and target. Never deploy a moving branch, latest image or a superset.`] : []),
     `1. **Read the deployment runbook first.** Follow the documented build, deploy, and verification steps faithfully.`,
     `2. **Block when docs are missing or high-risk:** If NO clear deployment procedure is documented in the sources above, OR if this release involves unconfirmed destructive database migrations, production secret rotations, or irreversible infrastructure changes, do **NOT** guess or improvise—call \`finish_release(release_id: "${relCode}", status: "blocked", summary: "<exact missing info or risk>")\` and stop.`,
     `3. **Persist pre-cutover checkpoint:** Before executing any deployment cutover or container rebuild (especially if deploying this project may restart Relaydesk itself or drop the bridge connection), call MCP \`checkpoint_release(release_id: "${relCode}", target_sha: "<full-40-char-sha>", deploy_ref: "<branch@sha>", pier_server: "<server>", pier_project: "<project>", health_url: "<url>", deploy_log: "<remote-log-path>", checks: [...], notes: "<rollback baseline / extra info>")\` so post-restart verification has full context.`,
@@ -167,6 +169,15 @@ export function buildReleaseVerifySystemContext(
   ].join("\n");
 }
 
+function releaseTaskLine(release: ReleaseRecord, item: ReleaseRecord["task_snapshot"][number]): string {
+  if (release.trigger === "ai_gate") {
+    // Reporter-controlled titles, labels and request text are not release-agent instructions.
+    return `- **RD-${item.number}** · \`${extractShaFromDeliveryRef(item.delivery_ref)}\``;
+  }
+  const ref = item.delivery_ref ? ` · \`${item.delivery_ref}\`` : "";
+  return `- **RD-${item.number}** [${item.priority}]${ref}：${item.title}`;
+}
+
 export function buildReleaseVerifyPrompt(
   project: AgentProjectInfo,
   release: ReleaseRecord,
@@ -213,8 +224,7 @@ export function buildReleaseVerifyPrompt(
   if (release.task_snapshot.length > 0) {
     lines.push("", `## 归属本发布单的任务（共 ${release.task_snapshot.length} 项）`);
     for (const item of release.task_snapshot) {
-      const refPart = item.delivery_ref ? ` · \`${item.delivery_ref}\`` : "";
-      lines.push(`- **RD-${item.number}** [${item.priority}]${refPart}：${item.title}`);
+      lines.push(releaseTaskLine(release, item));
     }
   }
   if (extraPrompt?.trim()) {
@@ -234,6 +244,7 @@ export function buildReleaseBriefPrompt(
 ): string {
   const relCode = `REL-${release.number}`;
   const triggerLabels: Record<ReleaseTrigger, string> = {
+    ai_gate: "反馈侧申请 · AI 评估通过（ai_gate）",
     immediate: "自动立即发布（immediate）",
     scheduled: "定时窗口期自动发布（scheduled）",
     urgent: "紧急任务窗口穿透发布（urgent override）",
@@ -250,8 +261,7 @@ export function buildReleaseBriefPrompt(
   if (release.task_snapshot.length > 0) {
     lines.push("", `## 本次包含的待发布任务（共 ${release.task_snapshot.length} 项）`);
     for (const item of release.task_snapshot) {
-      const refPart = item.delivery_ref ? ` · \`${item.delivery_ref}\`` : "";
-      lines.push(`- **RD-${item.number}** [${item.priority}]${refPart}：${item.title}`);
+      lines.push(releaseTaskLine(release, item));
     }
   } else {
     lines.push("", "## 本次包含的待发布任务", "- 无关联任务（手动强制发布当前最新代码）");
@@ -293,6 +303,23 @@ export class ReleaseDispatcher {
     this.chatRuns = chatRuns;
     this.cooldownMs = options.cooldownMs ?? FAILED_RELEASE_COOLDOWN_MS;
     this.nowFn = options.now ?? (() => new Date());
+
+    this.unsubscribers.push(registerGateDispatcher(store, {
+      busy: id => this.chatRuns.hasActiveRunForProject(id),
+      prepare: (id, taskIds, target, label, base, gateId) => {
+        const projectInfo = toAgentProject(store.getProjectRow(id));
+        const selection = this.releaseSelection(projectInfo);
+        const { target: node } = resolveLocalTaskExecutionTarget({ store, bridgeHub, projectId: id, runtime: selection.runtime });
+        if (!node) throw new ApiError(409, "没有可用的发布节点");
+        const prepared = this.prepareReleaseSession({
+          projectInfo, trigger: "ai_gate", taskIds, targetSha: target, gateRequester: label, gateBaseline: base, gateId,
+          ...selection,
+          resolvedTarget: { targetKey: node.targetKey, localAgentId: node.agent.id, localBinding: node.binding, agentName: node.agent.name },
+        });
+        return { releaseId: prepared.release.id, start: prepared.start };
+      },
+    }));
+    expireGateLeases(store);
 
     if (bridgeHub) {
       this.unsubscribers.push(
@@ -359,6 +386,7 @@ export class ReleaseDispatcher {
       active_release_id?: string | null;
     }>;
     try {
+      expireGateLeases(this.store);
       projects = this.store.listProjects();
     } catch {
       return;
@@ -368,6 +396,7 @@ export class ReleaseDispatcher {
         !project.automation_paused &&
         (project.deploy_policy.mode === "immediate" ||
           project.deploy_policy.mode === "scheduled" ||
+          (project.deploy_policy.mode === "manual" && project.deploy_policy.allow_ai_immediate_deploy) ||
           Boolean(project.active_release_id))
       ) {
         this.pendingProjects.add(project.id);
@@ -543,8 +572,10 @@ export class ReleaseDispatcher {
         };
       }
 
+      if (gateInProgress(this.store, projectId)) return { dispatched: false, reason: "gate_evaluating" };
       const check = this.evaluateProject(projectId);
       if (!check.eligible || !check.trigger || !check.tasks) {
+        if (check.reason === "policy_manual" || check.reason === "outside_deploy_window") tryPresetGate(this.store, projectId);
         return { dispatched: false, reason: check.reason };
       }
 
@@ -594,6 +625,7 @@ export class ReleaseDispatcher {
       throw new ApiError(409, "当前项目已有正在执行的任务或发布会话，请等待完成后再触发发布");
     }
 
+    if (gateInProgress(this.store, projectId)) throw new ApiError(409, "AI 门禁评估进行中，请稍后重试");
     const batchTasks = this.store.listTasksByDeployStatus(projectId, ["pending", "failed"]);
     if (batchTasks.length === 0 && !options.force) {
       throw new ApiError(
@@ -726,19 +758,31 @@ export class ReleaseDispatcher {
     return { release, session: started.session, runId: started.runId };
   }
 
-  private launchReleaseSession(params: {
+  private launchReleaseSession(params: Parameters<ReleaseDispatcher["prepareReleaseSession"]>[0]) {
+    return this.prepareReleaseSession(params).start();
+  }
+
+  private prepareReleaseSession(params: {
     projectInfo: AgentProjectInfo;
     trigger: ReleaseTrigger;
     taskIds: string[];
+    targetSha?: string;
+    gateRequester?: string;
+    gateBaseline?: string;
+    gateId?: string;
     runtime: ChatRuntime;
     model: string;
     reasoningEffort: ChatReasoningEffort;
     networkAccess: boolean;
     resolvedTarget: ResolvedChatExecutionTarget;
     extraPrompt?: string;
-  }): { release: ReleaseRecord; session: ChatSessionRecord; runId: string } {
+  }) {
     const { release, session } = this.store.createRelease(params.projectInfo.id, {
       trigger: params.trigger,
+      target_sha: params.targetSha,
+      gateRequester: params.gateRequester,
+      gateBaseline: params.gateBaseline,
+      gateId: params.gateId,
       taskIds: params.taskIds,
       runtime: params.runtime,
       model: params.model,
@@ -747,35 +791,37 @@ export class ReleaseDispatcher {
       network_access: params.networkAccess,
     });
 
-    const deployDoc = readWorkspaceDeployDoc(this.store.dbPath, params.projectInfo.id);
-    const systemContext = buildReleaseSystemContext(params.projectInfo, release, {
-      deployDocExists: deployDoc.exists,
-    });
-    const prompt = buildReleaseBriefPrompt(params.projectInfo, release, params.extraPrompt);
-
-    try {
-      const started = this.chatRuns.startTurn({
-        projectInfo: params.projectInfo,
-        sessionId: session.id,
-        content: prompt,
-        extraSystemContext: systemContext,
-        skipAutoTitle: true,
-        resolvedTargetOverride: params.resolvedTarget,
-      });
-      return { release, session: started.session, runId: started.runId };
-    } catch (err) {
-      // Roll back running release if starting the chat turn synchronously failed.
-      const errMsg = err instanceof Error ? err.message : "Failed to start release session";
+    const start = () => {
       try {
-        this.store.finishRelease(params.projectInfo.id, release.id, {
-          status: "failed",
-          summary: `Failed to start release session: ${errMsg}`,
-          author: "system",
+        const deployDoc = readWorkspaceDeployDoc(this.store.dbPath, params.projectInfo.id);
+        const systemContext = buildReleaseSystemContext(params.projectInfo, release, {
+          deployDocExists: deployDoc.exists,
         });
-      } catch {
-        // Ignore rollback failure
+        const prompt = buildReleaseBriefPrompt(params.projectInfo, release, params.extraPrompt);
+        const started = this.chatRuns.startTurn({
+          projectInfo: params.projectInfo,
+          sessionId: session.id,
+          content: prompt,
+          extraSystemContext: systemContext,
+          skipAutoTitle: true,
+          resolvedTargetOverride: params.resolvedTarget,
+        });
+        return { release, session: started.session, runId: started.runId };
+      } catch (err) {
+        // Roll back running release if starting the chat turn synchronously failed.
+        const errMsg = err instanceof Error ? err.message : "Failed to start release session";
+        try {
+          this.store.finishRelease(params.projectInfo.id, release.id, {
+            status: "failed",
+            summary: `Failed to start release session: ${errMsg}`,
+            author: "system",
+          });
+        } catch {
+          // Ignore rollback failure
+        }
+        throw err;
       }
-      throw err;
-    }
+    };
+    return { release, start };
   }
 }

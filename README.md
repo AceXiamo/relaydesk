@@ -61,6 +61,13 @@ All state lives in a single SQLite file (`data/relaydesk.sqlite3` by default) an
 4. **Execute.** A connected Local Bridge, a cloud runner, or the legacy `agent/relay.py` connector claims the task and works in an isolated Git worktree.
 5. **Review.** When the run succeeds, the task moves to `review` with its branch and HEAD recorded. Verify, merge and close it.
 
+## Feedback without a console account
+
+- **Shared portal:** Create a link in project settings and copy it when issued. Choose one link per person or group: devices on the same link share “My feedback.” Team visibility is opt-in and read-only. The original link is a bearer credential; only its hash is stored. If it is lost, revoke it and create a replacement.
+- **Devices:** Opening the link exchanges it for a project-specific HttpOnly cookie and redirects to `/p/:projectId`. Removing a device invalidates that session immediately. Clearing cookies makes a browser a new device; revoke the *link* to prevent a holder of the original URL from enrolling again. Use HTTPS outside localhost. Configure reverse proxies and analytics not to log query strings on `/p/`. The device list uses the socket IP unless `RELAYDESK_TRUST_PROXY=1` is set behind a proxy that overwrites `X-Forwarded-For` and blocks direct access.
+- **Widget:** The existing script snippet still works. New submissions can be tracked from the same browser and site using a randomly generated local credential. Historical submissions without that credential cannot safely be imported by ticket number. Clearing site storage removes access to local history.
+- **Progress and releases:** Reporters see public progress, can answer explicit follow-up questions, and can accept or reopen a deployed fix. Internal comments stay internal. For optional immediate-release requests, see the [deployment guide](docs/deployment.md).
+
 ## Connecting a local agent (Local Bridge)
 
 No need to clone Relaydesk on every machine. `pnpm build` bundles `agent/bridge/` into `build/bridge/relaydesk-bridge.mjs`, and the server delivers it at `GET /api/bridge/client.mjs`, authenticated with a device bearer token and checked with `X-Content-Sha256`.

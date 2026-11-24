@@ -38,7 +38,7 @@ function normalizeBaseUrl(provider: UtilityAiProvider, rawEndpoint: string): str
   return withoutPath;
 }
 
-function buildLanguageModel(config: StoredUtilityAiConfig) {
+export function buildLanguageModel(config: StoredUtilityAiConfig) {
   const baseURL = normalizeBaseUrl(config.provider, config.endpoint);
   const options = {
     baseURL,

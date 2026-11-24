@@ -1,4 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
+import { PORTAL_SCHEMA } from "./portal-access.ts";
+import { addPublicFeedbackQuestion, migrateFeedbackTickets } from "./feedback-tickets.ts";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -88,6 +90,7 @@ export const RELEASE_TRIGGERS = new Set<ReleaseTrigger>([
   "scheduled",
   "urgent",
   "manual",
+  "ai_gate",
 ]);
 
 export const DEFAULT_DEPLOY_POLICY: ProjectDeployPolicy = {
@@ -98,6 +101,8 @@ export const DEFAULT_DEPLOY_POLICY: ProjectDeployPolicy = {
   window_end: "06:00",
   timezone: "Asia/Shanghai",
   allow_urgent_override: true,
+  allow_ai_immediate_deploy: false,
+  allow_widget_deploy_request: false,
   doc_path: "",
 };
 
@@ -161,6 +166,8 @@ export function normalizeDeployPolicy(raw: unknown): ProjectDeployPolicy {
     window_start,
     window_end,
     timezone,
+    allow_ai_immediate_deploy: parsed.allow_ai_immediate_deploy === true,
+    allow_widget_deploy_request: parsed.allow_widget_deploy_request === true,
     allow_urgent_override,
     doc_path,
   };
@@ -213,6 +220,11 @@ export function parseDeployPolicyPatch(
     allow_urgent_override = patch.allow_urgent_override;
   }
 
+  function flag(key: "allow_ai_immediate_deploy" | "allow_widget_deploy_request"): boolean {
+    if (patch[key] === undefined) return current[key] === true;
+    if (typeof patch[key] !== "boolean") throw new ApiError(400, `${key} must be a boolean`);
+    return patch[key];
+  }
   let doc_path = current.doc_path;
   if ("doc_path" in patch && patch.doc_path !== undefined) {
     if (typeof patch.doc_path !== "string") {
@@ -248,6 +260,8 @@ export function parseDeployPolicyPatch(
     runtime,
     model,
     mode,
+    allow_ai_immediate_deploy: flag("allow_ai_immediate_deploy"),
+    allow_widget_deploy_request: flag("allow_widget_deploy_request"),
     window_start,
     window_end,
     timezone,
@@ -342,7 +356,7 @@ CREATE TABLE IF NOT EXISTS releases (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     number INTEGER NOT NULL,
-    trigger TEXT NOT NULL CHECK(trigger IN ('immediate','scheduled','urgent','manual')),
+    trigger TEXT NOT NULL CHECK(trigger IN ('immediate','scheduled','urgent','manual','ai_gate')),
     status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','verifying','succeeded','failed','blocked')),
     session_id TEXT,
     task_ids_json TEXT NOT NULL DEFAULT '[]',
@@ -358,6 +372,18 @@ CREATE TABLE IF NOT EXISTS releases (
 );
 CREATE INDEX IF NOT EXISTS releases_project ON releases(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS releases_project_status ON releases(project_id, status);
+CREATE TABLE IF NOT EXISTS deploy_gate_evaluations (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    requested_by_label TEXT NOT NULL, requested_by_device_id TEXT, request_reason TEXT NOT NULL,
+    trigger_source TEXT NOT NULL CHECK(trigger_source IN ('portal','widget','preset')),
+    status TEXT NOT NULL CHECK(status IN ('evaluating','approved','deferred','escalated','failed')),
+    public_reason TEXT NOT NULL, internal_evidence TEXT NOT NULL DEFAULT '{}',
+    release_id TEXT REFERENCES releases(id), created_at TEXT NOT NULL, finished_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS deploy_gate_mutex ON deploy_gate_evaluations(project_id) WHERE status = 'evaluating';
+CREATE INDEX IF NOT EXISTS deploy_gate_task ON deploy_gate_evaluations(project_id, task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS deploy_gate_project ON deploy_gate_evaluations(project_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS chat_sessions (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id),
@@ -578,6 +604,11 @@ export interface RawTaskRow {
   source: string;
   source_url: string;
   external_id: string | null;
+  reporter_link_id?: string | null;
+  reporter_device_id?: string | null;
+  reporter_visitor_id?: string | null;
+  reporter_name?: string;
+  release_preference?: "default" | "request_immediate";
   priority: string;
   status: string;
   owner: string;
@@ -751,6 +782,7 @@ export function toReleaseView(row: RawReleaseRow): ReleaseRecord {
   }
   const verificationContext = parseVerificationContext(row.verification_context_json);
   const targetSha = (row.target_sha ?? "").trim() || (verificationContext.target_sha ?? "").trim();
+  const gateAttribution = verificationContext.ai_gate_requester ? `由 ${verificationContext.ai_gate_requester} 申请 · AI 评估通过` : "";
   return {
     id: row.id,
     project_id: row.project_id,
@@ -766,7 +798,9 @@ export function toReleaseView(row: RawReleaseRow): ReleaseRecord {
     task_snapshot: taskSnapshot,
     target_sha: targetSha,
     deploy_ref: row.deploy_ref ?? "",
-    summary: row.summary ?? "",
+    summary: gateAttribution && !row.summary?.startsWith(gateAttribution)
+      ? [gateAttribution, row.summary].filter(Boolean).join("\n\n")
+      : row.summary ?? "",
     verification_context: verificationContext,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -873,7 +907,7 @@ function bridgeToken() {
 
 export class Store {
   readonly dbPath: string;
-  private db: DatabaseSync;
+  readonly db: DatabaseSync;
   private txDepth = 0;
 
   constructor(dbPath: string) {
@@ -885,6 +919,8 @@ export class Store {
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA foreign_keys=ON");
     this.db.exec(SCHEMA);
+    this.db.exec(PORTAL_SCHEMA);
+    this.transaction(true, () => migrateFeedbackTickets(this.db));
 
     const cols = this.db
       .prepare("PRAGMA table_info(projects)")
@@ -1084,7 +1120,7 @@ export class Store {
     const hasVerificationCtx = cols.some((c) => c.name === "verification_context_json");
     const allowsVerifying = /'verifying'/i.test(tableSql);
 
-    if (allowsVerifying) {
+    if (allowsVerifying && tableSql.includes("'ai_gate'")) {
       if (!hasTargetSha) {
         this.db.exec("ALTER TABLE releases ADD COLUMN target_sha TEXT NOT NULL DEFAULT ''");
       }
@@ -1102,7 +1138,7 @@ export class Store {
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             number INTEGER NOT NULL,
-            trigger TEXT NOT NULL CHECK(trigger IN ('immediate','scheduled','urgent','manual')),
+            trigger TEXT NOT NULL CHECK(trigger IN ('immediate','scheduled','urgent','manual','ai_gate')),
             status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','verifying','succeeded','failed','blocked')),
             session_id TEXT,
             task_ids_json TEXT NOT NULL DEFAULT '[]',
@@ -1894,6 +1930,9 @@ export class Store {
       updated_at: nowIso(),
       version: task.version + 1,
     };
+    if ((changes.status && changes.status !== "done") || (changes.deploy_status && changes.deploy_status !== "deployed")) {
+      merged.feedback_accepted_release = null;
+    }
     const keys = Object.keys(merged);
     const sets = keys.map((k) => `${k} = ?`).join(", ");
     const values = keys.map((k) => merged[k]);
@@ -2099,7 +2138,8 @@ export class Store {
         result.priority &&
         PRIORITIES.has(result.priority)
       ) {
-        changes.priority = result.priority;
+        // Public intake text (including AI-confirmed drafts) must not select the urgent release override.
+        changes.priority = task.source === "widget" && result.priority === "urgent" ? "high" : result.priority;
       }
       this.updateTaskFields(task, changes);
       this.addMessage(
@@ -2260,6 +2300,10 @@ export class Store {
     if (action === "comment_task") {
       const row = this.findProjectTask(projectId, params.task ?? params.task_id ?? params.number);
       const body = field(params, "body", 24000);
+      if (params.public_question !== undefined) {
+        if (params.reopen === true) throw new ApiError(400, "Cannot reopen while asking for feedback");
+        addPublicFeedbackQuestion(this, projectId, row.id, params.public_question, "agent");
+      }
       const message = this.addMessage(row.id, "comment", "agent", body);
       let reopened = false;
       if (
@@ -3342,6 +3386,9 @@ export class Store {
       network_access?: boolean;
       target_sha?: string;
       deploy_doc_path?: string;
+      gateRequester?: string;
+      gateBaseline?: string;
+      gateId?: string;
     },
   ): { release: ReleaseRecord; session: ChatSessionRecord } {
     return this.transaction(true, () => {
@@ -3350,6 +3397,10 @@ export class Store {
         throw new ApiError(409, "A release is already running or awaiting verification for this project");
       }
 
+      const gate = this.db.prepare("SELECT id FROM deploy_gate_evaluations WHERE project_id=? AND status='evaluating'").get(projectId);
+      if (options.trigger === "ai_gate" ? !gate || gate.id !== options.gateId : !!gate) {
+        throw new ApiError(409, "发布与门禁评估状态不匹配");
+      }
       const uniqueTaskIds = [...new Set(options.taskIds.filter((id) => typeof id === "string" && id.trim()))];
       const snapshot: ReleaseTaskSnapshot[] = [];
       const claimedTaskIds: string[] = [];
@@ -3369,6 +3420,9 @@ export class Store {
         });
       }
 
+      if (options.trigger === "ai_gate" && (!claimedTaskIds.length || claimedTaskIds.length !== options.taskIds.length)) {
+        throw new ApiError(409, "门禁审批批次已变更");
+      }
       const inferredTargetSha =
         options.target_sha?.trim() ||
         [...snapshot]
@@ -3378,6 +3432,7 @@ export class Store {
         "";
       const deployPolicy = normalizeDeployPolicy(projectRow.deploy_policy_json);
       const initialVerificationCtx: ReleaseVerificationContext = {
+        ...(options.gateRequester ? { ai_gate_requester: options.gateRequester, ai_gate_baseline: options.gateBaseline } : {}),
         ...(inferredTargetSha ? { target_sha: inferredTargetSha } : {}),
         ...(options.deploy_doc_path?.trim() || deployPolicy.doc_path.trim()
           ? { deploy_doc_path: (options.deploy_doc_path?.trim() || deployPolicy.doc_path.trim()) }
@@ -3475,6 +3530,7 @@ export class Store {
         payload.target_sha?.trim() ||
         extractShaFromDeliveryRef(payload.deploy_ref) ||
         current.target_sha;
+      if (current.trigger === "ai_gate" && nextTargetSha !== current.target_sha) throw new ApiError(409, "评估通过的目标提交不可更换");
       const nextDeployRef = payload.deploy_ref?.trim() || current.deploy_ref || nextTargetSha;
       const nextCtx: ReleaseVerificationContext = {
         ...current.verification_context,
@@ -3610,6 +3666,7 @@ export class Store {
         payload.target_sha?.trim() ||
         extractShaFromDeliveryRef(payload.deploy_ref) ||
         release.target_sha;
+      if (release.trigger === "ai_gate" && targetSha !== release.target_sha) throw new ApiError(409, "评估通过的目标提交不可更换");
       const deployRef = payload.deploy_ref?.trim() || release.deploy_ref || targetSha;
       const incomingSummary = payload.summary.trim().slice(0, 12000);
       const updatedTaskIds: string[] = [];
@@ -3686,7 +3743,7 @@ export class Store {
           for (const ref of payload.deployed_task_ids) {
             try {
               const found = this.findProjectTask(projectId, ref);
-              targetIds.add(found.id);
+              if (release.trigger !== "ai_gate" || release.task_ids.includes(found.id)) targetIds.add(found.id);
             } catch {
               // Ignore unknown task references if agent listed an unrelated code
             }

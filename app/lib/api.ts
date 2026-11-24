@@ -56,6 +56,11 @@ import type {
   WorkspaceSqliteSchema,
   WorkspaceSummary,
 } from "./types.ts";
+import type {
+  DeployGateEvaluation,
+  PortalAccessLink,
+  PortalLinkPayload,
+} from "./portal-types.ts";
 
 export class ClientApiError extends Error {
   status: number;
@@ -513,6 +518,43 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/releases/${encodeURIComponent(releaseId)}/reverify`,
       "POST",
       payload ?? {},
+    ),
+
+  /* ── Feedback Portal Links & AI Deploy Gate ─────────────────────────── */
+
+  listPortalLinks: (projectId: string) =>
+    request<{ links: PortalAccessLink[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/portal-links`,
+    ),
+  createPortalLink: (projectId: string, payload: PortalLinkPayload) =>
+    request<{ id: string; url: string }>(
+      `/api/projects/${encodeURIComponent(projectId)}/portal-links`,
+      "POST",
+      payload,
+    ),
+  updatePortalLink: (
+    projectId: string,
+    linkId: string,
+    payload: Partial<PortalLinkPayload>,
+  ) =>
+    request<{ link?: PortalAccessLink; ok?: boolean }>(
+      `/api/projects/${encodeURIComponent(projectId)}/portal-links/${encodeURIComponent(linkId)}`,
+      "PATCH",
+      payload,
+    ),
+  revokePortalLink: (projectId: string, linkId: string) =>
+    request<{ ok: boolean }>(
+      `/api/projects/${encodeURIComponent(projectId)}/portal-links/${encodeURIComponent(linkId)}`,
+      "DELETE",
+    ),
+  revokePortalDevice: (projectId: string, linkId: string, deviceId: string) =>
+    request<{ ok: boolean }>(
+      `/api/projects/${encodeURIComponent(projectId)}/portal-links/${encodeURIComponent(linkId)}/devices/${encodeURIComponent(deviceId)}`,
+      "DELETE",
+    ),
+  listProjectDeployGates: (projectId: string) =>
+    request<{ evaluations: DeployGateEvaluation[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/deploy-gates`,
     ),
   listWorkspaceDatabases: (projectId: string, refreshClients = false) =>
     request<{ databases: WorkspaceDatabaseEntry[]; clients: WorkspaceDbClientInfo[] }>(

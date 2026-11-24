@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ProjectChatStreams } from "~/lib/chat-streams.ts";
 import { TaskAgentSessionPanel, type TaskDispatchDraftConfig } from "./TaskAgentSessionPanel.tsx";
+import { DeployGateEvaluationRow } from "./DeployGateSection.tsx";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./agent-chat/RichPromptEditor.tsx";
 import { CliRunStatus, useCliRuns } from "./CliRunStatus.tsx";
 import { Icon } from "./Icon.tsx";
@@ -55,6 +56,7 @@ import type {
   TaskRecord,
   TaskStatus,
 } from "~/lib/types.ts";
+import type { DeployGateEvaluation } from "~/lib/portal-types.ts";
 
 interface TaskDetailDrawerProps {
   detail: TaskDetailPayload | null;
@@ -297,9 +299,34 @@ export function TaskDetailDrawer({
   const [draftRuntime, setDraftRuntime] = useState<ChatRuntime | null>(null);
   const [draftModel, setDraftModel] = useState<string | null>(null);
   const [draftEffort, setDraftEffort] = useState<ChatReasoningEffort | null>(null);
+  const [taskGateEvaluations, setTaskGateEvaluations] = useState<DeployGateEvaluation[]>([]);
   const commentInputRef = useRef<RichPromptEditorHandle | null>(null);
 
   const task = detail?.task ?? null;
+
+  useEffect(() => {
+    const projectId = task?.project_id;
+    const taskId = task?.id;
+    if (!projectId || !taskId) {
+      setTaskGateEvaluations([]);
+      return;
+    }
+    let active = true;
+    api
+      .listProjectDeployGates(projectId)
+      .then((res) => {
+        if (!active) return;
+        setTaskGateEvaluations(
+          (res.evaluations ?? []).filter((ev) => ev.task_id === taskId),
+        );
+      })
+      .catch(() => {
+        if (active) setTaskGateEvaluations([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [task?.project_id, task?.id, task?.updated_at]);
   const agentSessionId = task?.agent_session_id ?? "";
   const readAgentTurn = useCallback(
     () => (agentSessionId ? streams.snapshot().get(agentSessionId) : undefined),
@@ -894,6 +921,41 @@ export function TaskDetailDrawer({
                         重新入队返工
                       </Button>
                     )}
+                  </div>
+                </section>
+              )}
+
+              {/* AI Deploy Gate evaluations for this task */}
+              {taskGateEvaluations.length > 0 && (
+                <section className="space-y-2 animate-rd-portal-in">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                      <Icon
+                        name="sparkles"
+                        size={12}
+                        className="text-indigo-600 dark:text-indigo-400"
+                      />
+                      <span>AI 即时发布门禁记录</span>
+                    </div>
+                    {onOpenReleases && (
+                      <button
+                        type="button"
+                        onClick={onOpenReleases}
+                        className="text-[11.5px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                      >
+                        前往发布管理
+                      </button>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    {taskGateEvaluations.slice(0, 4).map((ev) => (
+                      <DeployGateEvaluationRow
+                        key={ev.id}
+                        evaluation={ev}
+                        compact
+                        onOpenReleases={onOpenReleases}
+                      />
+                    ))}
                   </div>
                 </section>
               )}

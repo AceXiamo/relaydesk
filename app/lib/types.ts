@@ -25,6 +25,8 @@ export interface ProjectDeployPolicy {
   window_end: string;
   timezone: string;
   allow_urgent_override: boolean;
+  allow_ai_immediate_deploy?: boolean;
+  allow_widget_deploy_request?: boolean;
   doc_path: string;
 }
 
@@ -35,11 +37,35 @@ export type TaskDeployStatus =
   | "deployed"
   | "failed";
 
-export type ReleaseTrigger = "immediate" | "scheduled" | "manual" | "urgent";
+export type ReleaseTrigger = "immediate" | "scheduled" | "manual" | "urgent" | "ai_gate";
+
+export type DeployGateStatus = "evaluating" | "approved" | "deferred" | "escalated" | "failed";
+export type DeployGateSource = "portal" | "widget" | "preset";
+export interface PublicDeployGate {
+  id: string;
+  status: DeployGateStatus;
+  public_reason: string;
+  created_at: string;
+  finished_at: string | null;
+}
+export interface DeployGateEvaluation extends PublicDeployGate {
+  task_title: string;
+  task_number: number;
+  release_number: number | null;
+  reason: string;
+  project_id: string;
+  task_id: string;
+  requested_by_label: string;
+  trigger_source: DeployGateSource;
+  internal_evidence: string;
+  release_id: string | null;
+}
 
 export type ReleaseStatus = "running" | "verifying" | "succeeded" | "failed" | "blocked";
 
 export interface ReleaseVerificationContext {
+  ai_gate_requester?: string;
+  ai_gate_baseline?: string;
   target_sha?: string;
   pier_server?: string;
   pier_project?: string;
@@ -301,6 +327,9 @@ export interface ProjectReposSyncStatus {
 }
 
 export interface WidgetConfigPayload {
+  tracking_enabled: boolean;
+  can_request_deploy: boolean;
+  release_window: string;
   project_id: string;
   project_name: string;
   ai_enabled: boolean;

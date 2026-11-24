@@ -38,7 +38,7 @@ import type {
 } from "../lib/types.ts";
 import { Icon } from "./Icon.tsx";
 
-function cn(...parts: Array<string | false | null | undefined>): string {
+export function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 
@@ -649,31 +649,37 @@ export function ReleaseTriggerBadge({
   trigger,
   className,
 }: {
-  trigger: ReleaseTrigger;
+  trigger: ReleaseTrigger | "ai_gate" | (string & {});
   className?: string;
 }) {
-  const iconMap: Record<ReleaseTrigger, string> = {
+  const iconMap: Record<string, string> = {
     immediate: "zap",
     scheduled: "calendar-clock",
     urgent: "alert-triangle",
     manual: "hand",
+    ai_gate: "sparkles",
   };
-  const toneMap: Record<ReleaseTrigger, string> = {
+  const toneMap: Record<string, string> = {
     immediate: "bg-sky-500/10 text-sky-700 dark:text-sky-300 border-sky-500/25",
     scheduled: "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/25",
     urgent: "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25",
     manual: "bg-[var(--rd-subtle)] text-[var(--rd-muted)] border-[var(--rd-border)]",
+    ai_gate: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
+  };
+  const labelMap: Record<string, string> = {
+    ...RELEASE_TRIGGER_LABELS,
+    ai_gate: "AI 门禁放行",
   };
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[11px] font-medium leading-none whitespace-nowrap select-none",
-        toneMap[trigger],
+        toneMap[trigger] ?? toneMap.manual,
         className,
       )}
     >
-      <Icon name={iconMap[trigger]} size={11} />
-      <span>{RELEASE_TRIGGER_LABELS[trigger]}</span>
+      <Icon name={iconMap[trigger] ?? "rocket"} size={11} />
+      <span>{labelMap[trigger] ?? trigger}</span>
     </span>
   );
 }

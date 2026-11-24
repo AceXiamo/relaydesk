@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Icon } from "./Icon.tsx";
-import { Button, Select, Switch, useToast } from "./ui.tsx";
+import { Button, CopyButton, Select, Switch, useToast } from "./ui.tsx";
 import { LocalAgentModelCombobox } from "./LocalAgentModelPicker.tsx";
 import { resolveLocalTaskAgent } from "~/lib/model-catalog.ts";
 import { api, ClientApiError } from "~/lib/api.ts";
@@ -49,6 +49,13 @@ export function ProjectDeployPolicyCard({
   const [allowUrgent, setAllowUrgent] = useState(
     project.deploy_policy.allow_urgent_override,
   );
+  const [allowAiImmediateDeploy, setAllowAiImmediateDeploy] = useState(
+    Boolean(project.deploy_policy.allow_ai_immediate_deploy),
+  );
+  const [allowWidgetDeployRequest, setAllowWidgetDeployRequest] = useState(
+    Boolean(project.deploy_policy.allow_widget_deploy_request),
+  );
+  const [showGateSnippet, setShowGateSnippet] = useState(false);
   const [docPath, setDocPath] = useState(project.deploy_policy.doc_path);
   const [runtime, setRuntime] = useState<ChatRuntime | null>(project.deploy_policy.runtime ?? null);
   const [model, setModel] = useState(project.deploy_policy.model ?? "");
@@ -71,6 +78,8 @@ export function ProjectDeployPolicyCard({
     setWindowEnd(project.deploy_policy.window_end);
     setTimezone(project.deploy_policy.timezone);
     setAllowUrgent(project.deploy_policy.allow_urgent_override);
+    setAllowAiImmediateDeploy(Boolean(project.deploy_policy.allow_ai_immediate_deploy));
+    setAllowWidgetDeployRequest(Boolean(project.deploy_policy.allow_widget_deploy_request));
     setDocPath(project.deploy_policy.doc_path);
   }, [project.id, project.deploy_policy]);
 
@@ -104,6 +113,8 @@ export function ProjectDeployPolicyCard({
         window_end: windowEnd,
         timezone: timezone.trim() || "Asia/Shanghai",
         allow_urgent_override: allowUrgent,
+        allow_ai_immediate_deploy: allowAiImmediateDeploy,
+        allow_widget_deploy_request: allowAiImmediateDeploy && allowWidgetDeployRequest,
         doc_path: docPath.trim(),
       });
       onPolicyUpdated(res.deploy_policy);
@@ -308,6 +319,117 @@ export function ProjectDeployPolicyCard({
                 onChange={setAllowUrgent}
               />
             </div>
+          </div>
+        )}
+
+        {/* AI Deploy Gate switches for scheduled / manual modes */}
+        {(mode === "scheduled" || mode === "manual") && (
+          <div className="rounded-xl border border-indigo-500/25 bg-indigo-500/[0.04] p-4 space-y-3.5 animate-rd-portal-in">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 space-y-0.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Icon
+                    name="sparkles"
+                    size={14}
+                    className="text-indigo-600 dark:text-indigo-400 shrink-0"
+                  />
+                  <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+                    允许反馈侧申请 AI 评估即时发布（Deploy Gate）
+                  </span>
+                </div>
+                <p className="text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+                  开启后，具备权限的反馈成员在提交反馈时可勾选预设，或在工单处于「已修复，等待发布」时主动申请即时上线。AI 将严格只读检查线上活跃度与变更风险，安全时自动放行发布，否则暂缓或转交人工确认。
+                </p>
+              </div>
+              <Switch
+                checked={allowAiImmediateDeploy}
+                onChange={(checked) => {
+                  setAllowAiImmediateDeploy(checked);
+                  if (!checked) setAllowWidgetDeployRequest(false);
+                }}
+              />
+            </div>
+
+            {allowAiImmediateDeploy && (
+              <div className="space-y-3 pt-3 border-t border-indigo-500/15 animate-rd-portal-in">
+                <div className="flex items-start justify-between gap-3 pl-1">
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                      同时对匿名 Widget 访客开放
+                    </div>
+                    <p className="text-[11.5px] text-[var(--text-muted)]">
+                      默认仅对独立反馈面板（<code className="font-mono">/p/{project.id}</code>）的授权分享链接开放；开启后，嵌入式组件访客也可触发 AI 门禁评估（仍受冷却与风控限制）。
+                    </p>
+                  </div>
+                  <Switch
+                    checked={allowWidgetDeployRequest}
+                    onChange={setAllowWidgetDeployRequest}
+                  />
+                </div>
+
+                {/* DEPLOY.md Live Traffic / Active Usage Check Hint */}
+                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] px-3.5 py-2.5 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)]">
+                      <Icon
+                        name="book-open"
+                        size={13}
+                        className="text-indigo-600 dark:text-indigo-400 shrink-0"
+                      />
+                      <span>
+                        建议在 <code className="font-mono text-[11.5px]">DEPLOY.md</code> 中声明活跃度检查章节
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setShowGateSnippet((v) => !v)}
+                        className="text-[11.5px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                      >
+                        {showGateSnippet ? "收起示例" : "查看章节示例"}
+                      </button>
+                      {onEditDeployDoc && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          icon="file-text"
+                          onClick={onEditDeployDoc}
+                        >
+                          编辑 DEPLOY.md
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-[11.5px] text-[var(--text-muted)] leading-relaxed">
+                    AI 门禁会查找 <code className="font-mono">## Live Traffic / Active Usage Check</code> 章节中的只读数据源配置；若缺失该章节或线上活跃度无法可靠核验，评估将自动转交人工审批（escalated）以确保安全。
+                  </p>
+                  {showGateSnippet && (
+                    <div className="space-y-1.5 pt-1 animate-rd-portal-in">
+                      <div className="flex justify-end">
+                        <CopyButton
+                          value={`## Live Traffic / Active Usage Check\n\n\`\`\`deploy-gate\n{\n  "datasource": "prod-readonly",\n  "table": "active_usage_snapshots",\n  "zero_downtime": false\n}\n\`\`\``}
+                          label="复制章节模板"
+                          copiedLabel="模板已复制"
+                          size="xs"
+                        />
+                      </div>
+                      <pre className="p-2.5 rounded-lg bg-zinc-950 text-zinc-100 text-[11.5px] font-mono leading-relaxed overflow-x-auto border border-zinc-800">
+{`## Live Traffic / Active Usage Check
+
+\`\`\`deploy-gate
+{
+  "datasource": "prod-readonly",
+  "table": "active_usage_snapshots",
+  "zero_downtime": false
+}
+\`\`\``}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

@@ -7,6 +7,9 @@ import type { BridgeHub } from "./bridge-hub.ts";
 import { ChatRunManager } from "./chat-run-manager.ts";
 import { ReleaseDispatcher } from "./release-dispatcher.ts";
 import { TaskDispatcher } from "./task-dispatcher.ts";
+import { manageLinks, portalIdentity, PortalAccessError } from "./portal-access.ts";
+import { createFeedbackTicket, listFeedbackTickets, getFeedbackTicket, replyFeedbackTicket, acceptFeedbackTicket, authorizeFeedbackDeployRequest, addPublicFeedbackQuestion, widgetVisitorDigest } from "./feedback-tickets.ts";
+import { deployGateAvailable, latestDeployGate, listDeployGates, requestDeployGate } from "./deploy-gate.ts";
 
 import {
   normalizeExecutionPriority,
@@ -197,6 +200,7 @@ export class ApiRouter {
   readonly taskDispatcher: TaskDispatcher;
   readonly releaseDispatcher: ReleaseDispatcher;
   private traffic = new Map<string, number[]>();
+  private nextTrafficSweep = 0;
   private cliPresence = new Map<string, { seen: number; runtime: string; ready: boolean; managed: boolean; runId?: string }>();
   private assistantInFlight = 0;
   private prescreenInFlight = 0;
@@ -235,6 +239,12 @@ export class ApiRouter {
 
   private rateLimit(key: string, limit: number): void {
     const now = Date.now();
+    if (now >= this.nextTrafficSweep) {
+      for (const [id, timestamps] of this.traffic) {
+        if (timestamps[timestamps.length - 1] <= now - 60_000) this.traffic.delete(id);
+      }
+      this.nextTrafficSweep = now + 60_000;
+    }
     const events = this.traffic.get(key) ?? [];
     while (events.length > 0 && events[0] <= now - 60_000) {
       events.shift();
@@ -424,7 +434,7 @@ export class ApiRouter {
       res.setHeader("Access-Control-Allow-Origin", meta.corsOrigin);
       res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Visitor-Id");
     }
     if (req.method === "HEAD" || body.length === 0) {
       res.end();
@@ -498,6 +508,18 @@ export class ApiRouter {
         return;
       }
 
+      const feedbackPath = parts[0] === 'projects' && ['portal', 'widget-feedback'].includes(parts[2]);
+      if (feedbackPath) {
+        if (method === 'OPTIONS' && parts[2] === 'widget-feedback') {
+          this.checkWidgetOrigin(req, this.store.getProjectRow(parts[1]).allowed_origins, meta);
+          this.sendJson(req,res,204,null,meta);
+        } else {
+          const result = await this.handleFeedback(req, method, parts, meta);
+          this.sendJson(req,res,200,result,meta);
+        }
+        return;
+      }
+
       const isPublicPath =
         parts.length === 3 &&
         parts[0] === "projects" &&
@@ -550,6 +572,17 @@ export class ApiRouter {
       ) {
         const result = await this.handleProjectExecutionRouting(req, method, parts[1]);
         this.sendJson(req, res, 200, result, meta);
+        return;
+      }
+
+      if (parts[0] === 'projects' && parts[2] === 'portal-links') {
+        const data = method === 'POST' || method === 'PATCH' ? await this.readJson(req, 8192) : {};
+        const result = this.store.transaction(method !== 'GET', () => manageLinks(this.store, parts[1], method, parts.slice(3), data));
+        this.sendJson(req,res,200,result,meta);
+        return;
+      }
+      if (parts.length === 3 && parts[0] === 'projects' && parts[2] === 'deploy-gates' && method === 'GET') {
+        this.sendJson(req,res,200,{evaluations:listDeployGates(this.store,parts[1])},meta);
         return;
       }
 
@@ -851,7 +884,7 @@ export class ApiRouter {
       this.sendJson(req, res, 200, result, meta);
     } catch (err) {
       if (err instanceof ApiError) {
-        this.sendJson(req, res, err.status, { error: err.message }, meta);
+        this.sendJson(req, res, err.status, err instanceof PortalAccessError ? {error:err.message, code:err.code} : { error: err.message }, meta);
         return;
       }
       if (
@@ -2509,6 +2542,164 @@ export class ApiRouter {
     throw new ApiError(404, "Unknown Codex chat endpoint");
   }
 
+  private releaseWindow(projectId: string): string {
+    const policy = this.store.getProjectDeployPolicy(projectId);
+    return policy.mode === "scheduled"
+      ? `${policy.window_start}–${policy.window_end} (${policy.timezone})`
+      : policy.mode === "manual"
+        ? "由管理员安排发布"
+        : "";
+  }
+
+  private widgetIdentity(projectId: string, req: IncomingMessage) {
+    return {
+      kind: "widget" as const,
+      visitorId: widgetVisitorDigest(projectId, req.headers["x-visitor-id"]),
+      canRequestDeploy: deployGateAvailable(this.store, projectId, true),
+    };
+  }
+
+  private scheduleFeedback(project: RawProjectRow, taskId: string) {
+    if (project.automation_paused) return;
+    if (this.store.getProjectExecutionRouting(project.id).auto_dispatch_tasks)
+      this.taskDispatcher.schedule(project.id);
+    else this.schedulePrescreen(project, this.store.getTaskRow(taskId));
+  }
+
+  private async handleFeedback(
+    req: IncomingMessage,
+    method: string,
+    parts: string[],
+    meta: { corsOrigin?: string },
+  ) {
+    const [, projectId, entry, resource, taskId, action] = parts;
+    const widget = entry === "widget-feedback";
+    const authenticate = () => {
+      if (widget) {
+        const p = this.store.getProjectRow(projectId);
+        this.checkWidgetOrigin(req, p.allowed_origins, meta);
+        this.checkBearer(req, p.intake_key);
+        return this.widgetIdentity(projectId, req);
+      }
+      const origin = req.headers.origin;
+      if (
+        (origin &&
+          origin !== `https://${req.headers.host}` &&
+          origin !== `http://${req.headers.host}`) ||
+        req.headers["sec-fetch-site"] === "cross-site"
+      )
+        throw new ApiError(403, "请在反馈面板中执行操作。");
+      const id = portalIdentity(this.store, projectId, req);
+      id.canRequestDeploy &&= deployGateAvailable(this.store, projectId);
+      return id;
+    };
+    const id = authenticate();
+    const p = this.store.getProjectRow(projectId);
+    const key = id.kind === "widget" ? id.visitorId : id.deviceId;
+    if (method === "GET" && parts.length === 4 && resource === "config") {
+      return {
+        project_name: p.name,
+        label: id.kind === "portal" ? id.label : "本机访客",
+        can_view_team: id.kind === "portal" && id.canViewTeam,
+        can_request_deploy: id.canRequestDeploy,
+        release_window: this.releaseWindow(projectId),
+        upload_enabled: isR2ConfigComplete(
+          getEffectiveR2Config(this.store.dbPath),
+        ),
+        ai_enabled: projectPublicAiEnabled(this.store.dbPath, p.id),
+      };
+    }
+    if (method === "POST") {
+      this.rateLimit(`${projectId}:feedback-write`, 160);
+      this.rateLimit(`${projectId}:feedback:${key}`, 30);
+      if (parts.length === 4 && resource === "uploads")
+        return this.readAndUploadImage(req, projectId, authenticate);
+    }
+    const data = method === "POST" ? await this.readJson(req) : {};
+    // Body streaming yields to revocations and policy changes. Reauthorize before committing.
+    const actor = method === "POST" ? authenticate() : id;
+    if (parts.length === 4 && resource === "clarify" && method === "POST") {
+      this.rateLimit(`${projectId}:clarify`, 20);
+      if (this.assistantInFlight >= this.maxAssistantSlots)
+        throw new ApiError(429, "助手繁忙，请稍后再试。");
+      this.assistantInFlight++;
+      try {
+        const reply = await intakeReply(
+          this.store.dbPath,
+          projectId,
+          field(data, "body", 8000),
+          "",
+        );
+        authenticate();
+        return { reply };
+      } finally {
+        this.assistantInFlight--;
+      }
+    }
+    if (resource !== "tasks") throw new ApiError(404, "未知反馈操作。");
+    if (parts.length === 4 && method === "GET") {
+      const team =
+        new URL(req.url || "/", "http://localhost").searchParams.get(
+          "scope",
+        ) === "team";
+      return listFeedbackTickets(
+        this.store,
+        projectId,
+        actor,
+        team ? "team" : "mine",
+      );
+    }
+    if (parts.length === 4 && method === "POST") {
+      const result = createFeedbackTicket(this.store, projectId, actor, data);
+      if (result.created) this.scheduleFeedback(p, result.task.id);
+      return {task: result.task, messages: result.messages, gate: latestDeployGate(this.store, projectId, result.task.id)};
+    }
+    if (parts.length === 5 && method === "GET")
+      return {
+        ...getFeedbackTicket(this.store, projectId, actor, taskId),
+        gate: latestDeployGate(this.store, projectId, taskId),
+      };
+    if (parts.length === 6 && method === "POST") {
+      if (action === "reply" || action === "accept") {
+        if (action === "accept" && typeof data.resolved !== "boolean")
+          throw new ApiError(400, "请选择验收结果。");
+        const result =
+          action === "reply"
+            ? replyFeedbackTicket(
+                this.store,
+                projectId,
+                actor,
+                taskId,
+                field(data, "body", 8000),
+              )
+            : acceptFeedbackTicket(
+                this.store,
+                projectId,
+                actor,
+                taskId,
+                data.resolved ? "resolved" : "still_broken",
+                field(data, "body", 8000, false),
+              );
+        if (this.store.getTaskRow(taskId).status === "ready")
+          this.taskDispatcher.schedule(projectId);
+        return {...result, gate: latestDeployGate(this.store, projectId, taskId)};
+      }
+      if (action === "deploy-request") {
+        return this.store.transaction(true, () => {
+          authorizeFeedbackDeployRequest(this.store, projectId, actor, taskId);
+          const gate = requestDeployGate(this.store, projectId, taskId, {
+            label: actor.kind === "portal" ? actor.label : "本机访客",
+            deviceId: actor.kind === "portal" ? actor.deviceId : null,
+            source: actor.kind,
+            reason: field(data, "reason", 500, false),
+          });
+          return { gate };
+        });
+      }
+    }
+    throw new ApiError(404, "未知反馈操作。");
+  }
+
   private handleWidgetConfig(
     req: IncomingMessage,
     projectId: string,
@@ -2526,6 +2717,9 @@ export class ApiRouter {
       project_id: project.id,
       project_name: project.name,
       ai_enabled: aiEnabled,
+      tracking_enabled:true,
+      can_request_deploy:deployGateAvailable(this.store,projectId,true),
+      release_window:this.releaseWindow(projectId),
       code_context_enabled: Boolean(
         aiEnabled && project.widget_code_context && project.repos.length > 0,
       ),
@@ -2546,18 +2740,43 @@ export class ApiRouter {
       this.rateLimit(`${row.id}:upload`, 30);
     });
 
-    const contentType = (req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+    return this.readAndUploadImage(req,projectId);
+  }
+
+  private async readAndUploadImage(
+    req: IncomingMessage,
+    projectId: string,
+    reauthorize?: () => unknown,
+  ) {
+    const contentType = (req.headers["content-type"] || "")
+      .split(";")[0]
+      .trim()
+      .toLowerCase();
+    let image: { buffer: Buffer; mime: string };
     if (contentType === "application/json") {
       const data = await this.readJson(req, 7_600_000);
-      const dataUrl = field(data, "data_url", 7_400_000);
-      const { buffer, mime } = parseDataUrlImage(dataUrl);
-      return await uploadProjectImage(this.store.dbPath, projectId, buffer, mime);
+      image = parseDataUrlImage(field(data, "data_url", 7_400_000));
+    } else if (contentType.startsWith("image/")) {
+      image = {
+        buffer: await this.readBinary(req, MAX_UPLOAD_BYTES),
+        mime: contentType,
+      };
+    } else throw new ApiError(415, "请上传图片。");
+    reauthorize?.();
+    try {
+      return await uploadProjectImage(
+        this.store.dbPath,
+        projectId,
+        image.buffer,
+        image.mime,
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.status < 500) throw err;
+      throw new ApiError(
+        err instanceof ApiError ? err.status : 503,
+        "图片存储暂不可用，请稍后重试或直接提交文字反馈。",
+      );
     }
-    if (contentType.startsWith("image/")) {
-      const buffer = await this.readBinary(req, MAX_UPLOAD_BYTES);
-      return await uploadProjectImage(this.store.dbPath, projectId, buffer, contentType);
-    }
-    throw new ApiError(415, "Send image/* binary or application/json with data_url");
   }
 
   private async handleWidgetChatStream(
@@ -2644,7 +2863,7 @@ export class ApiRouter {
       res.setHeader("Access-Control-Allow-Origin", meta.corsOrigin);
       res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Visitor-Id");
     }
     res.flushHeaders?.();
 
@@ -2935,11 +3154,20 @@ export class ApiRouter {
         }
         this.checkBearer(req, source === "bot" ? project.bot_key : project.intake_key);
         this.rateLimit(`${projectId}:intake`, 120);
-        const created = this.store.createTask(projectId, data, source);
+        if (source === 'widget' && req.headers['x-visitor-id'] !== undefined) {
+          const actor = this.widgetIdentity(projectId,req);
+          const images = Array.isArray(data.attachments) ? data.attachments.map(a => typeof a === 'string' ? a : a?.url) : [];
+          const {task, created} = createFeedbackTicket(this.store,projectId,actor,{...data, images});
+          if (created) postCommit.push(() => this.scheduleFeedback(project,task.id));
+          return {task_id:task.id,number:this.store.getTaskRow(task.id).number};
+        }
+        // Keep legacy widget priority hints, but never let an anonymous draft bypass the release window.
+        const legacyInput = source === "widget" && data.priority === "urgent" ? {...data, priority: "high"} : data;
+        const created = this.store.createTask(projectId, legacyInput, source);
         const routing = this.store.getProjectExecutionRouting(projectId);
         if (!project.automation_paused && routing.auto_dispatch_tasks) {
           postCommit.push(() => this.taskDispatcher.schedule(projectId));
-        } else if (data.skip_prescreen !== true) {
+        } else if (source === 'widget' || data.skip_prescreen !== true) {
           postCommit.push(() => this.schedulePrescreen(project, created));
         }
         return { task_id: created.id, number: created.number };
@@ -2988,9 +3216,11 @@ export class ApiRouter {
         const res = this.store.operatorAddComment(
           taskRow.id,
           field(data, "body", 12000),
-          data.reopen !== false,
+          data.public_question ? false : data.reopen !== false,
         );
-        if (res.task.owner === "none" && (res.task.status === "ready" || res.task.status === "triage")) {
+        if (data.public_question) {
+          addPublicFeedbackQuestion(this.store, taskRow.project_id, taskRow.id, data.public_question, 'human');
+        } else if (res.task.owner === "none" && (res.task.status === "ready" || res.task.status === "triage")) {
           postCommit.push(() => this.taskDispatcher.schedule(taskRow.project_id));
         }
         return { ...res, task: this.store.getTaskView(taskRow.id) };

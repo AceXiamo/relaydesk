@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequestListener } from "@react-router/node";
 import type { ServerBuild } from "react-router";
 import { ApiRouter } from "./server/api.ts";
+import { redeemPortalLink } from "./server/portal-access.ts";
 import { BridgeHub, type BridgeHubOptions } from "./server/bridge-hub.ts";
 import { Store } from "./server/store.ts";
 import { WalletAuth } from "./server/wallet.ts";
@@ -164,6 +165,19 @@ export async function startRelaydeskServer(
 
     const method = (req.method ?? "GET").toUpperCase();
 
+    const portalPage = /^\/p\/([a-zA-Z0-9_-]+)\/?$/.exec(pathname);
+    if (portalPage && method === 'GET') {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      res.setHeader('X-Frame-Options', 'DENY');
+      const token = new URL(rawUrl, 'http://localhost').searchParams.get('token');
+      if (token !== null) {
+        try { redeemPortalLink(store, portalPage[1], token, req, res); }
+        catch { res.writeHead(503, {'Content-Type':'text/plain; charset=utf-8'}).end('反馈面板暂时不可用，请稍后重试。'); }
+        return;
+      }
+    }
+
     // Always serve widget.js, widget-capture.js & local fonts directly from public/
     if ((method === "GET" || method === "HEAD") && pathname === "/widget.js") {
       if (serveStaticFile(req, res, join(publicDir, "widget.js"), { corsAny: true })) {
@@ -215,6 +229,7 @@ export async function startRelaydeskServer(
       api.wallet &&
       method === "GET" &&
       pathname !== "/login" &&
+      !portalPage &&
       !pathname.startsWith("/@") &&
       !pathname.startsWith("/assets/") &&
       !pathname.startsWith("/node_modules/") &&
