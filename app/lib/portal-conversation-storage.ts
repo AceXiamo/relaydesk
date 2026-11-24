@@ -31,6 +31,7 @@ export interface StoredPortalConversation {
   turns: PortalConversationTurn[];
   draft: PortalEditableDraftState | null;
   submittedTaskCode?: string;
+  pendingDiagnoseAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -44,6 +45,32 @@ const STORAGE_PREFIX = "relaydesk:portal:conversations:v1:";
 const MAX_STORED_CONVERSATIONS = 20;
 const MAX_TURNS_PER_SESSION = 60;
 const MAX_REASONING_STORED = 12_000;
+const PENDING_DIAGNOSE_RESUME_WINDOW_MS = 5 * 60 * 1000;
+
+export function hasUnansweredUserTurn(
+  turns: readonly PortalConversationTurn[],
+): boolean {
+  if (turns.length === 0) return false;
+  const last = turns[turns.length - 1];
+  if (last.role === "user") return true;
+  // An assistant turn without a finalized outcome means streaming was cut off.
+  return last.role === "assistant" && !last.outcome;
+}
+
+export function isPendingDiagnoseFresh(
+  pendingDiagnoseAt: number | undefined,
+  now = Date.now(),
+): boolean {
+  if (
+    typeof pendingDiagnoseAt !== "number" ||
+    !Number.isFinite(pendingDiagnoseAt) ||
+    pendingDiagnoseAt <= 0
+  ) {
+    return false;
+  }
+  const age = now - pendingDiagnoseAt;
+  return age >= -60_000 && age <= PENDING_DIAGNOSE_RESUME_WINDOW_MS;
+}
 
 function storageKey(projectId: string): string {
   return `${STORAGE_PREFIX}${projectId}`;
@@ -164,6 +191,12 @@ function sanitizeSession(raw: unknown): StoredPortalConversation | null {
     typeof obj.submittedTaskCode === "string" && obj.submittedTaskCode.trim()
       ? obj.submittedTaskCode.trim()
       : undefined;
+  const pendingDiagnoseAt =
+    typeof obj.pendingDiagnoseAt === "number" &&
+    Number.isFinite(obj.pendingDiagnoseAt) &&
+    obj.pendingDiagnoseAt > 0
+      ? obj.pendingDiagnoseAt
+      : undefined;
 
   return {
     id: obj.id,
@@ -171,6 +204,7 @@ function sanitizeSession(raw: unknown): StoredPortalConversation | null {
     turns,
     draft,
     ...(submittedTaskCode ? { submittedTaskCode } : {}),
+    ...(pendingDiagnoseAt !== undefined ? { pendingDiagnoseAt } : {}),
     createdAt,
     updatedAt,
   };

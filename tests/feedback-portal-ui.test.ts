@@ -13,6 +13,8 @@ import {
 import { PortalFeedbackConversation } from "../app/components/PortalFeedbackConversation.tsx";
 import { FeedbackAgentSettingsCard } from "../app/components/FeedbackAgentSettingsCard.tsx";
 import { ToastProvider } from "../app/components/ui.tsx";
+import { PortalApiError } from "../app/lib/portal-api.ts";
+import { upsertPortalConversation } from "../app/lib/portal-conversation-storage.ts";
 import type { PortalConfig, PortalTaskDetail } from "../app/lib/portal-types.ts";
 import type { ProjectDetail } from "../app/lib/types.ts";
 
@@ -604,15 +606,14 @@ describe("PortalFeedbackConversation UI", () => {
     await sendMsg("第二次提问：如何配置通知");
     expect(container.textContent).toContain("第二段助手回复");
 
-    // Open history popover and switch back to the first conversation
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="portal-history-toggle"]')!
-        .click();
-    });
+    // History sidebar list is visible directly (no floating popover)
+    expect(container.querySelector('[data-testid="portal-history-sidebar"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="portal-history-popover"]')).toBeNull();
+
     const historyItems = container.querySelectorAll('[data-testid="portal-history-item"]');
     expect(historyItems).toHaveLength(2);
 
+    // Switch back to the first conversation directly from the sidebar list
     const firstHistoryBtn = Array.from(historyItems)
       .find((el) => el.textContent?.includes("第一次提问：导出失败"))!
       .querySelector<HTMLButtonElement>("button")!;
@@ -623,12 +624,21 @@ describe("PortalFeedbackConversation UI", () => {
     expect(container.textContent).toContain("第一段助手回复");
     expect(container.textContent).not.toContain("第二段助手回复");
 
-    // Delete the active conversation from history
+    // Sidebar can be collapsed and expanded via the left toggle
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="portal-history-toggle"]')!
         .click();
     });
+    expect(container.querySelector('[data-testid="portal-history-sidebar"]')).toBeNull();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-history-toggle"]')!
+        .click();
+    });
+    expect(container.querySelector('[data-testid="portal-history-sidebar"]')).not.toBeNull();
+
+    // Delete the active conversation from the sidebar list
     const activeDeleteBtn = container.querySelector<HTMLButtonElement>(
       '[data-testid="portal-history-item"][data-active="true"] [data-testid="portal-history-delete"]',
     )!;
@@ -639,6 +649,229 @@ describe("PortalFeedbackConversation UI", () => {
     expect(container.querySelectorAll('[data-testid="portal-history-item"]')).toHaveLength(1);
     expect(container.querySelectorAll('[data-testid="portal-turn-user"]')).toHaveLength(0);
     window.localStorage.clear();
+  });
+
+  it("auto-resumes an in-flight diagnosis after an immediate page refresh", async () => {
+    window.localStorage.clear();
+    const projectId = "proj-refresh-resume";
+
+    let secondResolve!: (res: { reply: string; outcome: "usage" }) => void;
+    const onDiagnose = vi
+      .fn()
+      // First call stays pending until unmount simulates immediate refresh
+      .mockImplementationOnce(
+        (_payload, signal?: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () => {
+              reject(new DOMException("Aborted", "AbortError"));
+            });
+          }),
+      )
+      // Second call after remount succeeds
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            secondResolve = resolve;
+          }),
+      );
+
+    const renderPortal = async () => {
+      await act(async () => {
+        root.render(
+          createElement(
+            ToastProvider,
+            null,
+            createElement(PortalFeedbackConversation, {
+              projectId,
+              config: baseConfig,
+              stagedImages: [],
+              onUploadFiles: vi.fn(),
+              onRemoveStagedImage: vi.fn(),
+              onClearStagedImages: vi.fn(),
+              onOpenLightbox: vi.fn(),
+              onDiagnose,
+              onCreateTask: vi.fn(),
+              onSwitchToManual: vi.fn(),
+              onPossibleAuthError: () => false,
+            }),
+          ),
+        );
+      });
+    };
+
+    await renderPortal();
+
+    const input = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="portal-agent-input"]',
+    )!;
+    await act(async () => {
+      setReactValue(input, "发送后立即刷新页面");
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-agent-send"]')!
+        .click();
+    });
+
+    expect(onDiagnose).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="portal-diagnosing-indicator"]'),
+    ).not.toBeNull();
+
+    // Simulate immediate browser reload while diagnosis is still in-flight
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await renderPortal();
+
+    // Should automatically resume diagnosis on remount
+    expect(onDiagnose).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelector('[data-testid="portal-diagnosing-indicator"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("自动恢复");
+
+    await act(async () => {
+      secondResolve({
+        reply: "刷新后已自动续接并完成排查。",
+        outcome: "usage",
+      });
+    });
+
+    expect(container.textContent).toContain("刷新后已自动续接并完成排查。");
+    expect(
+      container.querySelector('[data-testid="portal-diagnose-interrupted"]'),
+    ).toBeNull();
+    window.localStorage.clear();
+  });
+
+  it("shows an interrupted recovery banner with one-click retry when a loaded conversation has an unanswered user turn", async () => {
+    window.localStorage.clear();
+    const projectId = "proj-interrupted-banner";
+
+    // Seed a conversation whose last turn is an unanswered user message (no fresh pendingDiagnoseAt)
+    upsertPortalConversation(
+      projectId,
+      {
+        id: "sess-interrupted",
+        title: "刷新后中断的问题",
+        turns: [{ id: "u1", role: "user", text: "刷新后中断的问题" }],
+        draft: null,
+        createdAt: Date.now() - 60_000,
+        updatedAt: Date.now() - 60_000,
+      },
+      true,
+    );
+
+    const onDiagnose = vi.fn(async () => ({
+      reply: "已通过一键重新诊断完成排查。",
+      outcome: "clarify" as const,
+    }));
+
+    await act(async () => {
+      root.render(
+        createElement(
+          ToastProvider,
+          null,
+          createElement(PortalFeedbackConversation, {
+            projectId,
+            config: baseConfig,
+            stagedImages: [],
+            onUploadFiles: vi.fn(),
+            onRemoveStagedImage: vi.fn(),
+            onClearStagedImages: vi.fn(),
+            onOpenLightbox: vi.fn(),
+            onDiagnose,
+            onCreateTask: vi.fn(),
+            onSwitchToManual: vi.fn(),
+            onPossibleAuthError: () => false,
+          }),
+        ),
+      );
+    });
+
+    // Does not fire automatically without a fresh pending flag, but shows clear recovery banner
+    expect(onDiagnose).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="portal-diagnose-interrupted"]'),
+    ).not.toBeNull();
+
+    // One-click retry resumes diagnosis cleanly
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-diagnose-resume-retry"]')!
+        .click();
+    });
+
+    expect(onDiagnose).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("已通过一键重新诊断完成排查。");
+    expect(
+      container.querySelector('[data-testid="portal-diagnose-interrupted"]'),
+    ).toBeNull();
+    window.localStorage.clear();
+  });
+
+  it("retries once when auto-resume hits transient 409 in-flight lock after fast refresh", async () => {
+    window.localStorage.clear();
+    vi.useFakeTimers();
+    const projectId = "proj-refresh-409";
+
+    upsertPortalConversation(
+      projectId,
+      {
+        id: "sess-fast-refresh",
+        title: "快速刷新触发 409",
+        turns: [{ id: "u1", role: "user", text: "快速刷新触发 409" }],
+        draft: null,
+        pendingDiagnoseAt: Date.now(),
+        createdAt: Date.now() - 1000,
+        updatedAt: Date.now() - 1000,
+      },
+      true,
+    );
+
+    const onDiagnose = vi
+      .fn()
+      .mockRejectedValueOnce(new PortalApiError(409, "上一条诊断消息仍在处理中。"))
+      .mockResolvedValueOnce({
+        reply: "重试后恢复成功。",
+        outcome: "usage" as const,
+      });
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(
+            ToastProvider,
+            null,
+            createElement(PortalFeedbackConversation, {
+              projectId,
+              config: baseConfig,
+              stagedImages: [],
+              onUploadFiles: vi.fn(),
+              onRemoveStagedImage: vi.fn(),
+              onClearStagedImages: vi.fn(),
+              onOpenLightbox: vi.fn(),
+              onDiagnose,
+              onCreateTask: vi.fn(),
+              onSwitchToManual: vi.fn(),
+              onPossibleAuthError: () => false,
+            }),
+          ),
+        );
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(750);
+      });
+
+      expect(onDiagnose).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toContain("重试后恢复成功。");
+    } finally {
+      vi.useRealTimers();
+      window.localStorage.clear();
+    }
   });
 });
 

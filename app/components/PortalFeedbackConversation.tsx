@@ -17,6 +17,8 @@ import {
   clearPortalConversations,
   deletePortalConversation,
   deriveConversationTitle,
+  hasUnansweredUserTurn,
+  isPendingDiagnoseFresh,
   loadPortalConversationStore,
   setActivePortalConversation,
   upsertPortalConversation,
@@ -92,6 +94,24 @@ function dedupeUrls(urls: string[]): string[] {
   return out;
 }
 
+function delayAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export function PortalFeedbackConversation({
   projectId = "",
   config,
@@ -131,10 +151,15 @@ export function PortalFeedbackConversation({
   const [submittedTaskCode, setSubmittedTaskCode] = useState<string | undefined>(
     () => initialActive?.submittedTaskCode,
   );
+  const [pendingDiagnoseAt, setPendingDiagnoseAt] = useState<number | undefined>(
+    () => initialActive?.pendingDiagnoseAt,
+  );
   const [historySessions, setHistorySessions] = useState<StoredPortalConversation[]>(
     () => initialStore.sessions,
   );
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() =>
+    typeof window === "undefined" ? true : window.innerWidth >= 768,
+  );
 
   const [turns, setTurns] = useState<ConversationTurn[]>(
     () => initialActive?.turns ?? [],
@@ -160,13 +185,24 @@ export function PortalFeedbackConversation({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
-  const historyPopoverRef = useRef<HTMLDivElement | null>(null);
   const hydratedProjectRef = useRef(projectId);
+  const mountedRef = useRef(true);
+  const autoResumedRef = useRef<string | null>(null);
+
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+  const sessionCreatedAtRef = useRef(sessionCreatedAt);
+  sessionCreatedAtRef.current = sessionCreatedAt;
+  const submittedTaskCodeRef = useRef(submittedTaskCode);
+  submittedTaskCodeRef.current = submittedTaskCode;
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
 
   // Re-hydrate if projectId changes while mounted
   useEffect(() => {
     if (hydratedProjectRef.current === projectId) return;
     hydratedProjectRef.current = projectId;
+    autoResumedRef.current = null;
     abortRef.current?.abort();
     const loaded = projectId
       ? loadPortalConversationStore(projectId)
@@ -178,14 +214,14 @@ export function PortalFeedbackConversation({
     setSessionId(active?.id ?? null);
     setSessionCreatedAt(active?.createdAt ?? Date.now());
     setSubmittedTaskCode(active?.submittedTaskCode);
+    setPendingDiagnoseAt(active?.pendingDiagnoseAt);
     setTurns(active?.turns ?? []);
     setDraft(active?.draft ?? null);
     setDiagnoseError(null);
     setHistoryTrimmedHint(false);
-    setHistoryOpen(false);
   }, [projectId]);
 
-  // Persist active conversation whenever turns or draft change
+  // Persist active conversation whenever turns, draft, or pending diagnose status change
   useEffect(() => {
     if (!projectId) return;
     if (turns.length === 0) return;
@@ -202,35 +238,22 @@ export function PortalFeedbackConversation({
         turns,
         draft,
         ...(submittedTaskCode ? { submittedTaskCode } : {}),
+        ...(pendingDiagnoseAt !== undefined ? { pendingDiagnoseAt } : {}),
         createdAt: sessionCreatedAt,
         updatedAt: Date.now(),
       },
       true,
     );
     setHistorySessions(updated.sessions);
-  }, [projectId, sessionId, sessionCreatedAt, submittedTaskCode, turns, draft]);
-
-  // Close history popover on outside click or Escape
-  useEffect(() => {
-    if (!historyOpen) return;
-    const onPointerDown = (e: MouseEvent) => {
-      if (
-        historyPopoverRef.current &&
-        !historyPopoverRef.current.contains(e.target as Node)
-      ) {
-        setHistoryOpen(false);
-      }
-    };
-    const onKeyDown = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") setHistoryOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [historyOpen]);
+  }, [
+    projectId,
+    sessionId,
+    sessionCreatedAt,
+    submittedTaskCode,
+    pendingDiagnoseAt,
+    turns,
+    draft,
+  ]);
 
   useEffect(() => {
     if (!diagnosing) {
@@ -245,7 +268,9 @@ export function PortalFeedbackConversation({
   }, [diagnosing]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       abortRef.current?.abort();
     };
   }, []);
@@ -282,7 +307,11 @@ export function PortalFeedbackConversation({
   }, []);
 
   const runDiagnoseTurn = useCallback(
-    async (nextTurns: ConversationTurn[], allImageUrls: string[]) => {
+    async (
+      nextTurns: ConversationTurn[],
+      allImageUrls: string[],
+      options?: { isAutoResume?: boolean },
+    ) => {
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -297,16 +326,53 @@ export function PortalFeedbackConversation({
 
       const assistantTurnId = makeTurnId();
       const thinkingStartedAt = Date.now();
+      const initialLabel = options?.isAutoResume
+        ? "检测到上次诊断中断，正在自动恢复…"
+        : "正在分析问题与上下文…";
+
+      // Synchronously persist pendingDiagnoseAt before starting the network request
+      // so an immediate page refresh still knows a diagnosis was in-flight.
+      let activeId = sessionIdRef.current;
+      let createdAt = sessionCreatedAtRef.current;
+      if (!activeId) {
+        activeId = makeTurnId();
+        createdAt = thinkingStartedAt;
+        sessionIdRef.current = activeId;
+        sessionCreatedAtRef.current = createdAt;
+        setSessionId(activeId);
+        setSessionCreatedAt(createdAt);
+      }
+      setPendingDiagnoseAt(thinkingStartedAt);
+      if (projectId) {
+        const persisted = upsertPortalConversation(
+          projectId,
+          {
+            id: activeId,
+            title: deriveConversationTitle(nextTurns),
+            turns: nextTurns,
+            draft: draftRef.current,
+            ...(submittedTaskCodeRef.current
+              ? { submittedTaskCode: submittedTaskCodeRef.current }
+              : {}),
+            pendingDiagnoseAt: thinkingStartedAt,
+            createdAt,
+            updatedAt: thinkingStartedAt,
+          },
+          true,
+        );
+        setHistorySessions(persisted.sessions);
+      }
+
       setHistoryTrimmedHint(normalized.trimmedHistory);
       setDiagnosing(true);
-      setStatusLabel("正在分析问题与上下文…");
-      setLiveSteps(["正在分析问题与上下文…"]);
+      setStatusLabel(initialLabel);
+      setLiveSteps([initialLabel]);
       setLiveReasoning("");
       setDiagnoseError(null);
 
       let streamed = "";
       let streamedReasoning = "";
-      let collectedSteps: string[] = ["正在分析问题与上下文…"];
+      let collectedSteps: string[] = [initialLabel];
       let thinkingDurationMs: number | undefined;
       let streamStarted = false;
 
@@ -319,15 +385,15 @@ export function PortalFeedbackConversation({
         }
       };
 
-      try {
-        const res = await onDiagnose(
+      const executeDiagnose = () =>
+        onDiagnose(
           {
             messages: normalized.messages,
             ...(normalized.images.length ? { images: normalized.images } : {}),
           },
           controller.signal,
           (ev) => {
-            if (controller.signal.aborted) return;
+            if (controller.signal.aborted || !mountedRef.current) return;
             if (ev.type === "status") {
               const nextLabel = ev.label || "正在排查问题…";
               setStatusLabel(nextLabel);
@@ -391,7 +457,27 @@ export function PortalFeedbackConversation({
             }
           },
         );
-        if (controller.signal.aborted) return;
+
+      try {
+        let res: FeedbackDiagnoseResponse;
+        try {
+          res = await executeDiagnose();
+        } catch (firstErr) {
+          // On immediate page refresh, the server may still be closing the previous SSE
+          // connection and briefly return 409 ("上一条诊断消息仍在处理中"). Retry once.
+          const isTransientInFlight =
+            options?.isAutoResume &&
+            firstErr instanceof PortalApiError &&
+            firstErr.status === 409 &&
+            firstErr.message.includes("仍在处理中");
+          if (!isTransientInFlight || controller.signal.aborted) {
+            throw firstErr;
+          }
+          await delayAbortable(700, controller.signal);
+          if (controller.signal.aborted || !mountedRef.current) return;
+          res = await executeDiagnose();
+        }
+        if (controller.signal.aborted || !mountedRef.current) return;
 
         const finalText = (res.reply || streamed).trim();
         const finalReasoning = (res.reasoning || streamedReasoning).trim() || undefined;
@@ -447,6 +533,9 @@ export function PortalFeedbackConversation({
 
         scrollToLatest();
       } catch (err) {
+        // If unmounted (e.g. page reload), leave pendingDiagnoseAt intact in storage
+        // so the reloaded page can automatically resume the interrupted request.
+        if (!mountedRef.current) return;
         if (streamStarted) {
           setTurns((prev) =>
             prev.map((item) =>
@@ -466,7 +555,8 @@ export function PortalFeedbackConversation({
         if (onPossibleAuthError(err)) return;
         const isOffline =
           err instanceof PortalApiError &&
-          (err.status === 503 || err.status === 409);
+          (err.status === 503 ||
+            (err.status === 409 && !err.message.includes("仍在处理中")));
         const message =
           err instanceof Error
             ? err.message
@@ -476,13 +566,50 @@ export function PortalFeedbackConversation({
         if (abortRef.current === controller) {
           abortRef.current = null;
         }
-        setDiagnosing(false);
-        setLiveReasoning("");
-        setLiveSteps([]);
+        if (mountedRef.current) {
+          setDiagnosing(false);
+          setPendingDiagnoseAt(undefined);
+          setLiveReasoning("");
+          setLiveSteps([]);
+        }
       }
     },
-    [onDiagnose, onPossibleAuthError, scrollToLatest],
+    [onDiagnose, onPossibleAuthError, projectId, scrollToLatest],
   );
+
+  // Automatically resume an in-flight diagnosis interrupted by a page refresh.
+  useEffect(() => {
+    if (!sessionId || pendingDiagnoseAt === undefined) return;
+    if (diagnosing) return;
+    if (autoResumedRef.current === sessionId) return;
+    if (!hasUnansweredUserTurn(turns)) {
+      setPendingDiagnoseAt(undefined);
+      return;
+    }
+    if (
+      !isPendingDiagnoseFresh(pendingDiagnoseAt) ||
+      config.agent_available === false
+    ) {
+      setPendingDiagnoseAt(undefined);
+      return;
+    }
+    autoResumedRef.current = sessionId;
+    const cleanTurns = turns.filter(
+      (t) => !(t.role === "assistant" && !t.outcome),
+    );
+    if (cleanTurns.length !== turns.length) {
+      setTurns(cleanTurns);
+    }
+    const imgs = dedupeUrls(cleanTurns.flatMap((t) => t.images ?? [])).slice(-6);
+    void runDiagnoseTurn(cleanTurns, imgs, { isAutoResume: true });
+  }, [
+    config.agent_available,
+    diagnosing,
+    pendingDiagnoseAt,
+    runDiagnoseTurn,
+    sessionId,
+    turns,
+  ]);
 
   const handleSend = useCallback(
     async (e?: FormEvent) => {
@@ -543,22 +670,54 @@ export function PortalFeedbackConversation({
     void runDiagnoseTurn(cleanTurns, conversationImages);
   };
 
+  const clearOutgoingPendingFlag = useCallback(() => {
+    if (!projectId || !sessionIdRef.current || turns.length === 0) return;
+    if (pendingDiagnoseAt === undefined && !diagnosing) return;
+    upsertPortalConversation(
+      projectId,
+      {
+        id: sessionIdRef.current,
+        title: deriveConversationTitle(turns),
+        turns,
+        draft,
+        ...(submittedTaskCode ? { submittedTaskCode } : {}),
+        createdAt: sessionCreatedAt,
+        updatedAt: Date.now(),
+      },
+      false,
+    );
+  }, [
+    diagnosing,
+    draft,
+    pendingDiagnoseAt,
+    projectId,
+    sessionCreatedAt,
+    submittedTaskCode,
+    turns,
+  ]);
+
   const handleStop = () => {
+    setPendingDiagnoseAt(undefined);
     abortRef.current?.abort();
   };
 
   const handleResetConversation = () => {
+    clearOutgoingPendingFlag();
     abortRef.current?.abort();
+    autoResumedRef.current = null;
     setSessionId(null);
     setSessionCreatedAt(Date.now());
     setSubmittedTaskCode(undefined);
+    setPendingDiagnoseAt(undefined);
     setTurns([]);
     setDraft(null);
     setDiagnoseError(null);
     setHistoryTrimmedHint(false);
-    setHistoryOpen(false);
     setInput("");
     onClearStagedImages();
+    if (typeof window !== "undefined" && window.innerWidth < 768) {
+      setSidebarOpen(false);
+    }
     if (projectId) {
       const updated = setActivePortalConversation(projectId, null);
       setHistorySessions(updated.sessions);
@@ -567,15 +726,22 @@ export function PortalFeedbackConversation({
   };
 
   const handleSelectHistorySession = (session: StoredPortalConversation) => {
+    clearOutgoingPendingFlag();
     abortRef.current?.abort();
+    // Mark as already handled so switching to a historical session never auto-fires a network call;
+    // if its last turn is unanswered, the inline recovery banner offers one-click retry.
+    autoResumedRef.current = session.id;
     setSessionId(session.id);
     setSessionCreatedAt(session.createdAt);
     setSubmittedTaskCode(session.submittedTaskCode);
+    setPendingDiagnoseAt(undefined);
     setTurns(session.turns);
     setDraft(session.draft);
     setDiagnoseError(null);
     setHistoryTrimmedHint(false);
-    setHistoryOpen(false);
+    if (typeof window !== "undefined" && window.innerWidth < 768) {
+      setSidebarOpen(false);
+    }
     if (projectId) {
       const updated = setActivePortalConversation(projectId, session.id);
       setHistorySessions(updated.sessions);
@@ -589,9 +755,11 @@ export function PortalFeedbackConversation({
     setHistorySessions(updated.sessions);
     if (sessionId === targetId) {
       abortRef.current?.abort();
+      autoResumedRef.current = null;
       setSessionId(null);
       setSessionCreatedAt(Date.now());
       setSubmittedTaskCode(undefined);
+      setPendingDiagnoseAt(undefined);
       setTurns([]);
       setDraft(null);
       setDiagnoseError(null);
@@ -601,15 +769,16 @@ export function PortalFeedbackConversation({
   const handleClearAllHistory = () => {
     if (!projectId) return;
     abortRef.current?.abort();
+    autoResumedRef.current = null;
     clearPortalConversations(projectId);
     setHistorySessions([]);
     setSessionId(null);
     setSessionCreatedAt(Date.now());
     setSubmittedTaskCode(undefined);
+    setPendingDiagnoseAt(undefined);
     setTurns([]);
     setDraft(null);
     setDiagnoseError(null);
-    setHistoryOpen(false);
   };
 
   const handleSwitchManualClick = () => {
@@ -697,6 +866,9 @@ export function PortalFeedbackConversation({
   const nearCharLimit = input.length >= Math.floor(DIAGNOSE_MAX_MESSAGE_CHARS * 0.75);
   const hasConversation = turns.length > 0;
   const activeStreamingTurn = turns.find((t) => t.streaming);
+  const hasHistory = Boolean(projectId && historySessions.length > 0);
+  const hasInterruptedTurn =
+    !diagnosing && !diagnoseError && hasUnansweredUserTurn(turns);
 
   useEffect(() => {
     onConversationActiveChange?.(hasConversation);
@@ -884,175 +1056,231 @@ export function PortalFeedbackConversation({
     >
       <div
         className={cn(
-          "relative flex-1 flex flex-col min-h-[460px] h-[calc(100dvh-7.25rem)] rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] transition-all duration-150 overflow-hidden animate-rd-portal-in",
+          "relative flex-1 flex min-h-[460px] h-[calc(100dvh-7.25rem)] rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] transition-all duration-150 overflow-hidden animate-rd-portal-in",
           dragOver && "shadow-[0_0_0_1.5px_var(--p-cobalt),var(--p-shadow-card)]",
         )}
       >
-        {/* Compact Conversation Top Bar */}
-        <div className="shrink-0 px-3.5 py-2 border-b border-[var(--p-line)] bg-[var(--p-page)]/75 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-[11.5px] text-[var(--p-ink-2)] min-w-0">
-            <LivePulseDot tone="emerald" active />
-            <span className="font-semibold text-[var(--p-ink)] truncate">
-              {config.project_name} · 反馈诊断
-            </span>
-            <span className="hidden sm:inline px-1.5 py-0.5 rounded-[4px] bg-[var(--p-forest-tint)] text-[var(--p-forest)] text-[10.5px] font-medium">
-              确认前不建单
-            </span>
-            {config.release_window && (
-              <span className="hidden md:inline-flex items-center gap-1 text-[10.5px] text-[var(--p-ink-3)] truncate">
-                <Icon name="calendar-clock" size={11} />
-                <span>窗口 {config.release_window}</span>
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-1 shrink-0">
-            {projectId && historySessions.length > 0 && (
-              <div ref={historyPopoverRef} className="relative">
+        {/* Dedicated Conversation History Sidebar List */}
+        {hasHistory && sidebarOpen && (
+          <>
+            {/* Mobile backdrop when sidebar overlays the thread */}
+            <button
+              type="button"
+              aria-label="关闭对话列表"
+              onClick={() => setSidebarOpen(false)}
+              className="md:hidden absolute inset-0 z-10 bg-zinc-950/30 backdrop-blur-[1px]"
+            />
+            <aside
+              data-testid="portal-history-sidebar"
+              aria-label="历史对话列表"
+              className="absolute md:static inset-y-0 left-0 z-20 w-[224px] max-w-[82%] md:w-[216px] shrink-0 border-r border-[var(--p-line)] bg-[var(--p-page)] md:bg-[var(--p-page)]/70 flex flex-col min-h-0"
+            >
+              <div className="shrink-0 px-2.5 py-2 border-b border-[var(--p-line)] flex items-center justify-between gap-1.5">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <Icon
+                    name="message-square"
+                    size={12}
+                    className="text-[var(--p-ink-3)] shrink-0"
+                  />
+                  <span className="text-[11.5px] font-semibold text-[var(--p-ink)] truncate">
+                    对话记录
+                  </span>
+                  <span className="px-1 py-0.2 rounded-[4px] bg-[var(--p-field)] text-[10px] font-mono tabular-nums text-[var(--p-ink-3)]">
+                    {historySessions.length}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  data-testid="portal-sidebar-new-conversation"
+                  onClick={handleResetConversation}
+                  disabled={confirming}
+                  title="新建对话"
+                  className="inline-flex items-center gap-1 h-6 px-1.5 rounded-[5px] bg-[var(--p-field)] text-[10.5px] font-medium text-[var(--p-ink)] shadow-[var(--p-shadow-hairline)] hover:bg-[var(--p-hover)] transition-colors disabled:opacity-50 cursor-pointer shrink-0"
+                >
+                  <Icon name="plus" size={11} />
+                  <span>新对话</span>
+                </button>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto rd-scroll p-1.5 space-y-0.5">
+                {historySessions.map((session) => {
+                  const isActive = session.id === sessionId;
+                  const isRunningThis = isActive && diagnosing;
+                  const lastAssistant = [...session.turns]
+                    .reverse()
+                    .find((t) => t.role === "assistant");
+                  const hasOpenDraft = Boolean(
+                    session.draft && !session.draft.dismissed,
+                  );
+                  const isUnanswered =
+                    !isRunningThis && hasUnansweredUserTurn(session.turns);
+                  return (
+                    <div
+                      key={session.id}
+                      data-testid="portal-history-item"
+                      data-active={isActive ? "true" : "false"}
+                      className={cn(
+                        "group relative flex items-start gap-1.5 rounded-[7px] px-2 py-1.5 transition-colors",
+                        isActive
+                          ? "bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)]"
+                          : "hover:bg-[var(--p-hover)]/70",
+                      )}
+                    >
+                      {isActive && (
+                        <span
+                          aria-hidden="true"
+                          className="absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-full bg-[var(--p-cobalt)]"
+                        />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleSelectHistorySession(session)}
+                        className="flex-1 min-w-0 text-left space-y-1 cursor-pointer pl-0.5"
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className={cn(
+                              "text-[11.5px] font-medium truncate leading-snug",
+                              isActive
+                                ? "text-[var(--p-cobalt)]"
+                                : "text-[var(--p-ink)]",
+                            )}
+                          >
+                            {session.title}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1 text-[10px] text-[var(--p-ink-3)]">
+                          <span className="tabular-nums">
+                            {formatRelativeTime(
+                              new Date(session.updatedAt).toISOString(),
+                            )}
+                          </span>
+                          <span>·</span>
+                          <span className="tabular-nums">
+                            {session.turns.length} 条
+                          </span>
+                          {isRunningThis ? (
+                            <span className="inline-flex items-center gap-1 px-1 py-0.2 rounded-[3px] bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)]">
+                              <LivePulseDot tone="emerald" active />
+                              <span>诊断中</span>
+                            </span>
+                          ) : session.submittedTaskCode ? (
+                            <span className="px-1 py-0.2 rounded-[3px] bg-[var(--p-forest-tint)] text-[var(--p-forest)] font-mono">
+                              {session.submittedTaskCode}
+                            </span>
+                          ) : hasOpenDraft ? (
+                            <span className="px-1 py-0.2 rounded-[3px] bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]">
+                              待确认
+                            </span>
+                          ) : isUnanswered ? (
+                            <span className="px-1 py-0.2 rounded-[3px] bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]">
+                              未完成
+                            </span>
+                          ) : lastAssistant?.outcome === "usage" ? (
+                            <span className="px-1 py-0.2 rounded-[3px] bg-[var(--p-forest-tint)] text-[var(--p-forest)]">
+                              已解答
+                            </span>
+                          ) : null}
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="删除对话"
+                        data-testid="portal-history-delete"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteHistorySession(session.id);
+                        }}
+                        className="w-5 h-5 rounded-[4px] inline-flex items-center justify-center text-[var(--p-ink-3)] opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-[var(--p-vermilion)] hover:bg-[var(--p-vermilion-tint)] transition-all shrink-0 mt-0.5 cursor-pointer"
+                      >
+                        <Icon name="x" size={11} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="shrink-0 px-2.5 py-1.5 border-t border-[var(--p-line)]/80 flex items-center justify-between gap-2 text-[10.5px] text-[var(--p-ink-3)]">
+                <span>本地保存</span>
+                <button
+                  type="button"
+                  data-testid="portal-history-clear"
+                  onClick={handleClearAllHistory}
+                  className="text-[10.5px] text-[var(--p-ink-3)] hover:text-[var(--p-vermilion)] transition-colors cursor-pointer"
+                >
+                  清空全部
+                </button>
+              </div>
+            </aside>
+          </>
+        )}
+
+        {/* Main Chat Pane */}
+        <div className="flex-1 min-w-0 flex flex-col min-h-0">
+          {/* Compact Conversation Top Bar */}
+          <div className="shrink-0 px-3.5 py-2 border-b border-[var(--p-line)] bg-[var(--p-page)]/75 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-[11.5px] text-[var(--p-ink-2)] min-w-0">
+              {hasHistory && (
                 <button
                   type="button"
                   data-testid="portal-history-toggle"
-                  aria-expanded={historyOpen}
-                  onClick={() => setHistoryOpen((prev) => !prev)}
+                  aria-expanded={sidebarOpen}
+                  aria-label={sidebarOpen ? "收起对话列表" : "展开对话列表"}
+                  title={sidebarOpen ? "收起对话列表" : "展开对话列表"}
+                  onClick={() => setSidebarOpen((prev) => !prev)}
                   disabled={confirming}
                   className={cn(
-                    "inline-flex items-center gap-1 h-6 px-2 rounded-[5px] text-[11px] font-medium transition-colors disabled:opacity-50 cursor-pointer",
-                    historyOpen
-                      ? "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)]"
+                    "inline-flex items-center justify-center w-6 h-6 rounded-[5px] transition-colors disabled:opacity-50 cursor-pointer shrink-0",
+                    sidebarOpen
+                      ? "bg-[var(--p-field)] text-[var(--p-ink)]"
                       : "text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)]",
                   )}
                 >
-                  <Icon name="history" size={11} />
-                  <span>历史</span>
-                  <span className="text-[10px] font-mono tabular-nums opacity-75">
-                    {historySessions.length}
-                  </span>
+                  <Icon
+                    name={sidebarOpen ? "panel-left-close" : "panel-left-open"}
+                    size={13}
+                  />
                 </button>
-
-                {historyOpen && (
-                  <div
-                    data-testid="portal-history-popover"
-                    className="absolute right-0 top-full mt-1.5 w-72 sm:w-80 rounded-[9px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] border border-[var(--p-line)] overflow-hidden z-30 animate-popover-in"
-                  >
-                    <div className="px-3 py-2 border-b border-[var(--p-line)] bg-[var(--p-page)]/80 flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-semibold text-[var(--p-ink)]">
-                        历史对话（{historySessions.length}）
-                      </span>
-                      <button
-                        type="button"
-                        data-testid="portal-history-clear"
-                        onClick={handleClearAllHistory}
-                        className="text-[10.5px] text-[var(--p-ink-3)] hover:text-[var(--p-vermilion)] transition-colors cursor-pointer"
-                      >
-                        清空
-                      </button>
-                    </div>
-                    <div className="max-h-72 overflow-y-auto rd-scroll divide-y divide-[var(--p-line)]/60">
-                      {historySessions.map((session) => {
-                        const isActive = session.id === sessionId;
-                        const lastAssistant = [...session.turns]
-                          .reverse()
-                          .find((t) => t.role === "assistant");
-                        const hasOpenDraft = Boolean(
-                          session.draft && !session.draft.dismissed,
-                        );
-                        return (
-                          <div
-                            key={session.id}
-                            data-testid="portal-history-item"
-                            data-active={isActive ? "true" : "false"}
-                            className={cn(
-                              "group flex items-start gap-2 px-3 py-2 transition-colors",
-                              isActive
-                                ? "bg-[var(--p-cobalt-tint)]/60"
-                                : "hover:bg-[var(--p-hover)]/70",
-                            )}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => handleSelectHistorySession(session)}
-                              className="flex-1 min-w-0 text-left space-y-1 cursor-pointer"
-                            >
-                              <div className="flex items-center gap-1.5 min-w-0">
-                                <span
-                                  className={cn(
-                                    "text-[11.5px] font-medium truncate",
-                                    isActive
-                                      ? "text-[var(--p-cobalt)]"
-                                      : "text-[var(--p-ink)]",
-                                  )}
-                                >
-                                  {session.title}
-                                </span>
-                              </div>
-                              <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--p-ink-3)]">
-                                <span className="tabular-nums">
-                                  {formatRelativeTime(
-                                    new Date(session.updatedAt).toISOString(),
-                                  )}
-                                </span>
-                                <span>·</span>
-                                <span className="tabular-nums">
-                                  {session.turns.length} 条消息
-                                </span>
-                                {session.submittedTaskCode ? (
-                                  <span className="px-1 py-0.2 rounded-[3px] bg-[var(--p-forest-tint)] text-[var(--p-forest)] font-mono">
-                                    已提单 {session.submittedTaskCode}
-                                  </span>
-                                ) : hasOpenDraft ? (
-                                  <span className="px-1 py-0.2 rounded-[3px] bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]">
-                                    待确认草稿
-                                  </span>
-                                ) : lastAssistant?.outcome === "usage" ? (
-                                  <span className="px-1 py-0.2 rounded-[3px] bg-[var(--p-forest-tint)] text-[var(--p-forest)]">
-                                    使用解答
-                                  </span>
-                                ) : null}
-                              </div>
-                            </button>
-                            <button
-                              type="button"
-                              aria-label="删除对话"
-                              data-testid="portal-history-delete"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteHistorySession(session.id);
-                              }}
-                              className="w-5 h-5 rounded-[4px] inline-flex items-center justify-center text-[var(--p-ink-3)] opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-[var(--p-vermilion)] hover:bg-[var(--p-vermilion-tint)] transition-all shrink-0 mt-0.5 cursor-pointer"
-                            >
-                              <Icon name="x" size={11} />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-            {hasConversation && (
+              )}
+              <LivePulseDot tone="emerald" active />
+              <span className="font-semibold text-[var(--p-ink)] truncate">
+                {config.project_name} · 反馈诊断
+              </span>
+              <span className="hidden sm:inline px-1.5 py-0.5 rounded-[4px] bg-[var(--p-forest-tint)] text-[var(--p-forest)] text-[10.5px] font-medium">
+                确认前不建单
+              </span>
+              {config.release_window && (
+                <span className="hidden md:inline-flex items-center gap-1 text-[10.5px] text-[var(--p-ink-3)] truncate">
+                  <Icon name="calendar-clock" size={11} />
+                  <span>窗口 {config.release_window}</span>
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              {hasConversation && (
+                <button
+                  type="button"
+                  data-testid="portal-new-conversation"
+                  onClick={handleResetConversation}
+                  disabled={confirming}
+                  className="inline-flex items-center gap-1 h-6 px-2 rounded-[5px] text-[11px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  <Icon name="rotate-ccw" size={11} />
+                  <span>新对话</span>
+                </button>
+              )}
               <button
                 type="button"
-                data-testid="portal-new-conversation"
-                onClick={handleResetConversation}
+                data-testid="portal-switch-manual"
+                onClick={handleSwitchManualClick}
                 disabled={confirming}
-                className="inline-flex items-center gap-1 h-6 px-2 rounded-[5px] text-[11px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors disabled:opacity-50 cursor-pointer"
+                className="inline-flex items-center gap-1 h-6 px-2 rounded-[5px] bg-[var(--p-field)] text-[11px] font-medium text-[var(--p-ink)] shadow-[var(--p-shadow-hairline)] hover:bg-[var(--p-hover)] transition-all active:scale-[0.97] disabled:opacity-50 cursor-pointer"
               >
-                <Icon name="rotate-ccw" size={11} />
-                <span>新对话</span>
+                <Icon name="pen-line" size={11} />
+                <span>直接提单</span>
               </button>
-            )}
-            <button
-              type="button"
-              data-testid="portal-switch-manual"
-              onClick={handleSwitchManualClick}
-              disabled={confirming}
-              className="inline-flex items-center gap-1 h-6 px-2 rounded-[5px] bg-[var(--p-field)] text-[11px] font-medium text-[var(--p-ink)] shadow-[var(--p-shadow-hairline)] hover:bg-[var(--p-hover)] transition-all active:scale-[0.97] disabled:opacity-50 cursor-pointer"
-            >
-              <Icon name="pen-line" size={11} />
-              <span>直接提单</span>
-            </button>
+            </div>
           </div>
-        </div>
 
         {/* Traditional Conversation Thread */}
         <div className="flex-1 min-h-0 overflow-y-auto px-3.5 py-3.5 rd-scroll">
@@ -1470,6 +1698,45 @@ export function PortalFeedbackConversation({
               </div>
             )}
 
+            {/* Interrupted / Unanswered Turn Recovery Banner */}
+            {hasInterruptedTurn && (
+              <div
+                role="status"
+                data-testid="portal-diagnose-interrupted"
+                className="rounded-[8px] bg-[var(--p-cobalt-tint)] px-3 py-2 flex flex-wrap items-center justify-between gap-2 animate-rd-msg-in"
+              >
+                <div className="flex items-center gap-1.5 text-[11.5px] text-[var(--p-ink)] min-w-0">
+                  <Icon
+                    name="alert-triangle"
+                    size={13}
+                    className="text-[var(--p-cobalt)] shrink-0"
+                  />
+                  <span>上次诊断尚未完成或已中断，你可以一键重新诊断，或继续补充信息。</span>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="xs"
+                    icon="refresh-cw"
+                    data-testid="portal-diagnose-resume-retry"
+                    onClick={handleRetryLast}
+                  >
+                    重新诊断
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    icon="pen-line"
+                    onClick={handleSwitchManualClick}
+                  >
+                    直接提单
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* Error / Offline Recovery Banner */}
             {diagnoseError && !diagnosing && (
               <div
@@ -1525,9 +1792,10 @@ export function PortalFeedbackConversation({
           </div>
         </div>
 
-        {/* Bottom Composer Dock */}
-        <div className="shrink-0 mt-auto p-2.5 bg-[var(--p-canvas)]/70 border-t border-[var(--p-line)]">
-          {composerForm}
+          {/* Bottom Composer Dock */}
+          <div className="shrink-0 mt-auto p-2.5 bg-[var(--p-canvas)]/70 border-t border-[var(--p-line)]">
+            {composerForm}
+          </div>
         </div>
       </div>
     </section>

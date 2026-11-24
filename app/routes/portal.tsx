@@ -1188,7 +1188,7 @@ function PortalContent() {
   return (
     <div className="rd-portal-shell min-h-dvh bg-[var(--p-page)] text-[var(--p-ink)]">
       {/* Compact 3-Column Architectural Shell */}
-      <div className="relative mx-auto max-w-[1260px] min-h-dvh bg-[var(--p-page)] shadow-[0_0_0_1px_var(--p-line)] flex flex-col">
+      <div className="relative mx-auto max-w-[1380px] min-h-dvh bg-[var(--p-page)] shadow-[0_0_0_1px_var(--p-line)] flex flex-col">
         {/* Single-Row Dense Header */}
         <header className="border-b border-[var(--p-line)] px-4 sm:px-5 py-2">
           <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -1324,7 +1324,7 @@ function PortalContent() {
         </header>
 
         {/* 3-Column Body: Left (My Progress) + Center (Chat / Feed / Detail) + Right (Service & Shipped) */}
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[236px_minmax(0,1fr)] xl:grid-cols-[236px_minmax(0,1fr)_248px]">
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[224px_minmax(0,1fr)] xl:grid-cols-[224px_minmax(0,1fr)_236px]">
           {/* ── LEFT RAIL: Actionable & Recent My Feedback ── */}
           <aside
             aria-label="我的反馈动态"
