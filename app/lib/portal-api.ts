@@ -1,5 +1,7 @@
 import type {
   DeployGateEvaluation,
+  FeedbackDiagnoseMessage,
+  FeedbackDiagnoseResponse,
   FeedbackReleasePreference,
   PortalAccessErrorCode,
   PortalConfig,
@@ -103,6 +105,17 @@ export function createPortalApi(projectId: string) {
         `${base}/tasks/${encodeURIComponent(taskId)}/deploy-request`,
         "POST",
         reason ? { reason } : {},
+      ),
+
+    diagnose: (
+      payload: { messages: FeedbackDiagnoseMessage[]; images?: string[] },
+      signal?: AbortSignal,
+    ) =>
+      portalRequest<FeedbackDiagnoseResponse>(
+        `${base}/diagnose`,
+        "POST",
+        payload,
+        signal,
       ),
 
     clarify: (body: string) =>

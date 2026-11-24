@@ -3,6 +3,10 @@ import { useParams, useSearchParams } from "react-router";
 import { Icon } from "~/components/Icon.tsx";
 import { MarkdownContent } from "~/components/MarkdownContent.tsx";
 import {
+  PortalFeedbackConversation,
+  type PortalUploadedImage,
+} from "~/components/PortalFeedbackConversation.tsx";
+import {
   Button,
   CopyButton,
   LivePulseDot,
@@ -27,14 +31,10 @@ export function meta() {
 }
 
 type PortalTab = "submit" | "mine" | "team";
+type SubmitMode = "agent" | "manual";
 type TaskFilter = "all" | "action" | "active" | "deployed";
 
-interface PendingImage {
-  id: string;
-  previewUrl: string;
-  remoteUrl: string;
-  uploading: boolean;
-}
+type PendingImage = PortalUploadedImage;
 
 const FEEDBACK_TYPES = [
   { id: "功能异常", label: "功能异常", icon: "alert-circle", tone: "rose" },
@@ -501,6 +501,7 @@ function PortalContent() {
 
   // Navigation
   const [tab, setTab] = useState<PortalTab>("submit");
+  const [submitMode, setSubmitMode] = useState<SubmitMode>("agent");
 
   // Submit form state
   const [feedbackType, setFeedbackType] = useState<string>("功能异常");
@@ -513,8 +514,6 @@ function PortalContent() {
   const [dragOver, setDragOver] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submittedDetail, setSubmittedDetail] = useState<PortalTaskDetail | null>(null);
-  const [clarifying, setClarifying] = useState(false);
-  const [clarifyReply, setClarifyReply] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Lists & detail state
@@ -593,6 +592,8 @@ function PortalContent() {
             prev.can_view_team === cfg.can_view_team &&
             prev.can_request_deploy === cfg.can_request_deploy &&
             prev.upload_enabled === cfg.upload_enabled &&
+            prev.ai_enabled === cfg.ai_enabled &&
+            prev.agent_enabled === cfg.agent_enabled &&
             prev.release_window === cfg.release_window
           ) {
             return prev;
@@ -843,31 +844,77 @@ function PortalContent() {
   const removeImage = (id: string) => {
     setImages((prev) => {
       const found = prev.find((i) => i.id === id);
-      if (found) URL.revokeObjectURL(found.previewUrl);
+      if (found && found.previewUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(found.previewUrl);
+      }
       return prev.filter((i) => i.id !== id);
     });
   };
 
-  const handleClarify = async () => {
-    const trimmed = body.trim();
-    if (!trimmed) {
-      toast.info("请先填写一些问题描述，再让 AI 帮你梳理补充点");
-      return;
-    }
-    setClarifying(true);
-    try {
-      const { reply } = await portalApi.clarify(
-        title.trim() ? `${title.trim()}\n\n${trimmed}` : trimmed,
-      );
-      setClarifyReply(reply);
-    } catch (err) {
-      if (!handlePossibleAuthError(err)) {
-        toast.error(err instanceof Error ? err.message : "AI 辅助澄清暂时不可用");
+  const clearStagedImages = useCallback(() => {
+    setImages((prev) => {
+      for (const img of prev) {
+        if (img.previewUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(img.previewUrl);
+        }
       }
-    } finally {
-      setClarifying(false);
-    }
-  };
+      return [];
+    });
+  }, []);
+
+  const handleCreateFromConversation = useCallback(
+    async (payload: {
+      title: string;
+      body: string;
+      type: string;
+      images: string[];
+      release_preference: FeedbackReleasePreference;
+    }) => {
+      const created = await portalApi.createTask({
+        title: payload.title,
+        body: payload.body,
+        type: payload.type,
+        images: payload.images,
+        release_preference: payload.release_preference,
+        external_id: makeUid(),
+      });
+      setSubmittedDetail(created);
+      setMineTasks((prev) => [
+        created.task,
+        ...prev.filter((t) => t.id !== created.task.id),
+      ]);
+      toast.success(`反馈 ${created.task.code} 已确认提交`);
+      return created;
+    },
+    [portalApi, toast],
+  );
+
+  const handleSwitchToManual = useCallback(
+    (prefill: { body: string; extraImageUrls: string[] }) => {
+      if (prefill.body.trim()) {
+        setBody((prev) => (prev.trim() ? prev : prefill.body.trim()));
+      }
+      if (prefill.extraImageUrls.length > 0) {
+        setImages((prev) => {
+          const existing = new Set(prev.map((i) => i.remoteUrl).filter(Boolean));
+          const additions: PendingImage[] = [];
+          for (const url of prefill.extraImageUrls) {
+            if (!url || existing.has(url)) continue;
+            existing.add(url);
+            additions.push({
+              id: makeUid(),
+              previewUrl: url,
+              remoteUrl: url,
+              uploading: false,
+            });
+          }
+          return [...prev, ...additions].slice(0, 6);
+        });
+      }
+      setSubmitMode("manual");
+    },
+    [],
+  );
 
   const handleSubmitFeedback = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -893,9 +940,10 @@ function PortalContent() {
       setSubmittedDetail(created);
       setTitle("");
       setBody("");
-      setClarifyReply(null);
       setReleasePref("default");
-      for (const img of images) URL.revokeObjectURL(img.previewUrl);
+      for (const img of images) {
+        if (img.previewUrl.startsWith("blob:")) URL.revokeObjectURL(img.previewUrl);
+      }
       setImages([]);
       setMineTasks((prev) => [
         created.task,
@@ -1247,7 +1295,10 @@ function PortalContent() {
                     variant="secondary"
                     size="sm"
                     icon="plus"
-                    onClick={() => setSubmittedDetail(null)}
+                    onClick={() => {
+                      setSubmittedDetail(null);
+                      if (config.agent_enabled) setSubmitMode("agent");
+                    }}
                   >
                     继续提交新反馈
                   </Button>
@@ -1267,8 +1318,22 @@ function PortalContent() {
                   </Button>
                 </div>
               </section>
+            ) : config.agent_enabled === true && submitMode === "agent" ? (
+              <PortalFeedbackConversation
+                config={config}
+                stagedImages={images}
+                onUploadFiles={uploadFiles}
+                onRemoveStagedImage={removeImage}
+                onClearStagedImages={clearStagedImages}
+                onOpenLightbox={(src) => setLightboxSrc(src)}
+                onDiagnose={portalApi.diagnose}
+                onCreateTask={handleCreateFromConversation}
+                onSwitchToManual={handleSwitchToManual}
+                onPossibleAuthError={handlePossibleAuthError}
+              />
             ) : (
               <form
+                data-testid="portal-manual-form"
                 onSubmit={(e) => void handleSubmitFeedback(e)}
                 onDragOver={(e) => {
                   e.preventDefault();
@@ -1292,12 +1357,24 @@ function PortalContent() {
                 <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
-                      提交新反馈
+                      {config.agent_enabled ? "人工直接提交反馈" : "提交新反馈"}
                     </h2>
                     <p className="text-[12px] text-[var(--text-muted)]">
                       描述遇到的问题或改进想法，支持粘贴或拖拽截图直达研发处理链路。
                     </p>
                   </div>
+                  {config.agent_enabled && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="xs"
+                      icon="message-square-text"
+                      data-testid="portal-switch-agent"
+                      onClick={() => setSubmitMode("agent")}
+                    >
+                      返回对话诊断
+                    </Button>
+                  )}
                 </div>
 
                 <div className="p-5 space-y-5">
@@ -1413,20 +1490,6 @@ function PortalContent() {
                             ? `上传截图 (${images.length}/6)`
                             : "图床未配置"}
                         </Button>
-
-                        {config.ai_enabled !== false && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="xs"
-                            icon="sparkles"
-                            loading={clarifying}
-                            disabled={!body.trim() || clarifying}
-                            onClick={() => void handleClarify()}
-                          >
-                            AI 帮我检查遗漏
-                          </Button>
-                        )}
                       </div>
                       <span className="text-[11px] text-[var(--text-muted)]">
                         支持 Ctrl/⌘+V 直接粘贴截图
@@ -1465,29 +1528,6 @@ function PortalContent() {
                           </button>
                         </div>
                       ))}
-                    </div>
-                  )}
-
-                  {/* AI Clarify reply card */}
-                  {clarifyReply && (
-                    <div className="rounded-xl border border-indigo-500/25 bg-indigo-500/[0.05] p-3.5 space-y-2 animate-rd-portal-in">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-1.5 text-[12px] font-semibold text-indigo-700 dark:text-indigo-300">
-                          <Icon name="sparkles" size={13} />
-                          <span>AI 辅助梳理建议</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setClarifyReply(null)}
-                          className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
-                          aria-label="关闭建议"
-                        >
-                          <Icon name="x" size={13} />
-                        </button>
-                      </div>
-                      <div className="text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-                        <MarkdownContent content={clarifyReply} />
-                      </div>
                     </div>
                   )}
 

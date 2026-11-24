@@ -18,7 +18,7 @@ Relaydesk collects feedback from your apps and group chats, lets you triage it i
 
 ## Features
 
-- **Feedback intake** — an embeddable `<script>` widget (with optional screenshots and an AI clarifying question), a Telegram group bot (`/feedback`), or manual entry.
+- **Feedback intake** — the embeddable `<script>` widget and shared portal support project-specific, multi-turn diagnosis: get usage help without opening a ticket, or review a suspected bug before submitting it. Manual feedback, screenshots and the Telegram group bot (`/feedback`) remain available. See the [interaction design and references](docs/feedback-design.md).
 - **Triage queue** — keeps the reporter's original words separate from the confirmed requirements. Status (`triage → ready → working → review → done`) and owner (`none / human / agent`) are tracked independently, and duplicate reports can be merged into one task.
 - **Human ⇄ agent handoff** — claim a task yourself, or leave it unclaimed for an agent. Leases, heartbeats and versioned requirements keep a stale agent from writing back. You can request or force a takeover at any time.
 - **Local Bridge** — a single-file, zero-dependency Node client that connects your machine to Relaydesk over WebSocket. It runs Claude Code or Codex CLI against a local working directory and streams results back to the web chat.
@@ -62,6 +62,10 @@ All state lives in a single SQLite file (`data/relaydesk.sqlite3` by default) an
 5. **Review.** When the run succeeds, the task moves to `review` with its branch and HEAD recorded. Verify, merge and close it.
 
 ## Feedback without a console account
+
+**Start with the problem, not a ticket.** Configure the project's feedback agent with its own harness, model and public product guide in project settings. Use the guide to describe how features are supposed to work and the permissions or prerequisites users commonly miss. Do not put internal runbooks or credentials in it.
+
+For example, “Export doesn’t work” is not yet a bug report. The agent should first ask what the user did and what happened. If the guide explains that export needs a selected date range, it can walk the user through that and finish without creating a ticket. If the export still fails after following those steps, the agent can offer an editable *suspected bug* draft with the steps, expected result and observed result. Only an explicit submission creates a ticket. Direct human feedback remains available if diagnosis is unavailable or the user disagrees.
 
 - **Shared portal:** Create a link in project settings and copy it when issued. Choose one link per person or group: devices on the same link share “My feedback.” Team visibility is opt-in and read-only. The original link is a bearer credential; only its hash is stored. If it is lost, revoke it and create a replacement.
 - **Devices:** Opening the link exchanges it for a project-specific HttpOnly cookie and redirects to `/p/:projectId`. Removing a device invalidates that session immediately. Clearing cookies makes a browser a new device; revoke the *link* to prevent a holder of the original URL from enrolling again. Use HTTPS outside localhost. Configure reverse proxies and analytics not to log query strings on `/p/`. The device list uses the socket IP unless `RELAYDESK_TRUST_PROXY=1` is set behind a proxy that overwrites `X-Forwarded-For` and blocks direct access.

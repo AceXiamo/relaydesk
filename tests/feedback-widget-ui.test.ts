@@ -167,3 +167,243 @@ it.each(["older server", "no WebCrypto"])(
     click('[data-action="toggle"]');
   },
 );
+
+it("runs multi-turn diagnose (clarify -> usage -> suspected_bug) and only creates a task after explicit confirm", async () => {
+  const requests: { url: string; options: RequestInit }[] = [];
+  let diagnoseTurn = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, options: RequestInit = {}) => {
+      requests.push({ url, options });
+      if (url.endsWith("/widget-config")) {
+        return Response.json({
+          project_name: "DemoApp",
+          tracking_enabled: true,
+          agent_enabled: true,
+          can_request_deploy: false,
+          upload_enabled: true,
+        });
+      }
+      if (url.endsWith("/widget-feedback/tasks") && (!options.method || options.method === "GET")) {
+        return Response.json({ tasks: [] });
+      }
+      if (url.endsWith("/widget-feedback/diagnose")) {
+        diagnoseTurn += 1;
+        if (diagnoseTurn === 1) {
+          return Response.json({
+            reply: "请问你在哪个页面点击了导出按钮？有具体报错提示吗？",
+            outcome: "clarify",
+          });
+        }
+        if (diagnoseTurn === 2) {
+          return Response.json({
+            reply: "CSV 导出需要先勾选至少一行记录，按此操作即可正常导出。",
+            outcome: "usage",
+          });
+        }
+        return Response.json({
+          reply: "勾选记录后仍返回 500 属于疑似功能故障，已为你整理可编辑工单草案。",
+          outcome: "suspected_bug",
+          draft: {
+            title: "账单页导出 CSV 返回 500",
+            body: "在账单页勾选 3 条记录后点击导出 CSV，接口返回 500。",
+          },
+        });
+      }
+      if (url.endsWith("/widget-feedback/tasks") && options.method === "POST") {
+        return Response.json({
+          task: {
+            ...task,
+            id: "created-1",
+            code: "RD-99",
+            title: "账单页导出 CSV 返回 500（已核对）",
+          },
+        });
+      }
+      return Response.json({});
+    }),
+  );
+
+  const root = mount();
+  const click = (s: string) => root.querySelector<HTMLButtonElement>(s)!.click();
+  const sendText = (text: string) => {
+    const input = root.querySelector<HTMLTextAreaElement>('[data-role="input"]')!;
+    input.value = text;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    click('[data-action="send"]');
+  };
+
+  click('[data-action="toggle"]');
+  await vi.waitFor(() =>
+    expect(requests.some((r) => r.url.endsWith("/widget-config"))).toBe(true),
+  );
+
+  // Turn 1: clarify -> no ticket draft
+  sendText("导出按钮点不了");
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-outcome="clarify"]')).not.toBeNull(),
+  );
+  expect(root.querySelector('[data-ticket-id]')).toBeNull();
+
+  // Turn 2: usage -> no ticket draft, 0 POST /tasks
+  sendText("在账单页没有勾选任何记录直接点导出");
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-outcome="usage"]')).not.toBeNull(),
+  );
+  expect(root.querySelector('[data-ticket-id]')).toBeNull();
+
+  // Turn 3: suspected_bug -> editable draft appears, still 0 POST /tasks until explicit confirm
+  sendText("我勾选了 3 条记录再点导出还是报错 500");
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-outcome="suspected_bug"]')).not.toBeNull(),
+  );
+  const titleInput = root.querySelector<HTMLInputElement>('[data-ticket-field="title"]')!;
+  const summaryInput = root.querySelector<HTMLTextAreaElement>('[data-ticket-field="summary"]')!;
+  expect(titleInput.value).toBe("账单页导出 CSV 返回 500");
+  expect(summaryInput.value).toContain("接口返回 500");
+  expect(
+    requests.filter((r) => r.url.endsWith("/widget-feedback/tasks") && r.options.method === "POST"),
+  ).toHaveLength(0);
+  expect(requests.some((r) => r.url.endsWith("/chat"))).toBe(false);
+
+  // Edit draft and explicitly confirm
+  titleInput.value = "账单页导出 CSV 返回 500（已核对）";
+  titleInput.dispatchEvent(new Event("input", { bubbles: true }));
+  click("[data-submit-ticket]");
+
+  await vi.waitFor(() =>
+    expect(
+      requests.filter((r) => r.url.endsWith("/widget-feedback/tasks") && r.options.method === "POST"),
+    ).toHaveLength(1),
+  );
+  const diagnoseReqs = requests.filter((r) => r.url.endsWith("/widget-feedback/diagnose"));
+  expect(diagnoseReqs).toHaveLength(3);
+  for (const req of diagnoseReqs) {
+    const h = new Headers(req.options.headers);
+    expect(h.get("authorization")).toBe("Bearer public-intake");
+    expect(h.get("x-visitor-id")).toMatch(/^(?:[a-f0-9]{64}|[a-f0-9-]{36})$/);
+  }
+  const createCall = requests.find(
+    (r) => r.url.endsWith("/widget-feedback/tasks") && r.options.method === "POST",
+  )!;
+  expect(JSON.parse(String(createCall.options.body)).title).toBe(
+    "账单页导出 CSV 返回 500（已核对）",
+  );
+});
+
+it("recovers from diagnose failure via retry and merges consecutive user turns on follow-up", async () => {
+  const diagnoseBodies: Array<{ messages: Array<{ role: string; text: string }> }> = [];
+  let attempt = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, options: RequestInit = {}) => {
+      if (url.endsWith("/widget-config")) {
+        return Response.json({
+          project_name: "DemoApp",
+          tracking_enabled: true,
+          agent_enabled: true,
+          upload_enabled: false,
+        });
+      }
+      if (url.endsWith("/widget-feedback/tasks")) {
+        return Response.json({ tasks: [] });
+      }
+      if (url.endsWith("/widget-feedback/diagnose")) {
+        diagnoseBodies.push(JSON.parse(String(options.body)));
+        attempt += 1;
+        if (attempt === 1) {
+          return Response.json(
+            { error: "安全反馈执行器暂不可用，请稍后重试。" },
+            { status: 503 },
+          );
+        }
+        if (attempt === 2) {
+          return Response.json({ error: "上游超时" }, { status: 502 });
+        }
+        return Response.json({
+          reply: "收到两条补充信息，请确认你的账号角色。",
+          outcome: "clarify",
+        });
+      }
+      return Response.json({});
+    }),
+  );
+
+  const root = mount();
+  const click = (s: string) => root.querySelector<HTMLButtonElement>(s)!.click();
+  const sendText = (text: string) => {
+    const input = root.querySelector<HTMLTextAreaElement>('[data-role="input"]')!;
+    input.value = text;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    click('[data-action="send"]');
+  };
+
+  click('[data-action="toggle"]');
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-role="subtitle"]')?.textContent).toContain("先诊断问题"),
+  );
+
+  // Attempt 1 fails -> inline recovery card renders
+  sendText("点击保存没有反应");
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-role="diagnose-error"]')?.textContent).toContain(
+      "安全反馈执行器暂不可用",
+    ),
+  );
+
+  // Attempt 2 via retry button -> does not duplicate user message
+  click('[data-action="retry-diagnose"]');
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-role="diagnose-error"]')?.textContent).toContain("上游超时"),
+  );
+  expect(diagnoseBodies[1]?.messages).toEqual([{ role: "user", text: "点击保存没有反应" }]);
+
+  // Attempt 3 via sending a new follow-up message after failure -> consecutive user messages merged!
+  sendText("控制台报 403 权限不足");
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-outcome="clarify"]')).not.toBeNull(),
+  );
+  expect(diagnoseBodies[2]?.messages).toEqual([
+    { role: "user", text: "点击保存没有反应\n\n控制台报 403 权限不足" },
+  ]);
+});
+
+it("falls back honestly to manual ticket card when agent_enabled is false", async () => {
+  const requests: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      requests.push(url);
+      if (url.endsWith("/widget-config")) {
+        return Response.json({
+          project_name: "ManualOnly",
+          tracking_enabled: true,
+          agent_enabled: false,
+          ai_enabled: false,
+          upload_enabled: false,
+        });
+      }
+      return Response.json({ tasks: [] });
+    }),
+  );
+
+  const root = mount();
+  const click = (s: string) => root.querySelector<HTMLButtonElement>(s)!.click();
+  click('[data-action="toggle"]');
+  await vi.waitFor(() =>
+    expect(requests.some((u) => u.endsWith("/widget-config"))).toBe(true),
+  );
+
+  const input = root.querySelector<HTMLTextAreaElement>('[data-role="input"]')!;
+  input.value = "关闭代理时直接填写反馈";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  click('[data-action="send"]');
+
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-draft-source="manual"]')).not.toBeNull(),
+  );
+  expect(requests.some((u) => u.includes("/diagnose"))).toBe(false);
+  expect(requests.some((u) => u.endsWith("/chat"))).toBe(false);
+  const summary = root.querySelector<HTMLTextAreaElement>('[data-ticket-field="summary"]')!;
+  expect(summary.value).toContain("关闭代理时直接填写反馈");
+});

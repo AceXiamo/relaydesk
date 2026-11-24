@@ -24,6 +24,8 @@ import type {
   DeliveryMode,
   DiscussMode,
   DiscussResult,
+  FeedbackAgentPatch,
+  FeedbackAgentSettings,
   GithubConnectionSummary,
   GithubInspectPayload,
   GithubOwnerInfo,
@@ -520,7 +522,21 @@ export const api = {
       payload ?? {},
     ),
 
-  /* ── Feedback Portal Links & AI Deploy Gate ─────────────────────────── */
+  /* ── Feedback Agent & Portal Links & AI Deploy Gate ─────────────────── */
+
+  getProjectFeedbackAgent: (projectId: string) =>
+    request<FeedbackAgentSettings>(
+      `/api/projects/${encodeURIComponent(projectId)}/feedback-agent`,
+    ),
+  updateProjectFeedbackAgent: (
+    projectId: string,
+    payload: FeedbackAgentPatch,
+  ) =>
+    request<FeedbackAgentSettings>(
+      `/api/projects/${encodeURIComponent(projectId)}/feedback-agent`,
+      "PATCH",
+      payload,
+    ),
 
   listPortalLinks: (projectId: string) =>
     request<{ links: PortalAccessLink[] }>(

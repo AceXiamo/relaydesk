@@ -38,6 +38,7 @@ RUN pnpm install --prod --frozen-lockfile
 COPY --from=builder /app/build ./build
 COPY server.ts ./
 COPY server/ server/
+COPY scripts/verify-feedback-clis.mjs scripts/verify-feedback-clis.mjs
 COPY agent/bridge/chat-timeouts.ts agent/bridge/chat-timeouts.ts
 COPY app/lib/ app/lib/
 COPY public/widget.js public/widget.js
@@ -57,6 +58,8 @@ RUN codex --version \
     && git --version \
     && rg --version \
     && python3 --version
+# Verify the pinned, packaged CLIs really emit and consume the supported wire format without egress.
+RUN --network=none node scripts/verify-feedback-clis.mjs
 # Boot the packaged application as the runtime user before publishing the image.
 RUN node --input-type=module -e 'import { startRelaydeskServer } from "./server.ts"; \
     const app = await startRelaydeskServer({ port: 0, dbPath: ":memory:" }); \

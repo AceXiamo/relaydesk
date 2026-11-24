@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as r2 from "../server/r2.ts";
+import * as feedbackAgent from "../server/feedback-agent.ts";
 import { writeWorkspaceDeployDoc } from "../server/workspace.ts";
 import { randomUUID } from "node:crypto";
 import { request } from "node:http";
@@ -75,6 +76,272 @@ beforeEach(async () => {
 afterEach(async () => {
   await srv.close();
   rmSync(dir, { recursive: true, force: true });
+});
+
+describe("project feedback diagnosis over HTTP", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+  it("saves the project-specific harness and model without changing deployment or another project", async () => {
+    const other = srv.store.createProject({
+      name: "Other",
+      repo: "fixture/other",
+    });
+    const before = srv.store.getProjectDeployPolicy(project);
+    const settings = {
+      enabled: false,
+      runtime: "claude",
+      model: "support-model",
+      public_guide: "从报表页导出。",
+    };
+    const saved = await call(
+      base + "/feedback-agent",
+      "PATCH",
+      admin,
+      settings,
+    );
+    expect(saved.res.status).toBe(200);
+    expect(saved.json).toMatchObject({ ...settings, available: false });
+    expect(
+      (await call(base + "/feedback-agent", "GET", admin)).json,
+    ).toMatchObject(settings);
+    expect(
+      (await call(`/api/projects/${other.id}/feedback-agent`, "GET", admin))
+        .json.public_guide,
+    ).not.toBe(settings.public_guide);
+    expect(srv.store.getProjectDeployPolicy(project)).toEqual(before);
+  });
+  it("isolates operator settings from public capabilities and requires an authorized caller", async () => {
+    const { cookie } = await redeem((await link()).url);
+    const headers = { Cookie: cookie };
+    expect(
+      (await call(base + "/feedback-agent", "GET", admin)).json.enabled,
+    ).toBe(false);
+    expect(
+      (
+        await call(base + "/feedback-agent", "PATCH", headers, {
+          enabled: true,
+        })
+      ).res.status,
+    ).toBe(401);
+    expect(
+      (await call(base + "/feedback-agent", "GET", headers)).res.status,
+    ).toBe(401);
+    const payload = { messages: [{ role: "user", text: "怎样导出报表？" }] };
+    expect(
+      (await call(base + "/portal/diagnose", "POST", headers, payload)).res
+        .status,
+    ).toBe(409);
+    const mock = vi
+      .spyOn(feedbackAgent, "feedbackAgentAvailable")
+      .mockResolvedValue(true);
+    const run = vi
+      .spyOn(feedbackAgent, "diagnoseFeedback")
+      .mockResolvedValue({ reply: "在报表页选择导出。", outcome: "usage" });
+    const widgetHeaders = {
+      Authorization: `Bearer ${intake}`,
+      Origin: "https://widget.example",
+      "X-Visitor-Id": randomUUID(),
+    };
+    for (const [suffix, h] of [
+      ["/portal/config", headers],
+      ["/widget-config", widgetHeaders],
+    ] as const) {
+      const cfg = (await call(base + suffix, "GET", h)).json;
+      expect(cfg.agent_enabled).toBe(true);
+      expect(cfg).not.toHaveProperty("public_guide");
+      expect(cfg).not.toHaveProperty("model");
+    }
+    expect(
+      (await call(base + "/portal/diagnose", "POST", {}, payload)).res.status,
+    ).toBe(401);
+    expect(
+      (
+        await call(
+          base + "/widget-feedback/diagnose",
+          "POST",
+          { ...widgetHeaders, Origin: "https://other.example" },
+          payload,
+        )
+      ).res.status,
+    ).toBe(403);
+    expect(run).not.toHaveBeenCalled();
+    expect(
+      (
+        await call(
+          base + "/widget-feedback/diagnose",
+          "POST",
+          widgetHeaders,
+          payload,
+        )
+      ).json.outcome,
+    ).toBe("usage");
+    expect(srv.store.listTasks(project)).toHaveLength(0);
+    mock.mockResolvedValue(false);
+    expect(
+      (
+        await call(
+          base + "/widget-feedback/diagnose",
+          "POST",
+          widgetHeaders,
+          payload,
+        )
+      ).res.status,
+    ).toBe(409);
+  });
+  it("does not start a model turn if the client leaves during the health probe", async () => {
+    const { cookie } = await redeem((await link()).url);
+    let entered!: () => void, release!: (ready: boolean) => void;
+    const probing = new Promise<void>((r) => { entered = r; });
+    const health = new Promise<boolean>((r) => { release = r; });
+    vi.spyOn(feedbackAgent, "feedbackAgentAvailable").mockImplementationOnce(() => { entered(); return health; });
+    const diagnose = vi.spyOn(feedbackAgent, "diagnoseFeedback");
+    const disconnected = new Promise<void>((r) => srv.server.once("request", (_req, res) => res.once("close", r)));
+    const controller = new AbortController();
+    const pending = fetch(srv.url + base + "/portal/diagnose", {
+      method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", text: "如何导出？" }] }), signal: controller.signal,
+    }).catch(() => null);
+    await probing;
+    controller.abort();
+    await Promise.all([disconnected, pending]);
+    release(true);
+    await new Promise<void>((r) => setImmediate(r));
+    expect(diagnose).not.toHaveBeenCalled();
+  });
+  it("aborts abandoned diagnosis work and frees the slot for the next turn", async () => {
+    const h = {
+      Cookie: (await redeem((await link()).url)).cookie,
+      "Content-Type": "application/json",
+    };
+    vi.spyOn(feedbackAgent, "feedbackAgentAvailable").mockResolvedValue(true);
+    let started!: () => void, stopped!: () => void;
+    const ready = new Promise<void>((resolve) => {
+        started = resolve;
+      }),
+      cancelled = new Promise<void>((resolve) => {
+        stopped = resolve;
+      });
+    vi.spyOn(feedbackAgent, "diagnoseFeedback")
+      .mockImplementationOnce(
+        (_s, _p, _d, signal) =>
+          new Promise((_resolve, reject) => {
+            signal!.addEventListener(
+              "abort",
+              () => {
+                stopped();
+                reject(new Error("aborted"));
+              },
+              { once: true },
+            );
+            started();
+          }),
+      )
+      .mockResolvedValueOnce({ outcome: "usage", reply: "在报表页选择导出。" });
+    const payload = { messages: [{ role: "user", text: "如何导出？" }] };
+    const controller = new AbortController();
+    const pending = fetch(srv.url + base + "/portal/diagnose", {
+      method: "POST",
+      headers: h,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    }).catch(() => null);
+    await ready;
+    controller.abort();
+    await Promise.all([cancelled, pending]);
+    expect(
+      (await call(base + "/portal/diagnose", "POST", h, payload)).res.status,
+    ).toBe(200);
+  });
+  it("rejects overlapping turns and withholds results if access is revoked during diagnosis", async () => {
+    const l = await link();
+    const h = { Cookie: (await redeem(l.url)).cookie };
+    vi.spyOn(feedbackAgent, "feedbackAgentAvailable").mockResolvedValue(true);
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    type Verdict = Awaited<ReturnType<typeof feedbackAgent.diagnoseFeedback>>;
+    let finish!: (v: Verdict) => void;
+    const completion = new Promise<Verdict>((resolve) => {
+      finish = resolve;
+    });
+    vi.spyOn(feedbackAgent, "diagnoseFeedback").mockImplementation(async () => {
+      started();
+      return completion;
+    });
+    const ask = () =>
+      call(base + "/portal/diagnose", "POST", h, {
+        messages: [{ role: "user", text: "如何导出？" }],
+      });
+    const first = ask();
+    await entered;
+    try {
+      expect((await ask()).res.status).toBe(409);
+      expect(
+        (await call(base + "/portal-links/" + l.id, "DELETE", admin)).res
+          .status,
+      ).toBe(200);
+    } finally {
+      finish({ reply: "not delivered", outcome: "usage" });
+    }
+    const result = await first;
+    expect(result.res.status).toBe(401);
+    expect(result.json).not.toHaveProperty("reply");
+  });
+  it("keeps clarification, usage advice and suspected bugs separate from creating a ticket", async () => {
+    const { cookie } = await redeem((await link()).url);
+    const h = { Cookie: cookie };
+    vi.spyOn(feedbackAgent, "feedbackAgentAvailable").mockResolvedValue(true);
+    const run = vi.spyOn(feedbackAgent, "diagnoseFeedback");
+    const draft = {
+      title: "导出按钮没有生成文件",
+      body: "在报表页面选择导出后，没有下载文件。",
+    };
+    run
+      .mockResolvedValueOnce({
+        reply: "你在哪个页面操作？",
+        outcome: "clarify",
+      })
+      .mockResolvedValueOnce({
+        reply: "在报表页面选择导出。",
+        outcome: "usage",
+      })
+      .mockResolvedValueOnce({
+        reply: "按这些步骤仍然无法导出，是否记录为疑似缺陷？",
+        outcome: "suspected_bug",
+        draft,
+      });
+    const messages = [{ role: "user", text: "无法导出" }];
+    for (const [expected, followUp] of [
+      ["clarify", "报表页面。"],
+      ["usage", "已点击导出，没有生成文件。"],
+      ["suspected_bug", ""],
+    ] as const) {
+      const reply = await call(base + "/portal/diagnose", "POST", h, {
+        messages,
+      });
+      expect(reply.res.status).toBe(200);
+      expect(reply.json.outcome).toBe(expected);
+      expect(srv.store.listTasks(project)).toHaveLength(0);
+      if (followUp)
+        messages.push(
+          { role: "assistant", text: reply.json.reply },
+          { role: "user", text: followUp },
+        );
+      else expect(reply.json.draft).toEqual(draft);
+    }
+    expect(run.mock.calls.at(-1)?.[2]).toMatchObject({ messages });
+    expect(
+      (
+        await call(base + "/portal/tasks", "POST", h, {
+          ...draft,
+          title: "我确认的标题",
+        })
+      ).json.task.title,
+    ).toBe("我确认的标题");
+    expect(srv.store.listTasks(project)).toHaveLength(1);
+  });
 });
 
 describe("feedback access links over HTTP", () => {

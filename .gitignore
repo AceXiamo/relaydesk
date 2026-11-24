@@ -7,6 +7,8 @@ data/
 *.sqlite*
 .relaydesk/
 runner.env
+app.env
+feedback.env
 runner-handbook.md
 __pycache__/
 .DS_Store

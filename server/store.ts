@@ -300,6 +300,11 @@ CREATE TABLE IF NOT EXISTS projects (
     execution_routing_json TEXT NOT NULL DEFAULT '{}',
     deploy_policy_json TEXT NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS feedback_agents (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), runtime TEXT NOT NULL CHECK(runtime IN ('codex','claude')),
+    model TEXT NOT NULL, public_guide TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS bridge_agents (
     id TEXT PRIMARY KEY, name TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE, token_prefix TEXT NOT NULL DEFAULT '',

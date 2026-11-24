@@ -13,7 +13,26 @@ export interface PortalConfig {
   can_request_deploy: boolean;
   upload_enabled: boolean;
   ai_enabled?: boolean;
+  agent_enabled?: boolean;
   release_window: string;
+}
+
+export interface FeedbackDiagnoseMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
+export type FeedbackDiagnoseOutcome = "clarify" | "usage" | "suspected_bug";
+
+export interface FeedbackDiagnoseDraft {
+  title: string;
+  body: string;
+}
+
+export interface FeedbackDiagnoseResponse {
+  reply: string;
+  outcome: FeedbackDiagnoseOutcome;
+  draft?: FeedbackDiagnoseDraft;
 }
 
 export interface PortalTask {

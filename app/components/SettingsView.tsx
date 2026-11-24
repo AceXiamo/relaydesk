@@ -3,6 +3,7 @@ import { ProjectCliSettingsCard } from "./ProjectCliSettingsCard.tsx";
 import { ProjectDeployPolicyCard } from "./ProjectDeployPolicyCard.tsx";
 import { ProjectRoutingCard } from "./ProjectRoutingCard.tsx";
 import { PortalLinksSettingsCard } from "./PortalLinksSettingsCard.tsx";
+import { FeedbackAgentSettingsCard } from "./FeedbackAgentSettingsCard.tsx";
 import { UtilityAiSettingsCard } from "./UtilityAiSettingsCard.tsx";
 import { LocalAgentsSettingsCard } from "./LocalAgentsSettingsCard.tsx";
 import { Icon } from "./Icon.tsx";
@@ -1752,6 +1753,12 @@ export function SettingsView({
             {/* 1.6. Standalone Feedback Portal Access Links & Devices */}
             <PortalLinksSettingsCard
               key={`portal-links-${project.id}`}
+              project={project}
+            />
+
+            {/* 1.7. Feedback Triage Agent (Independent Harness, Model & Public Guide) */}
+            <FeedbackAgentSettingsCard
+              key={`feedback-agent-${project.id}`}
               project={project}
             />
 

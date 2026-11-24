@@ -36,7 +36,8 @@
 ```text
 /srv/apps/relaydesk/
 ├── compose.yml                  # 来源模板: deploy/compose.yml（切勿设置顶层 name:）
-├── .env                         # 仅存放 IMAGE_TAG=<40位SHA>，由 `pier deploy` 维护
+├── .env                         # Pier 维护的 IMAGE_TAG 与非密钥 Compose 参数，不存令牌
+├── feedback.env                 # 可选：仅供反馈执行器与 Web 共用的认证令牌（0600）
 ├── app.env                      # 运行时环境变量与密钥（chmod 600，绝不入库）
 ├── backup.py                    # SQLite 在线备份脚本（来源: deploy/backup.py）
 └── data/                        # 挂载到容器 /app/data（严禁删除或 volume prune）
@@ -176,7 +177,7 @@ MSG=$(git log -1 --pretty=%s)
 
 # 2. 查看当前线上版本与运行状态（记录回滚基线 PREV_SHA）
 $PIER_SSH tw-1 '
-  echo "=== web .env ===" && cat /srv/apps/relaydesk/.env
+  echo "=== web .env ===" && grep -E "^IMAGE_TAG=[0-9a-f]{40}$" /srv/apps/relaydesk/.env
   echo "=== web ps ==="  && docker compose -f /srv/apps/relaydesk/compose.yml ps
 '
 
@@ -191,6 +192,8 @@ $PIER_SSH tw-1 "docker pull ghcr.io/acexiamo/relaydesk:$SHA"
 ```
 
 > 若本次修改了 `deploy/compose.yml`，须在切流前先对比远端 `/srv/apps/relaydesk/compose.yml`（保留任何主机定制项）；模板中的 Traefik 域名来自 Compose `.env` 的 `RELAYDESK_HOST`（生产为 `relaydesk.acexiamo.com`），同步前确认已设置，用 `pier-scp` 同步后再记录一条 `pier event -kind note`。
+
+如本次发布需要启用**项目反馈诊断执行器**，切流前按 [反馈 Agent 配置](assistant.md#optional-production-setup) 准备专用 `feedback.env`、Compose profile 和内部网络。禁止将 Web 的 `app.env` 传给执行器。切流后核验 Web 与 `feedback-runner` 均为目标 SHA、Web 可通过鉴权健康检查访问执行器。部署执行器不等于为所有项目启用模型：每个项目仍需显式选择 Harness、模型和公开指南。
 
 ### 3.3 阶段 B：触发 Web 切流（本轮最后一步，脱离当前进程树）
 
@@ -224,7 +227,7 @@ $PIER_SSH tw-1 'ls -t /tmp/relaydesk-deploy-*.log | head -1 | xargs tail -n 60'
 
 # 2. 核对 IMAGE_TAG、容器健康状态与最近日志
 $PIER_SSH tw-1 '
-  cat /srv/apps/relaydesk/.env
+  grep -E "^IMAGE_TAG=[0-9a-f]{40}$" /srv/apps/relaydesk/.env
   cd /srv/apps/relaydesk && docker compose ps && docker compose logs --tail 40 web
 '
 

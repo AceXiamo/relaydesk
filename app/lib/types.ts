@@ -327,6 +327,7 @@ export interface ProjectReposSyncStatus {
 }
 
 export interface WidgetConfigPayload {
+  agent_enabled: boolean;
   tracking_enabled: boolean;
   can_request_deploy: boolean;
   release_window: string;
@@ -631,6 +632,18 @@ export interface ProjectExecutionRoutingResponse {
   agents: BridgeAgentSummary[];
   default_runtime?: ChatRuntime;
 }
+
+export interface FeedbackAgentSettings {
+  enabled: boolean;
+  available?: boolean;
+  runtime: ChatRuntime;
+  model: string;
+  public_guide: string;
+}
+
+export type FeedbackAgentPatch = Partial<
+  Pick<FeedbackAgentSettings, "enabled" | "runtime" | "model" | "public_guide">
+>;
 
 export interface ChatContextRef {
   kind: "file" | "repo_file" | "database" | "task" | "image";

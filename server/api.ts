@@ -7,6 +7,7 @@ import type { BridgeHub } from "./bridge-hub.ts";
 import { ChatRunManager } from "./chat-run-manager.ts";
 import { ReleaseDispatcher } from "./release-dispatcher.ts";
 import { TaskDispatcher } from "./task-dispatcher.ts";
+import { getFeedbackAgent, patchFeedbackAgent, diagnoseFeedback, feedbackAgentAvailable } from "./feedback-agent.ts";
 import { manageLinks, portalIdentity, PortalAccessError } from "./portal-access.ts";
 import { createFeedbackTicket, listFeedbackTickets, getFeedbackTicket, replyFeedbackTicket, acceptFeedbackTicket, authorizeFeedbackDeployRequest, addPublicFeedbackQuestion, widgetVisitorDigest } from "./feedback-tickets.ts";
 import { deployGateAvailable, latestDeployGate, listDeployGates, requestDeployGate } from "./deploy-gate.ts";
@@ -203,6 +204,7 @@ export class ApiRouter {
   private nextTrafficSweep = 0;
   private cliPresence = new Map<string, { seen: number; runtime: string; ready: boolean; managed: boolean; runId?: string }>();
   private assistantInFlight = 0;
+  private readonly diagnosing = new Set<string>();
   private prescreenInFlight = 0;
   private readonly maxAssistantSlots = 4;
 
@@ -514,8 +516,8 @@ export class ApiRouter {
           this.checkWidgetOrigin(req, this.store.getProjectRow(parts[1]).allowed_origins, meta);
           this.sendJson(req,res,204,null,meta);
         } else {
-          const result = await this.handleFeedback(req, method, parts, meta);
-          this.sendJson(req,res,200,result,meta);
+          const result = await this.handleFeedback(req, res, method, parts, meta);
+          if (!res.destroyed) this.sendJson(req, res, 200, result, meta);
         }
         return;
       }
@@ -575,6 +577,16 @@ export class ApiRouter {
         return;
       }
 
+      if (parts.length === 3 && parts[0] === "projects" && parts[2] === "feedback-agent") {
+        if (method !== "GET" && method !== "PATCH") throw new ApiError(405, "Method not allowed");
+        this.store.getProjectRow(parts[1]);
+        const settings = method === "GET"
+          ? getFeedbackAgent(this.store, parts[1])
+          : await patchFeedbackAgent(this.store, parts[1], await this.readJson(req, 64 * 1024));
+        const available = await feedbackAgentAvailable(this.store, parts[1]);
+        this.sendJson(req, res, 200, { ...settings, available }, meta);
+        return;
+      }
       if (parts[0] === 'projects' && parts[2] === 'portal-links') {
         const data = method === 'POST' || method === 'PATCH' ? await this.readJson(req, 8192) : {};
         const result = this.store.transaction(method !== 'GET', () => manageLinks(this.store, parts[1], method, parts.slice(3), data));
@@ -796,7 +808,7 @@ export class ApiRouter {
         parts[0] === "projects" &&
         parts[2] === "widget-config"
       ) {
-        const result = this.handleWidgetConfig(req, parts[1], meta);
+        const result = await this.handleWidgetConfig(req, parts[1], meta);
         this.sendJson(req, res, 200, result, meta);
         return;
       }
@@ -2568,6 +2580,7 @@ export class ApiRouter {
 
   private async handleFeedback(
     req: IncomingMessage,
+    res: ServerResponse,
     method: string,
     parts: string[],
     meta: { corsOrigin?: string },
@@ -2607,6 +2620,7 @@ export class ApiRouter {
           getEffectiveR2Config(this.store.dbPath),
         ),
         ai_enabled: projectPublicAiEnabled(this.store.dbPath, p.id),
+        agent_enabled: await feedbackAgentAvailable(this.store, projectId),
       };
     }
     if (method === "POST") {
@@ -2618,6 +2632,33 @@ export class ApiRouter {
     const data = method === "POST" ? await this.readJson(req) : {};
     // Body streaming yields to revocations and policy changes. Reauthorize before committing.
     const actor = method === "POST" ? authenticate() : id;
+    if (parts.length === 4 && resource === "diagnose" && method === "POST") {
+      if (!(await feedbackAgentAvailable(this.store, projectId)))
+        throw new ApiError(409, "项目反馈 Agent 暂不可用，可以直接提交反馈。");
+      // The client can disconnect while the asynchronous runner health check is pending.
+      if (res.destroyed) return;
+      authenticate();
+      const actorKey = `${projectId}:diagnose:${key}`;
+      if (this.diagnosing.has(actorKey)) throw new ApiError(409, "上一条诊断消息仍在处理中。");
+      this.rateLimit(`${projectId}:diagnose`, 32);
+      this.rateLimit(actorKey, 12);
+      if (this.assistantInFlight >= this.maxAssistantSlots) throw new ApiError(429, "反馈 Agent 正忙，请稍后再试。");
+      this.assistantInFlight++;
+      this.diagnosing.add(actorKey);
+      const abort = new AbortController();
+      const cancel = () => abort.abort();
+      res.once("close", cancel);
+      try {
+        const result = await diagnoseFeedback(this.store, projectId, data, abort.signal);
+        if (!await feedbackAgentAvailable(this.store, projectId)) throw new ApiError(409, "项目反馈 Agent 已停用或离线。");
+        authenticate();
+        return result;
+      } finally {
+        res.off("close", cancel);
+        this.diagnosing.delete(actorKey);
+        this.assistantInFlight--;
+      }
+    }
     if (parts.length === 4 && resource === "clarify" && method === "POST") {
       this.rateLimit(`${projectId}:clarify`, 20);
       if (this.assistantInFlight >= this.maxAssistantSlots)
@@ -2700,11 +2741,11 @@ export class ApiRouter {
     throw new ApiError(404, "未知反馈操作。");
   }
 
-  private handleWidgetConfig(
+  private async handleWidgetConfig(
     req: IncomingMessage,
     projectId: string,
     meta: { corsOrigin?: string },
-  ): WidgetConfigPayload {
+  ): Promise<WidgetConfigPayload> {
     const project = this.store.transaction(false, () => {
       const row = this.store.getProjectRow(projectId);
       this.checkWidgetOrigin(req, row.allowed_origins, meta);
@@ -2717,6 +2758,7 @@ export class ApiRouter {
       project_id: project.id,
       project_name: project.name,
       ai_enabled: aiEnabled,
+      agent_enabled: await feedbackAgentAvailable(this.store, projectId),
       tracking_enabled:true,
       can_request_deploy:deployGateAvailable(this.store,projectId,true),
       release_window:this.releaseWindow(projectId),

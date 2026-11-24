@@ -472,6 +472,18 @@
     animation: rd-portal-enter 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
+  .animate-rd-msg-in {
+    animation: rd-msg-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .animate-rd-draft-reveal {
+    animation: rd-draft-reveal 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .animate-rd-chip-pop {
+    animation: rd-chip-pop 220ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+
   .animate-rd-step-pop {
     animation: rd-step-pop 280ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
   }
@@ -560,6 +572,39 @@
   }
 }
 
+@keyframes rd-msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes rd-draft-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes rd-chip-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 @keyframes rd-step-pop {
   from {
     opacity: 0;
@@ -590,6 +635,9 @@
   .animate-popover-in,
   .animate-popover-in-up,
   .animate-rd-portal-in,
+  .animate-rd-msg-in,
+  .animate-rd-draft-reveal,
+  .animate-rd-chip-pop,
   .animate-rd-step-pop,
   .animate-rd-gate-scan,
   .animate-rd-shimmer,

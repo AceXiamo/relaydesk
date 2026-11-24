@@ -11,10 +11,10 @@
   const origin = new URL(script.src).origin;
   const baseUrl = origin + "/api/projects/" + encodeURIComponent(project);
   const configEndpoint = baseUrl + "/widget-config";
-  const chatEndpoint = baseUrl + "/chat";
   const uploadEndpoint = baseUrl + "/uploads";
   const intakeEndpoint = baseUrl + "/intake";
   const feedbackBaseEndpoint = baseUrl + "/widget-feedback";
+  const diagnoseEndpoint = feedbackBaseEndpoint + "/diagnose";
   const captureLibUrl = origin + "/widget-capture.js";
   const ASSET_VER = "2";
   const ASSETS = {
@@ -56,7 +56,7 @@
       kind: "使用疑问",
       tone: "question",
       title: "这个功能怎么用？",
-      desc: "直接提问，AI 会结合项目文档与实现即时解答",
+      desc: "说说你想完成什么，以及在哪一步遇到了困难",
       prompt: "请问这个功能应该怎么使用或配置：",
       img: ASSETS.guide,
       alt: "使用指南",
@@ -1383,6 +1383,7 @@
           display: flex;
           flex-direction: column;
           gap: 6px;
+          animation: rd-fade-up 210ms cubic-bezier(0.22, 1, 0.36, 1) both;
         }
         .msg-row.is-user { align-items: flex-end; }
         .msg-row.is-assistant { align-items: flex-start; }
@@ -1390,7 +1391,8 @@
         .msg-assistant-head {
           display: flex;
           align-items: center;
-          gap: 7px;
+          flex-wrap: wrap;
+          gap: 6px;
           min-height: 20px;
         }
         .msg-avatar {
@@ -1520,6 +1522,134 @@
           font-weight: 560;
         }
         .tool-pill svg { width: 11.5px; height: 11.5px; }
+
+        .outcome-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 2px 8px;
+          border-radius: 999px;
+          font-size: 10.5px;
+          font-weight: 600;
+          border: 1px solid var(--rd-border);
+          background: var(--rd-surface);
+          color: var(--rd-text-secondary);
+        }
+        .outcome-pill.is-clarify {
+          background: var(--rd-question-bg);
+          border-color: var(--rd-question-ring);
+          color: var(--rd-question-fg);
+        }
+        .outcome-pill.is-usage {
+          background: var(--rd-success-soft);
+          border-color: rgba(16, 185, 129, 0.28);
+          color: var(--rd-success);
+        }
+        .outcome-pill.is-suspected-bug {
+          background: var(--rd-idea-bg);
+          border-color: var(--rd-idea-ring);
+          color: var(--rd-idea-fg);
+        }
+
+        .msg-att-note {
+          font-size: 10.5px;
+          color: var(--rd-text-muted);
+          max-width: 90%;
+          text-align: right;
+        }
+
+        .msg-outcome-foot {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: space-between;
+          gap: 6px;
+          margin-top: 8px;
+          padding-top: 7px;
+          border-top: 1px solid var(--rd-border);
+          font-size: 11px;
+          color: var(--rd-text-muted);
+        }
+        .msg-outcome-link {
+          border: 0;
+          background: transparent;
+          padding: 0;
+          color: var(--rd-accent-text);
+          font-size: 11px;
+          font-weight: 600;
+          text-decoration: underline;
+          text-underline-offset: 2px;
+          cursor: pointer;
+        }
+
+        .ticket-card.is-diagnose-draft {
+          border-color: var(--rd-idea-ring);
+          box-shadow: 0 10px 26px -12px rgba(245, 158, 11, 0.26);
+          animation: rd-fade-up 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+        }
+        .ticket-sub-hint {
+          margin: -4px 0 0;
+          font-size: 11.5px;
+          line-height: 1.45;
+          color: var(--rd-text-muted);
+        }
+
+        .diagnose-error-card {
+          width: 100%;
+          border-radius: 13px;
+          border: 1px solid rgba(239, 68, 68, 0.28);
+          background: rgba(239, 68, 68, 0.06);
+          padding: 10px 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          font-size: 12.5px;
+          color: var(--rd-text);
+        }
+        .diagnose-error-head {
+          display: flex;
+          align-items: flex-start;
+          gap: 7px;
+          color: #f87171;
+          line-height: 1.5;
+        }
+        .diagnose-error-head svg {
+          width: 15px;
+          height: 15px;
+          flex-shrink: 0;
+          margin-top: 2px;
+        }
+        .diagnose-error-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 7px;
+        }
+        .diagnose-error-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          border-radius: 8px;
+          padding: 5px 10px;
+          font-size: 11.5px;
+          font-weight: 600;
+          cursor: pointer;
+          border: 1px solid var(--rd-border-strong);
+          background: var(--rd-surface);
+          color: var(--rd-text);
+          transition: background 140ms ease, border-color 140ms ease;
+        }
+        .diagnose-error-btn:hover {
+          background: var(--rd-surface-2);
+        }
+        .diagnose-error-btn.is-primary {
+          border-color: var(--rd-accent-border);
+          background: var(--rd-accent-soft);
+          color: var(--rd-accent-text);
+        }
+        .diagnose-error-btn svg {
+          width: 12px;
+          height: 12px;
+        }
 
         /* Inline Ticket Confirmation Card */
         .ticket-card {
@@ -2151,6 +2281,12 @@
           from { opacity: 0; transform: translateY(6px); }
           to { opacity: 1; transform: translateY(0); }
         }
+        @media (prefers-reduced-motion: reduce) {
+          .msg-row, .welcome, .ticket-card, .spin, .panel, .tabs-pill, .toggle {
+            animation-duration: 0.01ms !important;
+            transition-duration: 0.01ms !important;
+          }
+        }
 
         @media (max-width: 480px) {
           :host { inset: auto 12px 12px auto; }
@@ -2326,7 +2462,8 @@
       configPromise: null,
       config: {
         project_name: "",
-        ai_enabled: true,
+        ai_enabled: false,
+        agent_enabled: false,
         tracking_enabled: false,
         can_request_deploy: false,
         release_window: "",
@@ -2362,6 +2499,10 @@
       return state.config.tracking_enabled === true && Boolean(getVisitorSecret());
     }
 
+    function isDiagnoseAvailable() {
+      return state.config.agent_enabled === true && Boolean(getVisitorSecret());
+    }
+
     function syncTabsUi() {
       const tracking = isTrackingAvailable();
       tabsWrap.hidden = !tracking;
@@ -2371,6 +2512,10 @@
       }
       tabsTrack.classList.toggle("is-feedback", state.activeTab === "feedback");
       root.querySelectorAll("[data-tab]").forEach((btn) => {
+        if (btn.dataset.tab === "chat") {
+          const label = btn.querySelector("span");
+          if (label) label.textContent = isDiagnoseAvailable() ? "反馈助手" : "提交反馈";
+        }
         const isAct = btn.getAttribute("data-tab") === state.activeTab;
         btn.classList.toggle("is-active", isAct);
         btn.setAttribute("aria-selected", String(isAct));
@@ -2845,23 +2990,62 @@
       });
     }
 
+    function renderOutcomePillHtml(outcome) {
+      if (outcome === "clarify") {
+        return `<span class="outcome-pill is-clarify" data-outcome="clarify">需要补充信息</span>`;
+      }
+      if (outcome === "usage") {
+        return `<span class="outcome-pill is-usage" data-outcome="usage">使用指导 · 无需提单</span>`;
+      }
+      if (outcome === "suspected_bug") {
+        return `<span class="outcome-pill is-suspected-bug" data-outcome="suspected_bug">疑似缺陷 · 已生成草案</span>`;
+      }
+      return "";
+    }
+
     function renderAssistantItemInnerHtml(item) {
       const senderName = state.config.project_name
-        ? `${state.config.project_name} · AI`
-        : "Relaydesk AI";
+        ? `${state.config.project_name} · 诊断助手`
+        : "Relaydesk 诊断助手";
       const statusHtml = item.statusLabel
         ? `<div class="tool-pill">${ICONS.spinner}<span>${escapeHtml(item.statusLabel)}</span></div>`
+        : "";
+      const outcomeHtml = !item.statusLabel && !item.error && item.outcome
+        ? renderOutcomePillHtml(item.outcome)
         : "";
       const headHtml = `
         <div class="msg-assistant-head">
           <img class="msg-avatar" src="${escapeHtml(ASSETS.logo)}" alt="" width="20" height="20" />
           <span class="msg-sender">${escapeHtml(senderName)}</span>
           ${statusHtml}
+          ${outcomeHtml}
         </div>
       `;
+      if (item.error) {
+        return `${headHtml}
+          <div class="diagnose-error-card" data-role="diagnose-error">
+            <div class="diagnose-error-head">
+              ${ICONS.alert}
+              <span>${escapeHtml(item.error)}</span>
+            </div>
+            <div class="diagnose-error-actions">
+              <button type="button" class="diagnose-error-btn is-primary" data-action="retry-diagnose">${ICONS.refresh}<span>重试诊断</span></button>
+              <button type="button" class="diagnose-error-btn" data-action="quick-ticket">${ICONS.ticket}<span>改为直接提单</span></button>
+            </div>
+          </div>
+        `;
+      }
       const rendered = item.text ? renderMarkdownLite(item.text) : "";
+      let footHtml = "";
+      if (item.outcome === "usage") {
+        footHtml = `<div class="msg-outcome-foot"><span>已提供使用指引，不自动创建工单；如仍异常可继续回复或</span><button type="button" class="msg-outcome-link" data-action="quick-ticket">人工提单</button></div>`;
+      } else if (item.outcome === "clarify") {
+        footHtml = `<div class="msg-outcome-foot"><span>证据尚不充分，请继续补充现象、步骤或截图。</span></div>`;
+      } else if (item.outcome === "suspected_bug") {
+        footHtml = `<div class="msg-outcome-foot"><span>已生成可编辑草案，需你在下方显式确认后才会提交。</span></div>`;
+      }
       const bubbleHtml = rendered
-        ? `<div class="msg-bubble">${rendered}</div>`
+        ? `<div class="msg-bubble">${rendered}${footHtml}</div>`
         : "";
       return `${headHtml}${bubbleHtml}`;
     }
@@ -2946,9 +3130,9 @@
         return;
       }
       if (state.items.length === 0) {
-        const capHint = state.config.ai_enabled
-          ? "随时向助手提问怎么用、框选网页截屏排查问题，或一键提交反馈建议。"
-          : "支持框选网页截屏标注问题，点击右上角即可快速填写反馈单。";
+        const capHint = isDiagnoseAvailable()
+          ? "先对话排查是使用疑问还是疑似缺陷；确认异常后生成可编辑草案，点击确认再提单。"
+          : "当前为人工提单模式：支持框选网页截屏，发送内容或点击右上角即可填写反馈单。";
         bodyEl.innerHTML = `
           <div class="welcome">
             <div class="welcome-hero">
@@ -3053,11 +3237,16 @@
               `
                 : "";
             return `
-              <div class="ticket-card" data-ticket-id="${item.id}">
+              <div class="ticket-card ${item.isDiagnoseDraft ? "is-diagnose-draft" : ""}" data-ticket-id="${item.id}" data-draft-source="${item.isDiagnoseDraft ? "diagnose" : "manual"}">
                 <div class="ticket-head">
-                  <span class="ticket-head-left">${ICONS.ticket}<span>确认提交反馈单</span></span>
+                  <span class="ticket-head-left">${ICONS.ticket}<span>${item.isDiagnoseDraft ? "疑似缺陷 · 可编辑工单草案" : "确认提交反馈单"}</span></span>
                   <button type="button" class="icon-btn" data-dismiss-ticket="${item.id}" aria-label="移除卡片">${ICONS.close}</button>
                 </div>
+                ${
+                  item.isDiagnoseDraft
+                    ? `<p class="ticket-sub-hint">仅在你点击「确认提交反馈」后才会正式建单，可先修改标题或补充细节。</p>`
+                    : ""
+                }
                 <div class="kind-tabs">
                   ${KINDS.map(
                     (k) =>
@@ -3110,14 +3299,18 @@
           });
           if (!res.ok) return;
           const data = await res.json();
-          state.config = { ...state.config, ...data };
+          state.config = {
+            ...state.config,
+            ...data,
+            agent_enabled: data.agent_enabled === true,
+          };
           if (state.config.project_name) {
             titleEl.textContent = state.config.project_name;
           }
-          if (state.config.ai_enabled) {
-            subtitleEl.textContent = "在线解答功能疑问，或截屏一键提单";
+          if (isDiagnoseAvailable()) {
+            subtitleEl.textContent = "先诊断问题，疑似缺陷再确认提单";
           } else {
-            subtitleEl.textContent = "网页截屏反馈 · 直达处理队列";
+            subtitleEl.textContent = "网页截屏反馈 · 人工提单直达队列";
           }
           if (!state.config.upload_enabled) {
             screenshotBtn.title = "站点尚未配置 R2 图床存储";
@@ -3209,35 +3402,229 @@
       }
     }
 
+    const DIAGNOSE_MAX_MESSAGES = 25;
+    const DIAGNOSE_MAX_MSG_CHARS = 6000;
+    const DIAGNOSE_MAX_TOTAL_CHARS = 32000;
+    const DIAGNOSE_MAX_IMAGES = 8;
+
+    function clampDiagnoseText(text, limit = DIAGNOSE_MAX_MSG_CHARS) {
+      const trimmed = String(text || "").trim();
+      if (trimmed.length <= limit) return trimmed;
+      const headLen = Math.min(1600, Math.floor(limit * 0.3));
+      const tailLen = Math.max(200, limit - headLen - 3);
+      return `${trimmed.slice(0, headLen)}\n…\n${trimmed.slice(-tailLen)}`.slice(0, limit);
+    }
+
+    function normalizeDiagnoseMessages(rawList) {
+      const merged = [];
+      for (const entry of rawList) {
+        if (!entry || (entry.role !== "user" && entry.role !== "assistant")) continue;
+        const text = String(entry.text || "").trim();
+        if (!text) continue;
+        if (merged.length === 0 && entry.role !== "user") continue;
+        const prev = merged[merged.length - 1];
+        if (prev && prev.role === entry.role) {
+          prev.text = clampDiagnoseText(`${prev.text}\n\n${text}`);
+        } else {
+          merged.push({ role: entry.role, text: clampDiagnoseText(text) });
+        }
+      }
+      while (merged.length > 0 && merged[merged.length - 1].role !== "user") {
+        merged.pop();
+      }
+      while (merged.length > DIAGNOSE_MAX_MESSAGES) {
+        merged.splice(0, 2);
+      }
+      let totalChars = merged.reduce((sum, m) => sum + m.text.length, 0);
+      while (totalChars > DIAGNOSE_MAX_TOTAL_CHARS && merged.length > 1) {
+        const removed = merged.splice(0, 2);
+        for (const r of removed) totalChars -= r.text.length;
+      }
+      return merged;
+    }
+
+    function sanitizeDiagnoseImages(urls) {
+      const clean = [];
+      const seen = new Set();
+      for (const raw of urls || []) {
+        if (typeof raw !== "string" || !raw || raw.length > 2048 || seen.has(raw)) continue;
+        try {
+          const parsed = new URL(raw);
+          if (
+            (parsed.protocol === "https:" || parsed.protocol === "http:") &&
+            !parsed.username &&
+            !parsed.password &&
+            !parsed.search &&
+            !parsed.hash
+          ) {
+            seen.add(raw);
+            clean.push(raw);
+            if (clean.length >= DIAGNOSE_MAX_IMAGES) break;
+          }
+        } catch {
+          // ignore non-URL image entries
+        }
+      }
+      return clean;
+    }
+
     function openManualTicketCard(prefill = {}) {
       const existing = state.items.find((i) => i.type === "ticket" && !i.submitted);
-      if (existing) {
-        scrollToBottom();
-        return;
-      }
       const userTexts = state.items
         .filter((i) => i.type === "user" && i.text)
         .map((i) => i.text);
-      const draftSummary = prefill.summary || userTexts.join("\n\n") || inputEl.value.trim();
+      const fallbackSummary = userTexts.join("\n\n") || inputEl.value.trim();
+      const draftSummary = prefill.summary || fallbackSummary;
       const draftTitle =
         prefill.title ||
-        (draftSummary ? draftSummary.split(/\r?\n/)[0].slice(0, 72) : "");
+        (draftSummary ? draftSummary.split(/\r?\n/)[0].slice(0, 90) : "");
+      const attachments = prefill.attachments || collectConversationImageUrls();
+
+      if (existing) {
+        if (prefill.replaceDraft) {
+          existing.isDiagnoseDraft = Boolean(prefill.isDiagnoseDraft);
+          existing.draft.title = draftTitle;
+          existing.draft.summary = draftSummary;
+          if (prefill.kind) existing.draft.kind = prefill.kind;
+          existing.draft.attachments = attachments;
+          // Move updated draft card to the end so it stays right below the latest reply
+          state.items = [...state.items.filter((i) => i.id !== existing.id), existing];
+          renderBody();
+        } else if (prefill.appendIfExisting && prefill.summary) {
+          existing.draft.summary = existing.draft.summary
+            ? `${existing.draft.summary}\n\n${prefill.summary}`
+            : prefill.summary;
+          if (!existing.draft.title && draftTitle) {
+            existing.draft.title = draftTitle;
+          }
+          existing.draft.attachments = attachments;
+          renderBody();
+        }
+        scrollToBottom();
+        return;
+      }
+
       state.items.push({
         id: uid(),
         type: "ticket",
+        isDiagnoseDraft: Boolean(prefill.isDiagnoseDraft),
         draft: {
           external_id: uid(),
           title: draftTitle,
           kind: prefill.kind || "功能异常",
           priority: prefill.priority || "normal",
           summary: draftSummary,
-          attachments: collectConversationImageUrls(),
+          attachments,
         },
         submitting: false,
         submitted: null,
       });
       renderBody();
       scrollToBottom();
+    }
+
+    async function runDiagnoseRequest() {
+      if (state.streaming) return;
+      state.items = state.items.filter((i) => !(i.type === "assistant" && i.error));
+
+      const rawMessages = state.items
+        .filter(
+          (i) =>
+            i.type === "user" ||
+            (i.type === "assistant" && !i.streaming && !i.error && i.text),
+        )
+        .map((i) => ({
+          role: i.type,
+          text:
+            (i.text || "").trim() ||
+            (i.type === "user" && i.attachments && i.attachments.length ? "（已附上截图）" : ""),
+        }));
+
+      const messages = normalizeDiagnoseMessages(rawMessages);
+      if (messages.length === 0) return;
+
+      const images = sanitizeDiagnoseImages(collectConversationImageUrls());
+      const assistantItem = {
+        id: uid(),
+        type: "assistant",
+        text: "",
+        statusLabel: "正在诊断问题…",
+        streaming: true,
+        outcome: null,
+        error: "",
+      };
+      state.items.push(assistantItem);
+      state.streaming = true;
+      state.abortController = new AbortController();
+      updateSendButton();
+      renderBody();
+      scrollToBottom();
+
+      try {
+        const payload = images.length ? { messages, images } : { messages };
+        const res = await fetch(diagnoseEndpoint, {
+          method: "POST",
+          headers: widgetFeedbackHeaders(true),
+          signal: state.abortController.signal,
+          body: JSON.stringify(payload),
+        });
+
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(
+            (data && typeof data.error === "string" && data.error) ||
+              `诊断请求失败（HTTP ${res.status}）`,
+          );
+        }
+
+        const outcome = data && data.outcome;
+        const reply = data && typeof data.reply === "string" ? data.reply.trim() : "";
+        if (
+          !reply ||
+          (outcome !== "clarify" && outcome !== "usage" && outcome !== "suspected_bug")
+        ) {
+          throw new Error("诊断返回格式异常，请重试或改为直接提单。");
+        }
+
+        assistantItem.statusLabel = "";
+        assistantItem.streaming = false;
+        assistantItem.text = reply;
+        assistantItem.outcome = outcome;
+        assistantItem.error = "";
+
+        if (outcome === "suspected_bug") {
+          const draft = data.draft && typeof data.draft === "object" ? data.draft : null;
+          const draftTitle =
+            draft && typeof draft.title === "string" ? draft.title.trim() : "";
+          const draftBody =
+            draft && typeof draft.body === "string" ? draft.body.trim() : "";
+          openManualTicketCard({
+            isDiagnoseDraft: true,
+            replaceDraft: true,
+            title: draftTitle,
+            summary: draftBody,
+            kind: "功能异常",
+            attachments: collectConversationImageUrls(),
+          });
+        }
+      } catch (err) {
+        assistantItem.statusLabel = "";
+        assistantItem.streaming = false;
+        if (err && err.name === "AbortError") {
+          assistantItem.error = "已取消本次诊断。你可以点击「重试诊断」，或直接填写反馈单。";
+        } else {
+          assistantItem.error =
+            err instanceof Error && err.message
+              ? err.message
+              : "连接诊断服务失败，请重试或改为直接提单。";
+        }
+      } finally {
+        state.streaming = false;
+        state.abortController = null;
+        updateSendButton();
+        renderBody();
+        scrollToBottom();
+      }
     }
 
     async function sendChatMessage(overrideText) {
@@ -3252,6 +3639,10 @@
       if (!text && readyAtts.length === 0) return;
 
       showNotice("");
+      if (!state.configReady) {
+        await fetchWidgetConfig();
+      }
+
       if (overrideText === undefined) {
         inputEl.value = "";
         autoGrowInput();
@@ -3269,160 +3660,19 @@
         attachments: readyAtts,
       });
 
-      const assistantItem = {
-        id: uid(),
-        type: "assistant",
-        text: "",
-        statusLabel: "正在连接 AI 助手…",
-        streaming: true,
-      };
-      state.items.push(assistantItem);
-      state.streaming = true;
-      state.abortController = new AbortController();
-      updateSendButton();
-      renderBody();
-      scrollToBottom();
-
-      const history = state.items
-        .filter((i) => (i.type === "user" || (i.type === "assistant" && !i.streaming)) && (i.text || (i.attachments && i.attachments.length)))
-        .map((i) => ({
-          role: i.type,
-          text: i.text || "",
-          ...(i.attachments && i.attachments.length ? { attachments: i.attachments } : {}),
-        }));
-
-      try {
-        const res = await fetch(chatEndpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: "Bearer " + key,
-          },
-          signal: state.abortController.signal,
-          body: JSON.stringify({
-            messages: history,
-            page: {
-              url: window.location.href,
-              title: document.title || "",
-              viewport: `${window.innerWidth}x${window.innerHeight}`,
-              user_agent: navigator.userAgent || "",
-            },
-          }),
+      if (!isDiagnoseAvailable()) {
+        if (state.config.agent_enabled && !getVisitorSecret()) {
+          showNotice("当前浏览器环境无法生成访客凭证，已切换为人工提单。", 0);
+        }
+        openManualTicketCard({
+          summary: text,
+          appendIfExisting: true,
+          attachments: collectConversationImageUrls(),
         });
-
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.error || `请求失败（HTTP ${res.status}）`);
-        }
-
-        const reader = res.body?.getReader();
-        if (!reader) {
-          throw new Error("浏览器不支持流式响应");
-        }
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let pendingDraft = null;
-
-        let receivedError = false;
-        const handleSsePayload = (eventName, rawData) => {
-          let evt;
-          try {
-            evt = JSON.parse(rawData);
-          } catch {
-            return;
-          }
-          const type = evt.type || eventName;
-          if (type === "status") {
-            assistantItem.statusLabel = evt.label || "正在处理…";
-            const stick = isNearBottom();
-            updateAssistantItemDom(assistantItem);
-            if (stick) scrollToBottom(true);
-          } else if (type === "delta" && evt.text) {
-            assistantItem.statusLabel = "";
-            assistantItem.text += evt.text;
-            const stick = isNearBottom();
-            updateAssistantItemDom(assistantItem);
-            if (stick) scrollToBottom(true);
-          } else if (type === "ticket_draft" && evt.draft) {
-            pendingDraft = evt.draft;
-          } else if (type === "error") {
-            receivedError = true;
-            showNotice(evt.error || "AI 助手响应异常，请重试或直接提单", 0);
-          }
-        };
-
-        const handleBlock = (block) => {
-          let eventName = "message";
-          const dataLines = [];
-          for (const line of block.split(/\r?\n/)) {
-            if (line.startsWith("event:")) eventName = line.slice(6).trim();
-            else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-          }
-          if (dataLines.length) handleSsePayload(eventName, dataLines.join("\n"));
-        };
-
-        while (true) {
-          const { done, value } = await reader.read();
-          buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-          const blocks = buffer.split(/\r?\n\r?\n/);
-          buffer = blocks.pop();
-          for (const block of blocks) handleBlock(block);
-          if (done) {
-            if (buffer.trim()) handleBlock(buffer);
-            break;
-          }
-        }
-
-        assistantItem.statusLabel = "";
-        assistantItem.streaming = false;
-        if (!assistantItem.text.trim() && !pendingDraft) {
-          state.items = state.items.filter((i) => i.id !== assistantItem.id);
-          if (!receivedError && !state.abortController?.signal.aborted) {
-            showNotice("AI 助手未能生成回复，请重试或点击右上角「直接提单」", 0);
-          }
-        }
-        if (pendingDraft) {
-          const parts = [pendingDraft.summary];
-          if (pendingDraft.steps) parts.push(`\n**复现步骤**\n${pendingDraft.steps}`);
-          if (pendingDraft.expected) parts.push(`\n**预期结果**\n${pendingDraft.expected}`);
-          state.items.push({
-            id: uid(),
-            type: "ticket",
-            draft: {
-              external_id: uid(),
-              title: pendingDraft.title || "",
-              kind: pendingDraft.kind || "功能异常",
-              priority: pendingDraft.priority || "normal",
-              summary: parts.filter(Boolean).join("\n"),
-              attachments: collectConversationImageUrls(),
-            },
-            submitting: false,
-            submitted: null,
-          });
-        }
-      } catch (err) {
-        assistantItem.statusLabel = "";
-        assistantItem.streaming = false;
-        if (err && err.name === "AbortError") {
-          if (!assistantItem.text) {
-            state.items = state.items.filter((i) => i.id !== assistantItem.id);
-          }
-        } else {
-          if (!assistantItem.text) {
-            state.items = state.items.filter((i) => i.id !== assistantItem.id);
-          }
-          showNotice(
-            err instanceof Error ? err.message : "连接 AI 助手失败，你可以点击右上角直接提单",
-            0,
-          );
-        }
-      } finally {
-        state.streaming = false;
-        state.abortController = null;
-        updateSendButton();
-        renderBody();
-        scrollToBottom();
+        return;
       }
+
+      await runDiagnoseRequest();
     }
 
     async function submitTicketCard(itemId) {
@@ -3983,6 +4233,11 @@
         state.activeTab = "chat";
         stopFeedbackPoll();
         openManualTicketCard();
+      } else if (action === "retry-diagnose") {
+        if (!state.streaming && isDiagnoseAvailable()) {
+          showNotice("");
+          void runDiagnoseRequest();
+        }
       } else if (action === "fb-back") {
         state.selectedFeedbackId = null;
         state.feedbackDetail = null;
