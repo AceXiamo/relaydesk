@@ -29,7 +29,7 @@ export interface EffectiveR2Config extends StoredR2Config {
 export function validateR2PublicUrl(raw: string): string {
   const cleaned = raw.trim().replace(/\/+$/, "");
   if (!cleaned) {
-    throw new ApiError(400, "请输入 R2 公开访问域名（例如 https://relaydesk-r2.acexiamo.com）");
+    throw new ApiError(400, "请输入 R2 公开访问域名（例如 https://assets.example.com）");
   }
   if (cleaned.length > 512) {
     throw new ApiError(400, "R2 公开访问域名过长");

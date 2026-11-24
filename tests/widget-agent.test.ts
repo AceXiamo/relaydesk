@@ -114,7 +114,7 @@ describe("R2 image validation & upload API", () => {
       body: JSON.stringify({
         name: "Demo App",
         repos: ["acexiamo/demo-app"],
-        allowed_origins: ["https://demo.acexiamo.com"],
+        allowed_origins: ["https://demo.example.com"],
       }),
     });
     expect(createRes.status).toBe(200);
@@ -126,7 +126,7 @@ describe("R2 image validation & upload API", () => {
     // Before R2 configured: widget-config reports upload_enabled: false
     const cfgBeforeRes = await fetch(`${srv.url}/api/projects/${project.id}/widget-config`, {
       headers: {
-        Origin: "https://demo.acexiamo.com",
+        Origin: "https://demo.example.com",
         Authorization: `Bearer ${project.intake_key}`,
       },
     });
@@ -145,7 +145,7 @@ describe("R2 image validation & upload API", () => {
       body: JSON.stringify({
         account_id: "acct123",
         bucket: "relaydesk",
-        public_url: "https://relaydesk-r2.acexiamo.com",
+        public_url: "https://assets.example.com",
         endpoint: mockS3.url,
         access_key_id: "AKIA_TEST_KEY",
         secret_access_key: "SECRET_TEST_VALUE",
@@ -171,23 +171,23 @@ describe("R2 image validation & upload API", () => {
     const uploadRes = await fetch(`${srv.url}/api/projects/${project.id}/uploads`, {
       method: "POST",
       headers: {
-        Origin: "https://demo.acexiamo.com",
+        Origin: "https://demo.example.com",
         Authorization: `Bearer ${project.intake_key}`,
         "Content-Type": "image/png",
       },
       body: TINY_PNG,
     });
     expect(uploadRes.status).toBe(200);
-    expect(uploadRes.headers.get("access-control-allow-origin")).toBe("https://demo.acexiamo.com");
+    expect(uploadRes.headers.get("access-control-allow-origin")).toBe("https://demo.example.com");
     const uploadJson = (await uploadRes.json()) as { url: string; key: string; size: number };
-    expect(uploadJson.url).toMatch(/^https:\/\/relaydesk-r2\.acexiamo\.com\/uploads\/.+\.png$/);
+    expect(uploadJson.url).toMatch(/^https:\/\/assets\.example\.com\/uploads\/.+\.png$/);
     expect(uploadJson.size).toBe(TINY_PNG.length);
 
     // Submit intake with attachment -> embedded in task body Markdown
     const intakeRes = await fetch(`${srv.url}/api/projects/${project.id}/intake`, {
       method: "POST",
       headers: {
-        Origin: "https://demo.acexiamo.com",
+        Origin: "https://demo.example.com",
         Authorization: `Bearer ${project.intake_key}`,
         "Content-Type": "application/json",
       },
@@ -195,7 +195,7 @@ describe("R2 image validation & upload API", () => {
         source: "widget",
         title: "按钮样式错位",
         body: "点击保存按钮后弹出层位置偏移。",
-        source_url: "https://demo.acexiamo.com/settings",
+        source_url: "https://demo.example.com/settings",
         attachments: [uploadJson.url],
         skip_prescreen: true,
       }),

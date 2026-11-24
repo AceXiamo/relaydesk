@@ -144,7 +144,7 @@ $PIER_SSH tw-1 "pier deploy -project relaydesk-codex-scheduling -tag $SHA -messa
 $PIER_SSH tw-1 "docker pull ghcr.io/acexiamo/relaydesk:$SHA"
 ```
 
-> 若本次修改了 `deploy/compose.yml`，须在切流前先对比远端 `/srv/apps/relaydesk/compose.yml`（保留任何主机定制项），用 `pier-scp` 同步后再记录一条 `pier event -kind note`。
+> 若本次修改了 `deploy/compose.yml`，须在切流前先对比远端 `/srv/apps/relaydesk/compose.yml`（保留任何主机定制项）；模板中的 Traefik 域名来自 Compose `.env` 的 `RELAYDESK_HOST`（生产为 `relaydesk.acexiamo.com`），同步前确认已设置，用 `pier-scp` 同步后再记录一条 `pier event -kind note`。
 
 ### 3.3 阶段 B：触发 Web 切流（本轮最后一步，脱离当前进程树）
 

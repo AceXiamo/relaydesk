@@ -869,7 +869,7 @@ describe("RD-9 self-restart verification recovery, MCP tools & reverify", () => 
           target_sha: "fd99c350dfbc9f6485d4c97f649b9f350fd28e67",
           pier_server: "tw-1",
           pier_project: "relaydesk",
-          health_url: "https://relaydesk.acexiamo.com/api/auth/status",
+          health_url: "https://relaydesk.example.com/api/auth/status",
           deploy_log: "/tmp/relaydesk-deploy-fd99c350.log",
           checks: ["web healthy", "runner running", "HTTP 200 /api/auth/status"],
         },
@@ -893,7 +893,7 @@ describe("RD-9 self-restart verification recovery, MCP tools & reverify", () => 
     const midRel = (await f.ok(`/projects/${projectId}/releases/${triggered.release.id}`)).release;
     expect(midRel.finished_at).toBeNull();
     expect(midRel.verification_context.pier_server).toBe("tw-1");
-    expect(midRel.verification_context.health_url).toBe("https://relaydesk.acexiamo.com/api/auth/status");
+    expect(midRel.verification_context.health_url).toBe("https://relaydesk.example.com/api/auth/status");
     const midTask = (await f.ok(`/tasks/${created.task.id}`)).task;
     expect(midTask.deploy_status).toBe("deploying");
     expect(midTask.release_id).toBe(triggered.release.id);

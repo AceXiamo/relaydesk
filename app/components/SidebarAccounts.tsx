@@ -144,7 +144,7 @@ function AccountCard({
 }) {
   const [expanded, setExpanded] = useState(false);
   const detailsId = useId();
-  const name = account.name?.trim() || "AceXiamo";
+  const name = account.name?.trim() || "未命名账号";
   const plan = formatAccountPlan(account.service, account.plan);
   const subtitleParts = [name];
   if (preferIdentitySubtitle && account.identity && account.identity !== name) {
@@ -332,7 +332,7 @@ export function SidebarAccounts({
   // If multiple accounts share the same service and display name, show identity (email) in the subtitle to disambiguate.
   const serviceNameCounts = new Map<string, number>();
   for (const account of accounts) {
-    const key = `${account.service.toLowerCase()}::${(account.name?.trim() || "AceXiamo").toLowerCase()}`;
+    const key = `${account.service.toLowerCase()}::${(account.name?.trim() || "未命名账号").toLowerCase()}`;
     serviceNameCounts.set(key, (serviceNameCounts.get(key) ?? 0) + 1);
   }
 
@@ -340,7 +340,7 @@ export function SidebarAccounts({
     <section aria-label="绑定账号" className="max-h-[34dvh] overflow-y-auto rd-scroll">
       <ul className="space-y-1.5">
         {accounts.map((account) => {
-          const key = `${account.service.toLowerCase()}::${(account.name?.trim() || "AceXiamo").toLowerCase()}`;
+          const key = `${account.service.toLowerCase()}::${(account.name?.trim() || "未命名账号").toLowerCase()}`;
           return (
             <AccountCard
               key={account.id}

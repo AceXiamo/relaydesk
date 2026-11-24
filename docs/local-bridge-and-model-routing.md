@@ -188,7 +188,7 @@ export interface ModelCatalogItem {
   "max_concurrency": 2,
   "accept_cli_runs": true,
   "auto_detect_cli_configs": true,
-  "allowed_roots": ["/Users/AceXiamo/work"],
+  "allowed_roots": ["/Users/you/work"],
   "runtimes": {
     "claude": {
       "bin": "claude",
@@ -205,7 +205,7 @@ export interface ModelCatalogItem {
   },
   "projects": {
     "0123456789abcdef0123456789abcdef": {
-      "workdir": "/Users/AceXiamo/work/project/site/relaydesk"
+      "workdir": "/Users/you/work/my-app"
     }
   },
   "models": [

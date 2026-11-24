@@ -1,78 +1,138 @@
 # Relaydesk
 
-一个给项目维护者用的反馈工作台。把应用里的反馈组件和群 bot 接到同一个项目，把值得做的反馈放进队列，由你或本机的 coding agent 认领。每个项目绑定一个 GitHub 仓库。
+**A self-hosted feedback desk that turns user reports into tasks your coding agents can pick up.**
 
-技术栈：Node.js 24 (`node:sqlite` + TypeScript) · React Router v7 SSR · Tailwind CSS v4 · Iconify Lucide（本地离线子集）· Viem 以太坊钱包认证。
+Relaydesk collects feedback from your apps and group chats, lets you triage it into a queue, and routes the work to whoever should do it — you, a cloud runner, or the Claude Code / Codex CLI on your own machine. Each project is bound to a GitHub repository, so every task carries enough context for an agent to act on it.
 
-接手开发时，可先看产品决策、任务状态和代码入口：[项目交接文档](docs/agent-handoff.md)
+> [!NOTE]
+> The dashboard UI is currently Chinese-only. The code, API and this README are in English; contributions for i18n are welcome.
 
-## 在本机启动
+## Features
 
-需要 Node.js 24+ 与 pnpm：
+- **Feedback intake** — an embeddable `<script>` widget (with optional screenshots and an AI clarifying question), a Telegram group bot (`/feedback`), or manual entry.
+- **Triage queue** — keeps the reporter's original words separate from the confirmed requirements. Status (`triage → ready → working → review → done`) and owner (`none / human / agent`) are tracked independently, and duplicate reports can be merged into one task.
+- **Human ⇄ agent handoff** — claim a task yourself, or leave it unclaimed for an agent. Leases, heartbeats and versioned requirements keep a stale agent from writing back. You can request or force a takeover at any time.
+- **Local Bridge** — a single-file, zero-dependency Node client that connects your machine to Relaydesk over WebSocket. It runs Claude Code or Codex CLI against a local working directory and streams results back to the web chat.
+- **Priority routing** — order local agents and cloud runners per project, with automatic fallback when a node is offline.
+- **Project workspace** — a cloud file space per project (handbook, deploy runbook, files, SQLite databases) that syncs to the bridge machine.
+- **Built-in MCP server** — agents can list, comment on, update and transition tasks, track releases, and run read-only queries against project datasources (SQLite, Postgres, MySQL, Redis, MongoDB).
+- **Releases** — follow a release from build through deploy and verification, with checkpoints recorded by the agent.
+- **PR audits & CLI Q&A** — ask the project CLI about a task, or queue an audit of the linked pull request, from an isolated runner container.
+- **Wallet sign-in** — Sign-In with Ethereum (EIP-6963 + SIWE) for a single admin, with optional password login. Without it, the server only accepts loopback connections.
+
+## Tech stack
+
+Node.js 24 (`node:sqlite`, native TypeScript) · React Router v7 (SSR) · Tailwind CSS v4 · Vercel AI SDK · viem · `ws`
+
+## Quick start
+
+Requires **Node.js 24+** and **pnpm**.
 
 ```sh
 pnpm install
 pnpm dev
 ```
 
-生产构建与运行：
+Open <http://127.0.0.1:8787>, create a project and enter a repository such as `your-account/your-app`.
+
+For a production build:
 
 ```sh
 pnpm build
-pnpm start
+pnpm start          # node server.ts [--host 127.0.0.1] [--port 8787] [--db data/relaydesk.sqlite3]
 ```
 
-打开 <http://127.0.0.1:8787>，创建项目，填入仓库名（例如 `your-account/your-app`）。数据保存在 `data/relaydesk.sqlite3`，停止并重启后反馈、讨论和认领状态均会保留。
+All state lives in a single SQLite file (`data/relaydesk.sqlite3` by default) and survives restarts.
 
-## 配置项目 CLI 与 GitHub
+## How a task flows
 
-- **项目 CLI**：在当前项目的设置里选择 Codex CLI 或 Claude Code，填写 API Key，可选填 API 基础地址和模型。工单讨论与 PR 审计使用这份配置。公开反馈的模型调用需单独开启。[配置与使用](docs/assistant.md)
-- **GitHub 连接**：在同页保存 fine-grained PAT（仅需 Metadata Read-only 权限），即可在创建/编辑项目时下拉选择仓库。Token 以 `0600` 权限存于 `.github-token`。
+1. **Collect.** Paste the widget snippet from **收集入口** (Sources) into your app, run the Telegram bot, or press `N` in the dashboard.
+2. **Triage.** Open the task drawer, read the original report, write the confirmed requirements, then set priority and status. Ask the project CLI to draft acceptance criteria if you like.
+3. **Assign.** Click **我来处理** (I'll take it) to own the task, or mark it `ready` and leave it unclaimed for an agent.
+4. **Execute.** A connected Local Bridge, a cloud runner, or the legacy `agent/relay.py` connector claims the task and works in an isolated Git worktree.
+5. **Review.** When the run succeeds, the task moves to `review` with its branch and HEAD recorded. Verify, merge and close it.
 
-## 跑通第一条反馈
+## Connecting a local agent (Local Bridge)
 
-1. 在工作台按 `N` 新建反馈，或在「收集入口」复制嵌入式 `<script>` 片段粘贴到你的应用页面；群聊可通过 Telegram Bot 的 `/feedback` 指令收录。
-2. 在任务详情抽屉中核对原话、编辑执行要求、切换状态/优先级，或使用「询问项目 CLI」起草验收标准。重复反馈可合并到主任务。
-3. 自己负责的任务点「我来处理」；交给本机 Coding Agent 的任务设为「待处理」并保持未认领。
-4. 在开发机运行 `agent/relay.py` 领取任务并在独立 Git worktree 中执行。
-5. Agent 执行期间可随时「请求接手」或「强制接手」；完成后进入「待验收」供本地检查验收。
+No need to clone Relaydesk on every machine. `pnpm build` bundles `agent/bridge/` into `build/bridge/relaydesk-bridge.mjs`, and the server delivers it at `GET /api/bridge/client.mjs`, authenticated with a device bearer token and checked with `X-Content-Sha256`.
 
-| 接入 / 运维 | 文档 |
+1. In **Settings → Local Agents**, click **添加本机 Agent** (Add local agent) and copy the generated onboarding prompt.
+2. Paste the prompt into Claude Code or Codex in any directory. The agent checks for Node 24+, writes a `0600` config, downloads and verifies the client, and installs a background service (`launchd` on macOS, `systemd --user` on Linux).
+3. In the project's routing card, bind a local working directory and order local nodes and the cloud by priority.
+
+If you run behind a reverse proxy, allow WebSocket upgrades on `/api/bridge/ws` and keep the read timeout at 60 s or more. The server pings every 15 s.
+
+See [Local Bridge & model routing](docs/local-bridge-and-model-routing.md) for the protocol, schema and service templates.
+
+## Configuration
+
+Environment variables (all optional for local use):
+
+| Variable | Purpose |
 | --- | --- |
-| Pier 生产部署、CI 镜像构建与全自动自我迭代 SOP | [Pier 部署与迭代指南](docs/deployment.md) |
-| 应用反馈组件、Telegram 群机器人 | [收集端接入说明](integrations/README.md) |
-| 本机 coding agent、工作树、交接与恢复 | [执行器说明](agent/README.md) |
-| 本机 Local Bridge 节点、模型目录与执行优先级路由 | [架构与运维指南](docs/local-bridge-and-model-routing.md) |
-| Project CLI conversations and PR audits | [Runner setup, permissions and acceptance checks](docs/project-runner.md) |
-| 项目 CLI 配置、工单讨论与公开反馈 | [对话助手配置](docs/assistant.md) |
+| `PORT` | Listen port (default `8787`) |
+| `RELAYDESK_ORIGIN` | Public HTTPS origin, e.g. `https://relaydesk.example.com`. Required for wallet sign-in |
+| `RELAYDESK_ADMIN_WALLET` | Admin Ethereum address (EOA). Enables SIWE sign-in |
+| `RELAYDESK_ADMIN_PASSWORD_SHA256` | Hex SHA-256 of an admin password. Enables password sign-in alongside the wallet |
+| `RELAYDESK_ADMIN_TOKEN` | Static admin token, used when wallet mode is not configured |
+| `RELAYDESK_CODEX_BIN` / `RELAYDESK_CLAUDE_BIN` | Override the CLI binaries used for chat and runs |
+| `RELAYDESK_GITHUB_API_BASE` | GitHub API base URL (for GitHub Enterprise) |
+| `RELAYDESK_UTILITY_AI_PROVIDER` / `_ENDPOINT` / `_MODEL` / `_API_KEY` | Small model used for titles, summaries and widget prescreening |
+| `RELAYDESK_R2_*` | Cloudflare R2 bucket for widget screenshots (`ACCOUNT_ID`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `BUCKET`, `ENDPOINT`, `PUBLIC_URL`) |
 
-## 本机执行节点（Local Bridge）一键接入
+Most settings, including the project CLI provider and keys, GitHub tokens, R2 and the utility model, can also be set in the dashboard. Secrets are stored server-side in `0600` files and are never sent back to the browser.
 
-无需在每台电脑 clone Relaydesk 仓库，`pnpm build` 会自动把 `agent/bridge/` 打包为单文件零依赖客户端 `build/bridge/relaydesk-bridge.mjs`，并由服务端通过 `GET /api/bridge/client.mjs`（设备 Bearer Token 鉴权 + `X-Content-Sha256` 校验）下发：
+Without `RELAYDESK_ADMIN_WALLET` or `RELAYDESK_ADMIN_TOKEN`, the server only accepts requests from loopback. Put it behind an HTTPS reverse proxy before exposing it.
 
-1. 在设置页「本机执行节点 · Local Agents」点击 **添加本机 Agent**，生成**一键复制 Agent 接入 Prompt**；
-2. 将 Prompt 粘贴给任意目录下的 Claude Code 或 Codex，Agent 会自动校验 Node 24+、写入 `0600` 权限配置、下载校验单文件客户端并配置后台常驻（macOS `launchd` / Linux `systemd --user`）；
-3. 在项目设置「项目执行优先级与节点绑定」卡片中排列本机节点与云端的承接顺序、校验绑定本机工作目录，以及开关自动降级与工单/PR 审计本机优先。
+## Deployment
 
-反向代理（Traefik / Nginx）需放行 `/api/bridge/ws` 的 WebSocket Upgrade 请求头，并保持读超时 ≥ 60s（服务端每 15s 自动 ping 保活）。
+The repo ships a two-stage `Dockerfile` (the runtime image includes the Codex and Claude Code CLIs and runs as UID 10001), Compose files and a GitHub Actions workflow that tests and pushes images to GHCR.
 
-## 多台设备与钱包登录
+```sh
+cd deploy
+echo "RELAYDESK_HOST=relaydesk.example.com" > .env
+cp /path/to/your/app.env app.env           # RELAYDESK_* variables from the table above
+docker compose up -d
+```
 
-公网部署时请通过 HTTPS 反向代理暴露服务，并设置：
+[`deploy/compose.yml`](deploy/compose.yml) assumes an external Traefik `edge` network. Adapt the labels to your proxy. A daily SQLite online-backup script and systemd timer live in [`deploy/`](deploy/).
 
-- `RELAYDESK_ADMIN_WALLET`：管理员以太坊地址（EOA）
-- `RELAYDESK_ADMIN_PASSWORD_SHA256`（可选）：在服务端密钥配置中设置完整密码（包含末尾英文句点，UTF-8，无额外换行）的 64 位十六进制 SHA-256 摘要，重启后启用同一管理员的密码登录。未设置时仅保留钱包入口。
-- `RELAYDESK_ORIGIN`：完整 HTTPS 来源，例如 `https://relaydesk.acexiamo.com`
+| Topic | Doc |
+| --- | --- |
+| Production deployment, CI images and self-iterating releases (Pier) | [docs/deployment.md](docs/deployment.md) |
+| Isolated cloud runner for CLI Q&A and PR audits | [docs/project-runner.md](docs/project-runner.md) |
+| Project CLI settings and public AI feedback | [docs/assistant.md](docs/assistant.md) |
+| Widget and Telegram bot setup | [integrations/README.md](integrations/README.md) |
+| Legacy Python worktree connector | [agent/README.md](agent/README.md) |
+| Agent skill and CLI for scheduled task loops | [skills/relaydesk/README.md](skills/relaydesk/README.md) |
 
-登录页支持 EIP-6963 多钱包发现与 SIWE 签名验证，签发 12 小时 `HttpOnly; Secure; SameSite=Strict` 会话 Cookie。钱包模式优先于 `RELAYDESK_ADMIN_TOKEN`；未配置时仅允许本机回环访问。
+Some of these docs are still in Chinese.
 
-## 检查与测试
+## Project layout
+
+```text
+app/            React Router UI (dashboard, chat, settings)
+server/         API, SQLite store, bridge hub, MCP server, runners, releases
+server.ts       HTTP entrypoint
+agent/bridge/   Local Bridge client (bundled into a single .mjs)
+agent/          Legacy Python connector and cloud runner image
+integrations/   Telegram bot adapter
+public/         Embeddable widget, fonts, icons
+skills/         Claude Code / Codex skill for autonomous task loops
+deploy/         Compose files, backup script and timers
+tests/          Vitest and Python unittest suites
+```
+
+## Development
 
 ```sh
 pnpm typecheck
-pnpm test
-pnpm build
+pnpm test                                   # Vitest
+python3 -m unittest discover -s tests -q    # Python connector and Telegram adapter
 node --check public/widget.js
+pnpm build
 ```
 
-面板使用本地托管的 Geist Sans 和 Geist Mono 字体，许可证随字体分发。[Vercel Geist Design System](https://vercel.com/geist/introduction) · [字体许可](public/fonts/OFL.txt)
+## Acknowledgements
+
+The dashboard uses self-hosted [Geist Sans and Geist Mono](https://vercel.com/geist/introduction), distributed under the [SIL Open Font License](public/fonts/OFL.txt).

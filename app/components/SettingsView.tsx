@@ -930,12 +930,12 @@ export function SettingsView({
                     required
                     value={r2PublicUrl}
                     onChange={(e) => setR2PublicUrl(e.target.value)}
-                    placeholder="https://relaydesk-r2.acexiamo.com"
+                    placeholder="https://assets.example.com"
                     spellCheck={false}
                     className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
                   />
                   <span className="block text-[11.5px] text-[var(--text-muted)]">
-                    上传后的截图将以 <code className="font-mono">{r2PublicUrl || "https://relaydesk-r2.acexiamo.com"}/uploads/...</code> 嵌进反馈单并供 AI 多模态读取。
+                    上传后的截图将以 <code className="font-mono">{r2PublicUrl || "https://assets.example.com"}/uploads/...</code> 嵌进反馈单并供 AI 多模态读取。
                   </span>
                 </label>
 
