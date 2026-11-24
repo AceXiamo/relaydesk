@@ -810,20 +810,25 @@ function FastModeButton({
         onKeyDown={(e) => { if (e.key === "Escape") setHintDismissed(true); }}
         onClick={() => { if (!disabled) onChange(nextMode); }}
         className={cn(
-          "rd-focus-ring inline-flex size-8 sm:size-7 items-center justify-center rounded-lg cursor-pointer aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
-          pressed ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300 [&_path]:fill-current"
+          "rd-focus-ring inline-flex size-8 sm:size-7 items-center justify-center rounded-lg transition-all duration-150 cursor-pointer aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
+          pressed
+            ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300 [&_path]:fill-current"
             : "text-[var(--text-muted)]",
-          !pressed && !disabled && "hover:bg-[var(--surface-hover)]",
+          !disabled && "active:scale-[0.93]",
+          !pressed && !disabled && "hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
         )}
       >
-        <Icon name="zap" size={15} />
+        <Icon name="zap" size={14} />
       </button>
       <span
         id={hintId}
         role="tooltip"
         className={cn(
-          "invisible absolute right-0 bottom-full z-40 w-max max-w-52 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] px-2 py-1.5 text-xs text-[var(--text-secondary)] shadow-sm",
-          !hintDismissed && "group-hover/fast:visible group-focus-within/fast:visible",
+          "pointer-events-none invisible opacity-0 translate-y-1 scale-[0.98]",
+          "absolute right-0 bottom-full mb-2 z-40 w-max max-w-56 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/95 backdrop-blur-md px-2.5 py-1.5 text-[11.5px] leading-relaxed text-[var(--text-secondary)] shadow-[var(--rd-shadow-lg)]",
+          "transition-all duration-150 ease-[cubic-bezier(0.16,1,0.3,1)]",
+          !hintDismissed &&
+            "group-hover/fast:visible group-hover/fast:opacity-100 group-hover/fast:translate-y-0 group-hover/fast:scale-100 group-focus-within/fast:visible group-focus-within/fast:opacity-100 group-focus-within/fast:translate-y-0 group-focus-within/fast:scale-100",
         )}
       >{hint}</span>
     </span>
@@ -990,7 +995,7 @@ function ModelControls({
     if (closeAfter) close();
   };
   const pillClass =
-    "inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] disabled:opacity-50 cursor-pointer min-w-0";
+    "inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-all duration-150 enabled:active:scale-[0.97] disabled:opacity-50 cursor-pointer min-w-0";
   return (
     <div
       className="contents"
@@ -1011,7 +1016,7 @@ function ModelControls({
         aria-haspopup="dialog"
         aria-expanded={open}
         title={`切换运行工具与模型：${model || "CLI 默认"}`}
-        className={cn(pillClass, open && "bg-[var(--surface-hover)]")}
+        className={cn(pillClass, open && "bg-[var(--surface-hover)] text-[var(--text-primary)]")}
         onClick={() => {
           setQuery("");
           setIndex(0);
@@ -1023,7 +1028,11 @@ function ModelControls({
         <span className="max-w-[88px] sm:max-w-[200px] truncate font-mono text-[11px] text-[var(--text-muted)]">
           {current?.label || model || "默认模型"}
         </span>
-        <Icon name="chevron-down" size={11} className="shrink-0" />
+        <Icon
+          name="chevron-down"
+          size={11}
+          className={cn("shrink-0 transition-transform duration-150", open && "rotate-180")}
+        />
       </button>
       {open && (
         <div
@@ -1675,7 +1684,7 @@ export function PromptBar({
       )}
 
       {/* Outer Execution Environment Bar (above composer card) */}
-      <div className="mb-2 px-0.5 flex items-center justify-between gap-2">
+      <div className="mb-2 px-0.5 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           {onChangeExecutionTarget && (
             <ExecutionTargetSelect
@@ -1704,7 +1713,7 @@ export function PromptBar({
                 : "当前为只读探索模式；点击切为可写项目空间"
             }
             className={cn(
-              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-colors cursor-pointer disabled:opacity-50",
+              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-all duration-150 enabled:active:scale-[0.97] cursor-pointer disabled:opacity-50",
               sandboxMode === "workspace-write"
                 ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/18"
                 : "border-[var(--border-subtle)] bg-[var(--surface-card)]/90 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]",
@@ -1729,7 +1738,7 @@ export function PromptBar({
                   : "Codex 沙箱当前断网；点击开启联网"
               }
               className={cn(
-                "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-colors cursor-pointer disabled:opacity-50",
+                "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-all duration-150 enabled:active:scale-[0.97] cursor-pointer disabled:opacity-50",
                 networkAccess
                   ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/18"
                   : "border-[var(--border-subtle)] bg-[var(--surface-card)]/90 text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]",
@@ -1739,6 +1748,10 @@ export function PromptBar({
               <span className="hidden sm:inline">{networkAccess ? "联网" : "断网"}</span>
             </button>
           )}
+
+          <span className="hidden sm:inline-block h-3.5 w-px bg-[var(--border-subtle)] mx-0.5" />
+
+          <ContextUsageLabel session={contextSession} variant="pill" align="right" />
         </div>
       </div>
 
@@ -1766,13 +1779,20 @@ export function PromptBar({
           }
         }}
         className={cn(
-          "rounded-2xl border bg-[var(--surface-elevated)] shadow-[var(--rd-shadow-md)] focus-within:border-[var(--border-strong)] focus-within:ring-2 focus-within:ring-[var(--rd-ring)]/40 transition-all",
+          "relative rounded-2xl border bg-[var(--surface-elevated)] shadow-[var(--rd-shadow-md)] focus-within:border-[var(--border-strong)] focus-within:ring-2 focus-within:ring-[var(--rd-ring)]/35 transition-all duration-200",
           dragOverImage
             ? "border-indigo-500 ring-2 ring-indigo-500/30"
             : "border-[var(--border-subtle)]",
         )}
       >
-        <ContextUsageLabel session={contextSession} />
+        {dragOverImage && (
+          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-[var(--surface-elevated)]/80 backdrop-blur-[2px] animate-fade-in">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-3 py-1 text-[12px] font-medium text-indigo-600 dark:text-indigo-300 shadow-xs">
+              <Icon name="image" size={13} />
+              释放以上传图片
+            </span>
+          </div>
+        )}
         {/* Attached Context Chips inside Composer */}
         {attachments.length > 0 && (
           <div className="px-3 pt-2.5 pb-0.5 flex flex-wrap items-center gap-1.5">
@@ -1846,7 +1866,7 @@ export function PromptBar({
         />
 
         {/* Inner Bottom Action Pill Bar */}
-        <div className="px-2 sm:px-2.5 pb-2 pt-0.5 flex items-center justify-between gap-1.5 sm:gap-2">
+        <div className="px-2 sm:px-2.5 pb-2.5 pt-1 flex items-center justify-between gap-1.5 sm:gap-2">
           <div className="flex items-center gap-0.5 sm:gap-1 min-w-0 flex-1">
             {onUploadImages && (
               <>
@@ -1869,7 +1889,7 @@ export function PromptBar({
                   title="上传图片（也支持粘贴或拖入）"
                   aria-label="上传图片"
                   className={cn(
-                    "inline-flex items-center justify-center gap-1 h-8 w-8 sm:w-auto sm:h-7 sm:px-2 rounded-lg text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
+                    "inline-flex items-center justify-center gap-1 h-8 w-8 sm:w-auto sm:h-7 sm:px-2 rounded-lg text-[12px] font-medium transition-all duration-150 enabled:active:scale-[0.96] cursor-pointer disabled:opacity-50 shrink-0",
                     hasImageAttachment
                       ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                       : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
@@ -1893,7 +1913,7 @@ export function PromptBar({
               }}
               title="引用项目空间文件、数据库或工单 (@)"
               className={cn(
-                "inline-flex items-center justify-center gap-1 h-8 px-2 sm:h-7 rounded-lg text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
+                "inline-flex items-center justify-center gap-1 h-8 px-2 sm:h-7 rounded-lg text-[12px] font-medium transition-all duration-150 enabled:active:scale-[0.96] cursor-pointer disabled:opacity-50 shrink-0",
                 popover === "mention" || attachments.length > 0
                   ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
@@ -1902,7 +1922,7 @@ export function PromptBar({
               <Icon name="at-sign" size={14} />
               <span className="hidden sm:inline">引用</span>
               {attachments.length > 0 && (
-                <span className="font-mono text-[10.5px] px-1 rounded bg-indigo-500/15">
+                <span className="font-mono text-[10.5px] px-1 rounded bg-indigo-500/15 tabular-nums">
                   {attachments.length}
                 </span>
               )}
@@ -1918,7 +1938,7 @@ export function PromptBar({
               }}
               title="快捷指令 (/)"
               className={cn(
-                "inline-flex items-center justify-center h-8 w-8 sm:h-7 sm:w-7 rounded-lg text-[12px] font-mono font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0",
+                "inline-flex items-center justify-center h-8 w-8 sm:h-7 sm:w-7 rounded-lg text-[12px] font-mono font-medium transition-all duration-150 enabled:active:scale-[0.96] cursor-pointer disabled:opacity-50 shrink-0",
                 popover === "slash"
                   ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
@@ -1951,12 +1971,17 @@ export function PromptBar({
           {/* Right Side: Streaming hint + Send/Stop Pill */}
           <div className="flex items-center gap-2 shrink-0">
             {streaming && statusLine ? (
-              <span className="hidden md:inline text-[11.5px] text-[var(--text-muted)] truncate max-w-[180px]">
-                {statusLine}
+              <span className="hidden md:inline-flex items-center gap-1.5 text-[11.5px] text-[var(--text-muted)] truncate max-w-[180px]">
+                <LivePulseDot tone="indigo" active />
+                <span className="truncate">{statusLine}</span>
               </span>
             ) : (
-              <span className="hidden md:inline text-[11px] text-[var(--text-muted)] select-none whitespace-nowrap">
-                Enter 发送 · Shift+Enter 换行
+              <span
+                title="Enter 发送 · Shift+Enter 换行"
+                className="hidden lg:inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]/80 select-none whitespace-nowrap"
+              >
+                <kbd className="rd-kbd !h-[18px] !min-w-[18px] !px-1 !text-[10px]">↵</kbd>
+                <span>发送</span>
               </span>
             )}
 
@@ -1967,7 +1992,7 @@ export function PromptBar({
                 onClick={onAbort}
                 title="停止生成"
                 aria-label="停止生成"
-                className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full bg-rose-500/12 text-rose-600 dark:text-rose-400 border border-rose-500/25 enabled:hover:bg-rose-600 enabled:hover:text-white text-[12px] font-medium transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full bg-rose-500/12 text-rose-600 dark:text-rose-400 border border-rose-500/25 enabled:hover:bg-rose-600 enabled:hover:text-white enabled:active:scale-[0.95] text-[12px] font-medium transition-all duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Icon name="square" size={10} />
                 <span>停止</span>
@@ -1980,13 +2005,17 @@ export function PromptBar({
               title={streaming ? "停止当前回复并发送追问" : "发送消息"}
               aria-label={streaming ? "停止当前回复并发送追问" : "发送消息"}
               className={cn(
-                "inline-flex items-center justify-center h-7 w-7 rounded-full transition-all",
+                "group/send inline-flex items-center justify-center h-7 w-7 rounded-full transition-all duration-150",
                 canSend
-                  ? "bg-[var(--rd-ink)] text-[var(--rd-surface)] hover:opacity-90 shadow-xs cursor-pointer"
+                  ? "bg-[var(--rd-ink)] text-[var(--rd-surface)] hover:opacity-92 enabled:hover:scale-[1.04] enabled:active:scale-[0.92] shadow-xs cursor-pointer"
                   : "bg-[var(--surface-subtle)] text-[var(--text-muted)] opacity-60 cursor-not-allowed",
               )}
             >
-              <Icon name="arrow-up" size={14} />
+              <Icon
+                name="arrow-up"
+                size={14}
+                className={canSend ? "transition-transform duration-150 group-hover/send:-translate-y-[0.5px]" : undefined}
+              />
             </button>
           </div>
         </div>

@@ -19,3 +19,10 @@ it("keeps unknown counts distinct from zero, and does not invent a window", () =
   expect(label(64500)).toContain("64,500 tokens");
   expect(label(64500)).not.toContain("%");
 });
+
+it("renders radial ring and threshold tones for high context usage", () => {
+  expect(label(225000, 258000)).toContain("stroke-rose-500");
+  expect(label(180000, 258000)).toContain("stroke-amber-500");
+  expect(label(64500, 258000)).toContain("stroke-indigo-500");
+  expect(label(undefined, 258000)).toContain('stroke-dasharray="2 2"');
+});

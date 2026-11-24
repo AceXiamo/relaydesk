@@ -653,7 +653,6 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                 </div>
               )}
 
-              <ContextUsageLabel session={session} />
               <RichPromptEditor
                 ref={composerRef}
                 value={draft}
@@ -698,10 +697,11 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                       : offlineTarget ? "本机节点离线。上线后可手动发送草稿。"
                       : savingConfig
                         ? "正在保存执行配置…"
-                        : "Enter 发送 · Shift+Enter 换行 · 支持 `行内代码` 与 ``` 代码块"}
+                        : "Enter 发送 · Shift+Enter 换行"}
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
+                  <ContextUsageLabel session={session} variant="ghost" align="right" />
                   {running && <Button type="button" size="xs" variant="secondary" disabled={blocked} onClick={stop}>停止</Button>}
                   <Button type="submit" size="xs" variant="primary" icon="send" disabled={(!draft.trim() && attachments.length === 0) || offlineTarget || blocked || savingConfig || uploadingImages}>{running ? "发送插话" : "发送"}</Button>
                 </div>
