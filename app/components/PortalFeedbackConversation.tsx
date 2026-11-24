@@ -1222,7 +1222,7 @@ export function PortalFeedbackConversation({
     >
       <div
         className={cn(
-          "relative flex-1 flex min-h-[460px] h-[calc(100dvh-7.25rem)] rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] transition-all duration-150 overflow-hidden animate-rd-portal-in",
+          "relative flex-1 flex min-h-0 rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] transition-all duration-150 overflow-hidden animate-rd-portal-in",
           dragOver && "shadow-[0_0_0_1.5px_var(--p-cobalt),var(--p-shadow-card)]",
         )}
       >

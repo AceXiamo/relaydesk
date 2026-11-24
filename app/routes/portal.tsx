@@ -1172,6 +1172,8 @@ function PortalContent() {
   const agentOnline = agentEnabled && config.agent_available !== false;
   const agentOffline = agentEnabled && config.agent_available === false;
 
+  const showConversation = !submittedDetail && agentOnline && submitMode === "agent";
+
   const handleRecheckAvailability = async () => {
     setRecheckingConfig(true);
     try {
@@ -1188,7 +1190,10 @@ function PortalContent() {
   return (
     <div className="rd-portal-shell min-h-dvh bg-[var(--p-page)] text-[var(--p-ink)]">
       {/* Compact 3-Column Architectural Shell */}
-      <div className="relative mx-auto max-w-[1380px] min-h-dvh bg-[var(--p-page)] shadow-[0_0_0_1px_var(--p-line)] flex flex-col">
+      <div className={cn(
+        "relative mx-auto max-w-[1380px] bg-[var(--p-page)] shadow-[0_0_0_1px_var(--p-line)] flex flex-col",
+        tab === "submit" && showConversation ? "h-dvh" : "min-h-dvh",
+      )}>
         {/* Single-Row Dense Header */}
         <header className="border-b border-[var(--p-line)] px-4 sm:px-5 py-2">
           <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -1324,11 +1329,11 @@ function PortalContent() {
         </header>
 
         {/* 3-Column Body: Left (My Progress) + Center (Chat / Feed / Detail) + Right (Service & Shipped) */}
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[224px_minmax(0,1fr)] xl:grid-cols-[224px_minmax(0,1fr)_236px]">
+        <div className="flex-1 min-h-0 grid grid-rows-[minmax(0,1fr)] grid-cols-1 lg:grid-cols-[224px_minmax(0,1fr)] xl:grid-cols-[224px_minmax(0,1fr)_236px]">
           {/* ── LEFT RAIL: Actionable & Recent My Feedback ── */}
           <aside
             aria-label="我的反馈动态"
-            className="hidden lg:flex flex-col border-r border-[var(--p-line)] bg-[var(--p-page)] p-3.5 space-y-4"
+            className="hidden lg:flex flex-col overflow-y-auto border-r border-[var(--p-line)] bg-[var(--p-page)] p-3.5 space-y-4"
           >
             {/* Pending actions for the user */}
             {pendingMineTasks.length > 0 && (
@@ -1459,11 +1464,11 @@ function PortalContent() {
           </aside>
 
           {/* Main Content Canvas */}
-          <main className="min-w-0 w-full flex flex-col">
+          <main className="min-h-0 min-w-0 w-full flex flex-col">
             {/* ── TAB 1: EXPRESS FEEDBACK (TRADITIONAL CHAT + COMPACT PROGRESS DOCK) ── */}
             <div
               className={cn(
-                "flex-1 flex flex-col px-4 sm:px-5 py-4 space-y-4 animate-rd-portal-in",
+                "flex-1 min-h-0 flex flex-col px-4 sm:px-5 py-4 space-y-4 animate-rd-portal-in",
                 tab !== "submit" && "hidden",
               )}
             >
@@ -1521,7 +1526,7 @@ function PortalContent() {
                     </button>
                   </div>
                 </section>
-              ) : agentOnline && submitMode === "agent" ? (
+              ) : showConversation ? (
                 <PortalFeedbackConversation
                   projectId={projectId}
                   config={config}
@@ -1851,7 +1856,7 @@ function PortalContent() {
 
               {/* ── COMPACT RETURNING USER PROGRESS DOCK (mobile/tablet only; desktop uses left rail) ── */}
               {!conversationActive && !submittedDetail && returningPreviewTasks.length > 0 && (
-                <section className="lg:hidden pt-1 space-y-2">
+                <section className={cn("lg:hidden pt-1 space-y-2", showConversation && "max-h-[30%] overflow-y-auto")}>
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-[10.5px] uppercase tracking-[0.05em] text-[var(--p-ink-3)]">
@@ -2526,7 +2531,7 @@ function PortalContent() {
           {/* ── RIGHT RAIL: Service Status, Recent Shipped Fixes & Flow ── */}
           <aside
             aria-label="服务状态与最近上线"
-            className="hidden xl:flex flex-col border-l border-[var(--p-line)] bg-[var(--p-page)] p-3.5 space-y-4"
+            className="hidden xl:flex flex-col overflow-y-auto border-l border-[var(--p-line)] bg-[var(--p-page)] p-3.5 space-y-4"
           >
             {/* Service & Release Status */}
             <section className="space-y-2">
