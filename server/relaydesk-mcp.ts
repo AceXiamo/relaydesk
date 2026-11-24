@@ -901,7 +901,7 @@ function buildToolDefinitions(hasTasks: boolean) {
         {
           name: "checkpoint_release",
           description:
-            "Persist the target SHA and verification metadata (Pier server/project, health URL, deploy log, checks) on a release (REL-xxx) BEFORE executing a cutover/restart so post-restart verification has full context.",
+            "Persist the target SHA and verification metadata (health URL, deploy log, checks, and optional Pier server/project if using Pier) on a release (REL-xxx) BEFORE executing a cutover/restart so post-restart verification has full context.",
           annotations: taskWriteAnnotations,
           inputSchema: {
             type: "object",
@@ -921,11 +921,11 @@ function buildToolDefinitions(hasTasks: boolean) {
               },
               pier_server: {
                 type: "string",
-                description: "Target Pier server name (e.g. tw-1)",
+                description: "Optional Pier server name (only if this project deploys via Pier)",
               },
               pier_project: {
                 type: "string",
-                description: "Target Pier project name (e.g. relaydesk)",
+                description: "Optional Pier project name (only if this project deploys via Pier)",
               },
               health_url: {
                 type: "string",

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Store } from "../server/store.ts";
 import {
+  buildReleaseVerifyPrompt,
+  buildReleaseVerifySystemContext,
   isInsideDeployWindow,
   ReleaseDispatcher,
   FAILED_RELEASE_COOLDOWN_MS,
@@ -1074,5 +1076,75 @@ describe("RD-9 self-restart verification recovery, MCP tools & reverify", () => 
     expect(f.srv.store.listReleases(projectId)).toHaveLength(1);
     expect(f.srv.store.getTaskView(t7.task.id).deploy_status).toBe("deployed");
     expect(f.srv.store.getTaskView(t8.task.id).deploy_status).toBe("deployed");
+  });
+
+  it("omits Pier requirements from verify prompts unless Pier metadata is recorded on the release", () => {
+    const project = {
+      id: "proj-intranet",
+      name: "Intranet Service",
+      repo: "org/intranet-service",
+      repos: [],
+      automation_paused: false,
+      delivery_mode: "direct_push" as const,
+      widget_code_context: false,
+      agent_instructions: "",
+      deploy_policy: {
+        mode: "manual" as const,
+        window_start: "00:00",
+        window_end: "23:59",
+        timezone: "Asia/Shanghai",
+        allow_urgent_override: true,
+        doc_path: "",
+        runtime: "codex" as const,
+        model: "",
+        reasoning_effort: "medium" as const,
+      },
+    };
+
+    const baseRelease = {
+      id: "rel-1",
+      project_id: project.id,
+      number: 7,
+      trigger: "manual" as const,
+      status: "verifying" as const,
+      summary: "",
+      deploy_ref: "main@abc1234",
+      target_sha: "abc1234567890abcdef1234567890abcdef12345",
+      verification_context: {
+        health_url: "http://10.0.0.12:8080/health",
+      },
+      session_id: "sess-1",
+      task_ids: [],
+      task_snapshot: [],
+      created_at: "2026-11-24T00:00:00.000Z",
+      updated_at: "2026-11-24T00:00:00.000Z",
+      started_at: "2026-11-24T00:00:00.000Z",
+      finished_at: null,
+    };
+
+    const nonPierSys = buildReleaseVerifySystemContext(project, baseRelease, { deployDocExists: true });
+    const nonPierPrompt = buildReleaseVerifyPrompt(project, baseRelease);
+
+    expect(nonPierSys).not.toMatch(/\bpier\b/i);
+    expect(nonPierPrompt).not.toMatch(/\bpier\b/i);
+    expect(nonPierSys).toContain("Read the deployment documentation first");
+    expect(nonPierPrompt).toContain("先阅读项目部署文档");
+
+    const pierRelease = {
+      ...baseRelease,
+      verification_context: {
+        ...baseRelease.verification_context,
+        pier_server: "tw-1",
+        pier_project: "relaydesk",
+      },
+    };
+
+    const pierSys = buildReleaseVerifySystemContext(project, pierRelease, { deployDocExists: true });
+    const pierPrompt = buildReleaseVerifyPrompt(project, pierRelease);
+
+    expect(pierSys).toContain("Pier deployment record");
+    expect(pierSys).toContain("tw-1");
+    expect(pierPrompt).toContain("Pier 目标");
+    expect(pierPrompt).toContain("Pier 部署记录");
   });
 });

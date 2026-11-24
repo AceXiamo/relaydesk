@@ -115,7 +115,7 @@ export function buildReleaseSystemContext(
     ...(release.trigger === "ai_gate" ? [`This approval is for the exact batch below and immutable target ${release.target_sha} only. Verify the running baseline and target before cutover; block if either differs from the approved baseline ${release.verification_context.ai_gate_baseline} and target. Never deploy a moving branch, latest image or a superset.`] : []),
     `1. **Read the deployment runbook first.** Follow the documented build, deploy, and verification steps faithfully.`,
     `2. **Block when docs are missing or high-risk:** If NO clear deployment procedure is documented in the sources above, OR if this release involves unconfirmed destructive database migrations, production secret rotations, or irreversible infrastructure changes, do **NOT** guess or improvise—call \`finish_release(release_id: "${relCode}", status: "blocked", summary: "<exact missing info or risk>")\` and stop.`,
-    `3. **Persist pre-cutover checkpoint:** Before executing any deployment cutover or container rebuild (especially if deploying this project may restart Relaydesk itself or drop the bridge connection), call MCP \`checkpoint_release(release_id: "${relCode}", target_sha: "<full-40-char-sha>", deploy_ref: "<branch@sha>", pier_server: "<server>", pier_project: "<project>", health_url: "<url>", deploy_log: "<remote-log-path>", checks: [...], notes: "<rollback baseline / extra info>")\` so post-restart verification has full context.`,
+    `3. **Persist pre-cutover checkpoint:** Before executing any deployment cutover or service restart (especially if deploying this project may restart Relaydesk itself or drop the bridge connection), call MCP \`checkpoint_release(release_id: "${relCode}", target_sha: "<full-40-char-sha>", deploy_ref: "<branch@sha>", health_url: "<url>", deploy_log: "<remote-log-path>", checks: [...], notes: "<rollback baseline / extra info>")\` (pass \`pier_server\` / \`pier_project\` only when this project deploys via Pier) so post-restart verification has full context.`,
     `4. **Verify code & health:** Confirm the local/remote branch matches the commits for the included tasks, execute the deployment steps, and verify production health/smoke checks before declaring success.`,
     `5. **Self-restart resilience:** If deploying this project restarts the Relaydesk server itself, persist \`checkpoint_release\` first, then trigger the detached cutover as the final step. Once reconnected, verification can resume on this same release without re-deploying.`,
     `6. **Never expose credentials:** Never print raw passwords, API keys, SSH private keys, or database connection strings in output or release summaries.`,
@@ -146,6 +146,19 @@ export function buildReleaseVerifySystemContext(
     `${docOrder.length + 1}. Project Handbook deployment section: \`$RELAYDESK_SPACE_DIR/HANDBOOK.md\`.`,
   );
 
+  const ctx = release.verification_context;
+  const hasPierContext = Boolean(ctx.pier_server || ctx.pier_project);
+  const evidenceItems: string[] = [
+    `   - **Actual running version / target SHA** on the documented target server/service (e.g. deployed git commit/tag, version endpoint, \`.env\` / \`IMAGE_TAG\`, or container image digest) matching the expected target SHA.`,
+    `   - **Service & health checks** matching the deployment documentation and persisted \`health_url\` / \`checks\` (e.g. process/service/container status and configured internal or public health endpoint).`,
+    `   - **Deployment logs / records** if available (e.g. persisted \`deploy_log\` or documented remote deployment logs).`,
+  ];
+  if (hasPierContext) {
+    evidenceItems.push(
+      `   - **Pier deployment record** matching this release / target SHA for the recorded Pier target (\`${ctx.pier_server || "unspecified"}\` / \`${ctx.pier_project || "unspecified"}\`).`,
+    );
+  }
+
   return [
     `## Production Release Re-Verification Workflow (${relCode} · VERIFY-ONLY)`,
     `You are performing **read-only post-deploy verification** on existing Relaydesk release **${relCode}** (ID: \`${release.id}\`) for project "${project.name}".`,
@@ -155,17 +168,16 @@ export function buildReleaseVerifySystemContext(
     ...docOrder,
     "",
     "### Strict VERIFY-ONLY Rules",
-    `1. **NEVER re-deploy or mutate production:** Do NOT run \`pier deploy\`, \`docker compose up\`, rebuild images, restart containers, push git commits, or trigger any deployment action. Perform **read-only verification checks only**.`,
-    `2. **Three mandatory evidence pillars:** Judge the actual state of \`${relCode}\` strictly from real evidence:`,
-    `   - **Pier deployment record** matching this release / target SHA (e.g. via Pier MCP or remote Pier logs).`,
-    `   - **Actual running target SHA** on the target server/containers (e.g. \`.env\` / \`IMAGE_TAG\` / container image digest/tag) matching the expected target SHA.`,
-    `   - **Container & public health checks** (containers healthy/running and public health endpoint returning HTTP 200).`,
-    `3. **Exact outcome mapping via \`finish_release\`:**`,
-    `   - **All evidence present & healthy** → call \`finish_release(release_id: "${relCode}", status: "succeeded", target_sha: "<verified-sha>", deploy_ref: "<verified-ref>", summary: "<concise evidence: Pier record, running SHA, container & HTTP health>")\`. This syncs the release and linked tasks idempotently (and corrects any prior false failure while preserving the original failure reason).`,
-    `   - **Confirmed failure or rollback** (e.g. Pier recorded deploy failure, service rolled back to previous SHA, or containers unhealthy/crashing) → call \`finish_release(release_id: "${relCode}", status: "failed", summary: "<exact verified failure or rollback evidence>")\`.`,
-    `   - **Insufficient evidence** (e.g. remote deploy is still in progress, server unreachable, or running SHA/Pier record cannot yet be confirmed) → call \`finish_release(release_id: "${relCode}", status: "verifying", summary: "<what was checked and what evidence is still missing>")\`.`,
-    `4. **Never expose credentials:** Never print raw passwords, API keys, SSH private keys, or database connection strings.`,
-    `5. **Mandatory completion call:** Always end by calling MCP \`finish_release\` for \`${relCode}\`.`,
+    `1. **Read the deployment documentation first:** Check the documented target host(s), deployment method, version check, and health check endpoints before running any inspection commands.`,
+    `2. **NEVER re-deploy or mutate production:** Do NOT run deploy scripts, \`docker compose up\`, rebuild images, restart services/containers, push git commits, or trigger any mutating action. Perform **read-only verification checks only**.`,
+    `3. **Verify strictly from real evidence:** Judge the actual state of \`${relCode}\` from the checks documented for this project and the persisted verification context:`,
+    ...evidenceItems,
+    `4. **Exact outcome mapping via \`finish_release\`:**`,
+    `   - **All documented checks pass & target SHA confirmed** → call \`finish_release(release_id: "${relCode}", status: "succeeded", target_sha: "<verified-sha>", deploy_ref: "<verified-ref>", summary: "<concise evidence: running SHA, service & health checks${hasPierContext ? ", Pier record" : ""}>")\`. This syncs the release and linked tasks idempotently (and corrects any prior false failure while preserving the original failure reason).`,
+    `   - **Confirmed failure or rollback** (e.g. deploy failed in logs, service rolled back to previous SHA, or service/health checks failing) → call \`finish_release(release_id: "${relCode}", status: "failed", summary: "<exact verified failure or rollback evidence>")\`.`,
+    `   - **Insufficient evidence** (e.g. remote deploy is still in progress, target host unreachable, or running SHA cannot yet be confirmed) → call \`finish_release(release_id: "${relCode}", status: "verifying", summary: "<what was checked and what evidence is still missing>")\`.`,
+    `5. **Never expose credentials:** Never print raw passwords, API keys, SSH private keys, or database connection strings.`,
+    `6. **Mandatory completion call:** Always end by calling MCP \`finish_release\` for \`${relCode}\`.`,
   ].join("\n");
 }
 
@@ -230,9 +242,13 @@ export function buildReleaseVerifyPrompt(
   if (extraPrompt?.trim()) {
     lines.push("", "## 操作者附加验收说明", extraPrompt.trim());
   }
+  const verifyScope =
+    ctx.pier_server || ctx.pier_project
+      ? "先按项目部署文档核对实际运行的目标 SHA、服务与健康检查状态，以及对应 Pier 部署记录"
+      : "先阅读项目部署文档，按文档指定的目标主机、版本核对方式与健康检查入口核对实际运行的目标 SHA 与服务状态";
   lines.push(
     "",
-    `请严格仅执行只读验收检查（核对对应 Pier 部署记录、实际运行的目标 SHA、容器状态与公网健康检查），不要触发任何部署或重启操作；核验完毕后调用 \`finish_release\` 更新 \`${relCode}\` 状态。`,
+    `请严格仅执行只读验收检查（${verifyScope}），不要触发任何部署或重启操作；核验完毕后调用 \`finish_release\` 更新 \`${relCode}\` 状态。`,
   );
   return lines.join("\n");
 }
