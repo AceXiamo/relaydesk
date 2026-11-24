@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runLocalChat } from "../agent/bridge/runner.ts";
+import { runLocalChat, type ChatStart } from "../agent/bridge/runner.ts";
 import {
   diagnoseFeedback,
   feedbackAgentAvailability,
@@ -157,6 +157,9 @@ describe("feedback agent configuration and legacy migration", () => {
       { execution_target: "local:bad space" },
       { runtime: "gemini" },
       { model: "--inject" },
+      { model: "bad model" },
+      { model: "bad\u0000model" },
+      { model: "x".repeat(161) },
       { reasoning_effort: "extreme" },
       { unknown_field: true },
       { system_prompt: `Do not share ${row.intake_key}` },
@@ -565,6 +568,43 @@ describe("feedback agent Local Bridge execution, isolation, streaming, and SSRF 
     expect(
       !existsSync(feedbackImgRoot) || readdirSync(feedbackImgRoot).length === 0,
     ).toBe(true);
+  });
+
+  it.each([
+    ["provider/example[1m]", "node-default", "provider/example[1m]"],
+    ["provider/example", "node-default", "provider/example"],
+    ["", "node-default", "node-default"],
+    ["", "", ""],
+  ])("preserves Claude model %j with node default %j through diagnostic argv", async (model, defaultModel, expected) => {
+    const node = await fx.register("Model Node");
+    const conn = await fx.connect(node.token);
+    const runtimes = {
+      claude: { available: true, version: "1", ...(defaultModel && { default_model: defaultModel }) },
+      codex: { available: false, version: "" },
+    };
+    const models = ["provider/example", "provider/example[1m]"].map(id => ({ runtime: "claude" as const, id }));
+    await conn.hello([{ project_id: projectId, workdir, path_ok: true, path_error: "" }], { runtimes, models });
+    patchFeedbackAgent(fx.srv.store, projectId, {
+      execution_target: `local:${node.id}`, runtime: "claude", model: ` ${model} `, enabled: true,
+    });
+    const settings = getFeedbackAgentStatus(fx.srv.store, fx.srv.bridgeHub, projectId);
+    expect(settings.model).toBe(model);
+    expect(settings.resolved_agent?.model).toBe(expected);
+
+    const diagnosis = diagnoseFeedback(fx.srv.store, fx.srv.bridgeHub, projectId, { messages: [user("hello")], images: [] });
+    const { payload } = await conn.next("chat.start");
+    const bin = join(fx.root, "fake-claude");
+    writeFileSync(bin, `#!/usr/bin/env node\nconsole.log(JSON.stringify({type: "result", result: JSON.stringify(process.argv.slice(2))}));\n`, { mode: 0o755 });
+    const result = await runLocalChat({
+      config: { runtimes: { claude: { bin } } }, catalog: { runtimes, models, db_clients: [] },
+      p: payload as ChatStart, cwd: workdir, homeDir: fx.root, spaceDir: fx.root, allowSecrets: false,
+      signal: new AbortController().signal, prompt: "hello", onEvent: () => undefined,
+    });
+    conn.send("chat.event", { run_id: payload.run_id, session_id: payload.session_id, event: { type: "done" }, result });
+    await diagnosis;
+    expect(result.status).toBe("done");
+    const argv: string[] = JSON.parse(result.content);
+    expect(argv.flatMap((arg, i) => arg === "--model" ? [argv[i + 1]] : [])).toEqual(expected ? [expected] : []);
   });
 
   it("forces restricted localAccess and disables full_access & MCP in bridge runLocalChat for public_feedback", async () => {

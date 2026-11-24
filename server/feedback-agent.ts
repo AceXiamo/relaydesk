@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import { z } from "zod";
+import { resolveDefaultModelForTarget, validCatalogId } from "../app/lib/model-catalog.ts";
 import type {
   BridgeAgentBindingSummary,
   BridgeAgentSummary,
@@ -97,7 +98,6 @@ const VALID_EFFORTS = new Set<ChatReasoningEffort>([
 ]);
 
 const EXECUTION_TARGET_RE = /^local:[a-zA-Z0-9_-]{1,64}$/;
-const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,159}$/;
 
 const executionTargetSchema = z
   .string()
@@ -110,8 +110,7 @@ const executionTargetSchema = z
 const modelSchema = z
   .string()
   .trim()
-  .max(160)
-  .refine((v) => v === "" || MODEL_ID_RE.test(v), "Invalid model ID");
+  .refine((v) => v === "" || validCatalogId(v), "Invalid model ID");
 
 const configPatchSchema = z
   .strictObject({
@@ -185,10 +184,7 @@ function normalizeStoredConfig(row: {
       ? row.execution_target
       : "auto";
   const runtime: ChatRuntime = row.runtime === "claude" ? "claude" : "codex";
-  const model =
-    typeof row.model === "string" && (row.model === "" || MODEL_ID_RE.test(row.model))
-      ? row.model
-      : "";
+  const model = modelSchema.catch("").parse(row.model);
   const reasoning_effort: ChatReasoningEffort =
     typeof row.reasoning_effort === "string" &&
     VALID_EFFORTS.has(row.reasoning_effort as ChatReasoningEffort)
@@ -316,7 +312,7 @@ function resolveLocalFeedbackTarget(
       };
     }
     const effectiveModel =
-      cfg.model || agent.runtimes[cfg.runtime]?.default_model || "";
+      cfg.model || resolveDefaultModelForTarget(cfg.runtime, agent, undefined);
     const summary: FeedbackAgentResolvedNode = {
       id: agent.id,
       name: agent.name,
@@ -374,7 +370,7 @@ function resolveLocalFeedbackTarget(
       requireCliRuns: false,
     });
     const effectiveModel =
-      cfg.model || agent.runtimes[cfg.runtime]?.default_model || "";
+      cfg.model || resolveDefaultModelForTarget(cfg.runtime, agent, undefined);
     if (check.eligible && check.binding) {
       return {
         resolved: { agent, binding: check.binding, effectiveModel },
