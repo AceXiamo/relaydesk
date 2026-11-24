@@ -328,6 +328,7 @@ export interface ProjectReposSyncStatus {
 
 export interface WidgetConfigPayload {
   agent_enabled: boolean;
+  agent_available?: boolean;
   tracking_enabled: boolean;
   can_request_deploy: boolean;
   release_window: string;
@@ -633,16 +634,35 @@ export interface ProjectExecutionRoutingResponse {
   default_runtime?: ChatRuntime;
 }
 
+export interface FeedbackAgentResolvedNode {
+  id: string;
+  name: string;
+  online: boolean;
+  model: string;
+}
+
 export interface FeedbackAgentSettings {
   enabled: boolean;
-  available?: boolean;
+  available: boolean;
+  execution_target: string;
   runtime: ChatRuntime;
   model: string;
-  public_guide: string;
+  reasoning_effort: ChatReasoningEffort;
+  system_prompt: string;
+  resolved_agent: FeedbackAgentResolvedNode | null;
+  unavailable_reason: string | null;
 }
 
 export type FeedbackAgentPatch = Partial<
-  Pick<FeedbackAgentSettings, "enabled" | "runtime" | "model" | "public_guide">
+  Pick<
+    FeedbackAgentSettings,
+    | "enabled"
+    | "execution_target"
+    | "runtime"
+    | "model"
+    | "reasoning_effort"
+    | "system_prompt"
+  >
 >;
 
 export interface ChatContextRef {

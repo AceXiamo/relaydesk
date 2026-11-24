@@ -494,6 +494,7 @@ function PortalContent() {
 
   const queryErrorCode = searchParams.get("error");
   const [loadingConfig, setLoadingConfig] = useState(true);
+  const [recheckingConfig, setRecheckingConfig] = useState(false);
   const [config, setConfig] = useState<PortalConfig | null>(null);
   const [accessError, setAccessError] = useState<{ code: string; message?: string } | null>(
     queryErrorCode ? { code: queryErrorCode } : null,
@@ -594,6 +595,7 @@ function PortalContent() {
             prev.upload_enabled === cfg.upload_enabled &&
             prev.ai_enabled === cfg.ai_enabled &&
             prev.agent_enabled === cfg.agent_enabled &&
+            prev.agent_available === cfg.agent_available &&
             prev.release_window === cfg.release_window
           ) {
             return prev;
@@ -1047,7 +1049,11 @@ function PortalContent() {
   const navTabs = useMemo<Array<{ id: PortalTab; label: string; icon: string; badge?: number; alert?: boolean }>>(() => {
     const actionCount = mineTasks.filter((t) => t.can_reply || t.can_accept).length;
     const base: Array<{ id: PortalTab; label: string; icon: string; badge?: number; alert?: boolean }> = [
-      { id: "submit", label: "提交反馈", icon: "pen-line" },
+      {
+        id: "submit",
+        label: config?.agent_enabled ? "反馈对话" : "提交反馈",
+        icon: config?.agent_enabled ? "sparkles" : "pen-line",
+      },
       {
         id: "mine",
         label: "我的反馈",
@@ -1065,7 +1071,7 @@ function PortalContent() {
       });
     }
     return base;
-  }, [config?.can_view_team, mineTasks, teamTasks]);
+  }, [config?.agent_enabled, config?.can_view_team, mineTasks, teamTasks]);
 
   const activeTabIndex = Math.max(
     0,
@@ -1126,11 +1132,91 @@ function PortalContent() {
     );
   }
 
+  const agentEnabled = config.agent_enabled === true;
+  const agentOnline = agentEnabled && config.agent_available !== false;
+  const agentOffline = agentEnabled && config.agent_available === false;
+
+  const handleRecheckAvailability = async () => {
+    setRecheckingConfig(true);
+    try {
+      await loadConfig(true);
+    } finally {
+      setRecheckingConfig(false);
+    }
+  };
+
+  const segmentedNav = (
+    <div
+      role="tablist"
+      aria-label="反馈面板导航"
+      className="relative grid md:inline-grid w-full max-w-[360px] md:w-auto md:max-w-none p-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/90 shadow-2xs"
+      style={{
+        gridTemplateColumns: `repeat(${navTabs.length}, minmax(0, 1fr))`,
+      }}
+    >
+      {/* Spring Sliding Pill */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute top-1 bottom-1 left-1 rounded-lg bg-[var(--surface-card)] border border-[var(--border-subtle)] shadow-xs transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+        style={{
+          width: `calc((100% - 8px) / ${navTabs.length})`,
+          transform: `translateX(${activeTabIndex * 100}%)`,
+        }}
+      />
+      {navTabs.map((item) => {
+        const active = tab === item.id;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => {
+              setTab(item.id);
+              if (item.id === "submit") setSelectedTaskId(null);
+            }}
+            className={cn(
+              "relative z-10 inline-flex items-center justify-center gap-1 sm:gap-1.5 h-8 px-2 sm:px-3.5 md:min-w-[108px] rounded-lg text-[12px] sm:text-[12.5px] font-medium whitespace-nowrap transition-colors cursor-pointer select-none",
+              active
+                ? "text-[var(--text-primary)]"
+                : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]",
+            )}
+          >
+            <Icon
+              name={item.icon}
+              size={13.5}
+              className={active ? "text-indigo-600 dark:text-indigo-400" : undefined}
+            />
+            <span>{item.label}</span>
+            {item.badge !== undefined && (
+              <span
+                className={cn(
+                  "inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10.5px] font-mono tabular-nums",
+                  active
+                    ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300"
+                    : "bg-[var(--surface-hover)] text-[var(--text-muted)]",
+                )}
+              >
+                {item.badge}
+              </span>
+            )}
+            {item.alert && (
+              <span
+                aria-label="有待处理工单"
+                className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0"
+              />
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div className="min-h-dvh flex flex-col bg-[var(--surface-canvas)] text-[var(--text-primary)]">
-      {/* Sticky Minimal Header */}
+      {/* Sticky Minimal Symmetrical Header */}
       <header className="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[var(--surface-card)]/85 backdrop-blur-md">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-3">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 grid grid-cols-[1fr_auto] md:grid-cols-[1fr_auto_1fr] items-center gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 text-white flex items-center justify-center shadow-xs shrink-0">
               <Icon name="message-square" size={15} />
@@ -1141,22 +1227,27 @@ function PortalContent() {
                   {config.project_name}
                 </h1>
                 <span className="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded-md text-[10.5px] font-medium bg-[var(--surface-subtle)] border border-[var(--border-subtle)] text-[var(--text-muted)]">
-                  反馈面板
+                  反馈中心
                 </span>
               </div>
               {config.release_window && (
-                <p className="hidden md:flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+                <p className="hidden lg:flex items-center gap-1 text-[11px] text-[var(--text-muted)] truncate">
                   <Icon name="calendar-clock" size={11} />
-                  <span>默认发布窗口：{config.release_window}</span>
+                  <span>发布窗口：{config.release_window}</span>
                 </p>
               )}
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          {/* Center Symmetrical Segmented Navigation (Desktop) */}
+          <div className="hidden md:flex items-center justify-center">
+            {segmentedNav}
+          </div>
+
+          <div className="flex items-center justify-end gap-2 shrink-0">
             <div
               title={`当前授权身份：${config.label}`}
-              className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[12px] font-medium text-[var(--text-primary)] max-w-[180px]"
+              className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[12px] font-medium text-[var(--text-primary)] max-w-[160px]"
             >
               <LivePulseDot tone="emerald" active />
               <span className="truncate">{config.label}</span>
@@ -1171,78 +1262,17 @@ function PortalContent() {
             </button>
           </div>
         </div>
+
+        {/* Mobile Centered Segmented Navigation */}
+        <div className="md:hidden border-t border-[var(--border-subtle)]/70 px-4 py-2 flex items-center justify-center">
+          {segmentedNav}
+        </div>
       </header>
 
       {/* Main Content Container */}
-      <main className="flex-1 w-full max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-7 space-y-5">
-        {/* DesignBookmark-inspired Sliding Segmented Tab Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div
-            role="tablist"
-            aria-label="反馈面板导航"
-            className="relative inline-grid p-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/90 shadow-2xs"
-            style={{
-              gridTemplateColumns: `repeat(${navTabs.length}, minmax(108px, 1fr))`,
-            }}
-          >
-            {/* Spring Sliding Pill */}
-            <div
-              aria-hidden="true"
-              className="pointer-events-none absolute top-1 bottom-1 left-1 rounded-lg bg-[var(--surface-card)] border border-[var(--border-subtle)] shadow-xs transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-              style={{
-                width: `calc((100% - 8px) / ${navTabs.length})`,
-                transform: `translateX(${activeTabIndex * 100}%)`,
-              }}
-            />
-            {navTabs.map((item) => {
-              const active = tab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => {
-                    setTab(item.id);
-                    if (item.id === "submit") setSelectedTaskId(null);
-                  }}
-                  className={cn(
-                    "relative z-10 inline-flex items-center justify-center gap-1.5 h-8.5 px-3 rounded-lg text-[12.5px] font-medium transition-colors cursor-pointer select-none",
-                    active
-                      ? "text-[var(--text-primary)]"
-                      : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]",
-                  )}
-                >
-                  <Icon
-                    name={item.icon}
-                    size={13.5}
-                    className={active ? "text-indigo-600 dark:text-indigo-400" : undefined}
-                  />
-                  <span>{item.label}</span>
-                  {item.badge !== undefined && (
-                    <span
-                      className={cn(
-                        "inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10.5px] font-mono tabular-nums",
-                        active
-                          ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300"
-                          : "bg-[var(--surface-hover)] text-[var(--text-muted)]",
-                      )}
-                    >
-                      {item.badge}
-                    </span>
-                  )}
-                  {item.alert && (
-                    <span
-                      aria-label="有待处理工单"
-                      className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0"
-                    />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {tab !== "submit" && (
+      <main className="flex-1 w-full max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-6 space-y-4">
+        {tab !== "submit" && (
+          <div className="flex items-center justify-end">
             <Button
               type="button"
               variant="ghost"
@@ -1255,12 +1285,12 @@ function PortalContent() {
             >
               刷新进度
             </Button>
-          )}
-        </div>
+          </div>
+        )}
 
-        {/* TAB 1: SUBMIT FEEDBACK */}
+        {/* TAB 1: SUBMIT FEEDBACK / AGENT TRIAGE */}
         {tab === "submit" && (
-          <div className="max-w-2xl mx-auto space-y-5 animate-rd-portal-in">
+          <div className="max-w-3xl mx-auto space-y-5 animate-rd-portal-in">
             {submittedDetail ? (
               <section className="rounded-2xl border border-emerald-500/30 bg-[var(--surface-card)] p-6 sm:p-7 shadow-[var(--rd-shadow-md)] rd-hairline-glow space-y-5 animate-rd-portal-in">
                 <div className="flex items-start gap-3.5">
@@ -1297,7 +1327,7 @@ function PortalContent() {
                     icon="plus"
                     onClick={() => {
                       setSubmittedDetail(null);
-                      if (config.agent_enabled) setSubmitMode("agent");
+                      if (agentEnabled) setSubmitMode("agent");
                     }}
                   >
                     继续提交新反馈
@@ -1318,7 +1348,7 @@ function PortalContent() {
                   </Button>
                 </div>
               </section>
-            ) : config.agent_enabled === true && submitMode === "agent" ? (
+            ) : agentOnline && submitMode === "agent" ? (
               <PortalFeedbackConversation
                 config={config}
                 stagedImages={images}
@@ -1329,8 +1359,52 @@ function PortalContent() {
                 onDiagnose={portalApi.diagnose}
                 onCreateTask={handleCreateFromConversation}
                 onSwitchToManual={handleSwitchToManual}
+                onRefreshConfig={handleRecheckAvailability}
                 onPossibleAuthError={handlePossibleAuthError}
               />
+            ) : agentOffline && submitMode === "agent" ? (
+              <section
+                data-testid="portal-agent-offline"
+                className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] px-6 py-12 sm:px-10 sm:py-16 shadow-[var(--rd-shadow-sm)] rd-hairline-glow text-center space-y-5 animate-rd-portal-in"
+              >
+                <div className="mx-auto w-12 h-12 rounded-2xl border border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center">
+                  <Icon name="wifi-off" size={22} />
+                </div>
+                <div className="space-y-2 max-w-md mx-auto">
+                  <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 text-[11px] font-medium text-amber-800 dark:text-amber-300">
+                    <LivePulseDot tone="amber" active={false} />
+                    <span>节点离线 · 暂不接受在线诊断</span>
+                  </div>
+                  <h2 className="text-[18px] font-semibold tracking-tight text-[var(--text-primary)]">
+                    反馈诊断助手当前离线
+                  </h2>
+                  <p className="text-[13px] leading-relaxed text-[var(--text-muted)]">
+                    项目维护者的本地诊断节点暂时未在线，当前暂不接受 AI 对话排查。你可以稍后重新检测，或直接填写反馈单进入研发处理队列。
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    icon="refresh-cw"
+                    loading={recheckingConfig}
+                    onClick={() => void handleRecheckAvailability()}
+                  >
+                    重新检测状态
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    icon="pen-line"
+                    data-testid="portal-offline-to-manual"
+                    onClick={() => setSubmitMode("manual")}
+                  >
+                    直接填写反馈单
+                  </Button>
+                </div>
+              </section>
             ) : (
               <form
                 data-testid="portal-manual-form"
@@ -1354,25 +1428,47 @@ function PortalContent() {
                     : "border-[var(--border-subtle)]",
                 )}
               >
-                <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">
-                      {config.agent_enabled ? "人工直接提交反馈" : "提交新反馈"}
-                    </h2>
+                <div className="px-6 py-4.5 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2.5">
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-[15.5px] font-semibold text-[var(--text-primary)]">
+                        {agentEnabled ? "人工直接提交反馈" : "提交新反馈"}
+                      </h2>
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10.5px] font-medium border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[var(--text-secondary)]">
+                        直接提单模式 · 提交即建单
+                      </span>
+                    </div>
                     <p className="text-[12px] text-[var(--text-muted)]">
-                      描述遇到的问题或改进想法，支持粘贴或拖拽截图直达研发处理链路。
+                      {agentEnabled
+                        ? "跳过对话排查，直接创建工单并进入项目处理队列。"
+                        : "当前项目未开启 AI 对话预诊，提交后将直接创建工单进入处理队列。"}
                     </p>
                   </div>
-                  {config.agent_enabled && (
+                  {agentOnline && (
                     <Button
                       type="button"
                       variant="secondary"
                       size="xs"
-                      icon="message-square-text"
+                      icon="sparkles"
                       data-testid="portal-switch-agent"
                       onClick={() => setSubmitMode("agent")}
                     >
-                      返回对话诊断
+                      返回 AI 诊断对话
+                    </Button>
+                  )}
+                  {agentOffline && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      icon="refresh-cw"
+                      loading={recheckingConfig}
+                      onClick={() => {
+                        setSubmitMode("agent");
+                        void handleRecheckAvailability();
+                      }}
+                    >
+                      检测助手是否上线
                     </Button>
                   )}
                 </div>

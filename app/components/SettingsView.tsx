@@ -32,7 +32,6 @@ import type {
   GithubInspectPayload,
   GithubOwnerInfo,
   ProjectDetail,
-  ProjectReposSyncStatus,
   R2ConfigStatus,
   R2TestResult,
 } from "~/lib/types.ts";
@@ -200,9 +199,6 @@ export function SettingsView({
   const [projDeliveryMode, setProjDeliveryMode] = useState<DeliveryMode>(
     project?.delivery_mode ?? "direct_push",
   );
-  const [projWidgetCodeContext, setProjWidgetCodeContext] = useState<boolean>(
-    project?.widget_code_context ?? true,
-  );
   const [savingProject, setSavingProject] = useState(false);
 
   // R2 object storage settings
@@ -217,11 +213,6 @@ export function SettingsView({
   const [testingR2, setTestingR2] = useState(false);
   const [r2TestResult, setR2TestResult] = useState<R2TestResult | null>(null);
   const [r2TestError, setR2TestError] = useState("");
-
-  // Project container repo mirror status (for widget code context)
-  const [repoMirrorStatus, setRepoMirrorStatus] = useState<ProjectReposSyncStatus | null>(null);
-  const [syncingRepos, setSyncingRepos] = useState(false);
-  const [togglingCodeCtx, setTogglingCodeCtx] = useState(false);
 
   // Skill onboarding UI state
   const [showPromptKey, setShowPromptKey] = useState(false);
@@ -243,7 +234,6 @@ export function SettingsView({
       setProjInstructions(project.agent_instructions);
       setProjPaused(project.automation_paused);
       setProjDeliveryMode(project.delivery_mode);
-      setProjWidgetCodeContext(project.widget_code_context ?? true);
       setOriginsList(project.allowed_origins);
     }
   }, [
@@ -254,7 +244,6 @@ export function SettingsView({
     project?.agent_instructions,
     project?.automation_paused,
     project?.delivery_mode,
-    project?.widget_code_context,
     project?.allowed_origins,
   ]);
 
@@ -274,23 +263,6 @@ export function SettingsView({
       active = false;
     };
   }, []);
-
-  useEffect(() => {
-    if (!project?.id) {
-      setRepoMirrorStatus(null);
-      return;
-    }
-    let active = true;
-    api
-      .getProjectReposStatus(project.id)
-      .then((st) => {
-        if (active) setRepoMirrorStatus(st);
-      })
-      .catch(() => {});
-    return () => {
-      active = false;
-    };
-  }, [project?.id, project?.repos, project?.widget_code_context]);
 
   const handleSelectScopeOwner = useCallback(
     (nextScope: GithubOwnerInfo | null) => {
@@ -553,7 +525,6 @@ export function SettingsView({
         agent_instructions: projInstructions,
         automation_paused: projPaused,
         delivery_mode: projDeliveryMode,
-        widget_code_context: projWidgetCodeContext,
       });
       setProjRepoDraft("");
       onProjectUpdated(updated);
@@ -628,43 +599,6 @@ export function SettingsView({
       toast.error(err instanceof Error ? err.message : "清除 R2 配置失败");
     } finally {
       setSavingR2(false);
-    }
-  };
-
-  const handleToggleWidgetCodeContext = async (enabled: boolean) => {
-    if (!project) return;
-    setTogglingCodeCtx(true);
-    setProjWidgetCodeContext(enabled);
-    try {
-      const { project: updated } = await api.updateProject(project.id, {
-        widget_code_context: enabled,
-      });
-      onProjectUpdated(updated);
-      toast.success(enabled ? "已开启收集组件只读代码上下文" : "已关闭收集组件代码上下文");
-    } catch (err) {
-      setProjWidgetCodeContext(!enabled);
-      toast.error(err instanceof Error ? err.message : "更新设置失败");
-    } finally {
-      setTogglingCodeCtx(false);
-    }
-  };
-
-  const handleSyncProjectRepos = async () => {
-    if (!project) return;
-    setSyncingRepos(true);
-    try {
-      const st = await api.syncProjectRepos(project.id);
-      setRepoMirrorStatus(st);
-      const failed = st.repos.filter((r) => r.error);
-      if (failed.length > 0) {
-        toast.error(`同步完成，但 ${failed.length} 个仓库拉取失败：${failed[0].error}`);
-      } else {
-        toast.success(`已同步 ${st.repos.length} 个仓库最新代码`);
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "同步仓库代码失败");
-    } finally {
-      setSyncingRepos(false);
     }
   };
 
@@ -1641,21 +1575,13 @@ export function SettingsView({
                 />
 
                 {/* Automation Switch */}
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/70 p-3.5 space-y-3.5">
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/70 p-3.5">
                   <Switch
                     checked={!projPaused}
                     onChange={(enabled) => setProjPaused(!enabled)}
                     label="启用全自动迭代"
                     description="开启后，本机 Agent 定时巡检时会自动领取并闭环处理新反馈；暂停后所有巡检会立即返回 PAUSED，不消耗本地 Agent Token。"
                   />
-                  <div className="border-t border-[var(--border-subtle)] pt-3.5">
-                    <Switch
-                      checked={projWidgetCodeContext}
-                      onChange={setProjWidgetCodeContext}
-                      label="允许收集组件 AI 查阅绑定仓库代码（只读沙箱）"
-                      description="开启后，服务端会在容器内浅克隆本项目绑定仓库并按 5 分钟 TTL 后台刷新，访客咨询功能用法时由 AI 助手直接查代码秒答（禁止泄露原始源码与敏感文件）。"
-                    />
-                  </div>
                 </div>
 
                 {/* Default Delivery Mode Segmented Selector */}
@@ -1756,10 +1682,11 @@ export function SettingsView({
               project={project}
             />
 
-            {/* 1.7. Feedback Triage Agent (Independent Harness, Model & Public Guide) */}
+            {/* 1.7. Feedback Triage Agent (Local Bridge Node, Harness, Model & System Prompt) */}
             <FeedbackAgentSettingsCard
               key={`feedback-agent-${project.id}`}
               project={project}
+              onOpenGlobalAgents={() => setTab("global")}
             />
 
             {/* 2. Project Execution Priority & Per-Agent Workdir Binding */}
@@ -2091,10 +2018,10 @@ export function SettingsView({
                     </div>
                     <div>
                       <h2 className="text-[14.5px] font-semibold text-[var(--text-primary)]">
-                        应用内 AI 反馈组件
+                        应用内反馈组件
                       </h2>
                       <p className="text-[12px] text-[var(--text-muted)]">
-                        粘贴到应用 HTML 的 <code className="font-mono">&lt;body&gt;</code> 内即可收集反馈。访客可手动提单；如需对话，请在项目 CLI 设置中启用公开 AI。
+                        粘贴到应用 HTML 的 <code className="font-mono">&lt;body&gt;</code> 内即可收集反馈；AI 流式诊断复用「项目配置 → 反馈诊断 Agent」的本机只读沙箱配置。
                       </p>
                     </div>
                   </div>
@@ -2121,69 +2048,6 @@ export function SettingsView({
                       label="复制嵌入脚本"
                       copiedLabel="脚本已复制"
                     />
-                  </div>
-
-                  {/* Container Code Context Mirror Panel */}
-                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/70 p-4 space-y-3">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="flex-1 min-w-[220px]">
-                        <Switch
-                          checked={projWidgetCodeContext}
-                          disabled={togglingCodeCtx}
-                          onChange={(v) => void handleToggleWidgetCodeContext(v)}
-                          label="组件 AI 代码上下文（容器内只读仓库镜像）"
-                          description="开启后，访客在组件中咨询「怎么用/为什么报错」时，服务端 Agent 可只读查阅下方绑定仓库代码并当场解答；首次对话或满 5 分钟自动后台拉取最新代码。"
-                        />
-                      </div>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="xs"
-                        icon="refresh-cw"
-                        loading={syncingRepos}
-                        disabled={!projWidgetCodeContext || projectReposList.length === 0}
-                        onClick={() => void handleSyncProjectRepos()}
-                      >
-                        立即同步代码
-                      </Button>
-                    </div>
-
-                    {projWidgetCodeContext && (
-                      <div className="space-y-1.5 pt-1 border-t border-[var(--border-subtle)]">
-                        {(repoMirrorStatus?.repos ?? projectReposList.map((r) => ({
-                          repo: r,
-                          ready: false,
-                          commit: "",
-                          updated_at: null,
-                          error: undefined as string | undefined,
-                        }))).map((entry) => (
-                          <div
-                            key={entry.repo}
-                            className="flex flex-wrap items-center justify-between gap-2 text-[12px] px-2.5 py-1.5 rounded-lg bg-[var(--surface-card)] border border-[var(--border-subtle)]"
-                          >
-                            <span className="inline-flex items-center gap-2 font-mono text-[var(--text-primary)]">
-                              <span
-                                className={`w-1.5 h-1.5 rounded-full ${
-                                  entry.error
-                                    ? "bg-rose-500"
-                                    : entry.ready
-                                      ? "bg-emerald-500"
-                                      : "bg-zinc-400"
-                                }`}
-                              />
-                              {entry.repo}
-                            </span>
-                            <span className="text-[11px] font-mono text-[var(--text-muted)]">
-                              {entry.error
-                                ? `同步失败: ${entry.error.slice(0, 64)}`
-                                : entry.ready
-                                  ? `已就绪${entry.commit ? ` · ${entry.commit}` : ""}`
-                                  : "尚未拉取（首次对话时自动克隆）"}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 </div>
               </section>

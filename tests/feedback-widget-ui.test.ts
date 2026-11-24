@@ -407,3 +407,108 @@ it("falls back honestly to manual ticket card when agent_enabled is false", asyn
   const summary = root.querySelector<HTMLTextAreaElement>('[data-ticket-field="summary"]')!;
   expect(summary.value).toContain("关闭代理时直接填写反馈");
 });
+
+it("streams SSE status and delta frames into the assistant bubble before rendering final outcome", async () => {
+  const encoder = new TextEncoder();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, options: RequestInit = {}) => {
+      if (url.endsWith("/widget-config")) {
+        return Response.json({
+          project_name: "StreamApp",
+          tracking_enabled: true,
+          agent_enabled: true,
+          agent_available: true,
+          upload_enabled: false,
+        });
+      }
+      if (url.endsWith("/widget-feedback/tasks")) {
+        return Response.json({ tasks: [] });
+      }
+      if (url.endsWith("/widget-feedback/diagnose")) {
+        const accept = new Headers(options.headers).get("accept") || "";
+        expect(accept).toContain("text/event-stream");
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode('event: status\ndata: {"label":"正在读取项目实现…"}\n\n'),
+            );
+            controller.enqueue(
+              encoder.encode('event: delta\ndata: {"text":"先确认你的角色权限，"}\n\n'),
+            );
+            controller.enqueue(
+              encoder.encode('event: delta\ndata: {"text":"开启编辑权限即可保存。"}\n\n'),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'event: done\ndata: {"reply":"先确认你的角色权限，开启编辑权限即可保存。","outcome":"usage"}\n\n',
+              ),
+            );
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      return Response.json({});
+    }),
+  );
+
+  const root = mount();
+  const click = (s: string) => root.querySelector<HTMLButtonElement>(s)!.click();
+  click('[data-action="toggle"]');
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-role="subtitle"]')?.textContent).toContain("先诊断问题"),
+  );
+
+  const input = root.querySelector<HTMLTextAreaElement>('[data-role="input"]')!;
+  input.value = "保存按钮是灰色的";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  click('[data-action="send"]');
+
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-outcome="usage"]')).not.toBeNull(),
+  );
+  expect(root.textContent).toContain("先确认你的角色权限，开启编辑权限即可保存。");
+  expect(root.querySelector("[data-ticket-id]")).toBeNull();
+});
+
+it("shows honest offline state and avoids calling diagnose when local node is offline", async () => {
+  const requests: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      requests.push(url);
+      if (url.endsWith("/widget-config")) {
+        return Response.json({
+          project_name: "OfflineApp",
+          tracking_enabled: true,
+          agent_enabled: true,
+          agent_available: false,
+          upload_enabled: false,
+        });
+      }
+      return Response.json({ tasks: [] });
+    }),
+  );
+
+  const root = mount();
+  const click = (s: string) => root.querySelector<HTMLButtonElement>(s)!.click();
+  click('[data-action="toggle"]');
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-role="subtitle"]')?.textContent).toContain("诊断助手离线"),
+  );
+
+  const input = root.querySelector<HTMLTextAreaElement>('[data-role="input"]')!;
+  input.value = "节点离线时尝试发送";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  click('[data-action="send"]');
+
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-draft-source="manual"]')).not.toBeNull(),
+  );
+  expect(requests.some((u) => u.includes("/diagnose"))).toBe(false);
+  expect(root.textContent).toContain("离线");
+});

@@ -2464,6 +2464,7 @@
         project_name: "",
         ai_enabled: false,
         agent_enabled: false,
+        agent_available: true,
         tracking_enabled: false,
         can_request_deploy: false,
         release_window: "",
@@ -2499,8 +2500,19 @@
       return state.config.tracking_enabled === true && Boolean(getVisitorSecret());
     }
 
+    function isDiagnoseOffline() {
+      return (
+        state.config.agent_enabled === true &&
+        state.config.agent_available === false
+      );
+    }
+
     function isDiagnoseAvailable() {
-      return state.config.agent_enabled === true && Boolean(getVisitorSecret());
+      return (
+        state.config.agent_enabled === true &&
+        state.config.agent_available !== false &&
+        Boolean(getVisitorSecret())
+      );
     }
 
     function syncTabsUi() {
@@ -3131,8 +3143,10 @@
       }
       if (state.items.length === 0) {
         const capHint = isDiagnoseAvailable()
-          ? "先对话排查是使用疑问还是疑似缺陷；确认异常后生成可编辑草案，点击确认再提单。"
-          : "当前为人工提单模式：支持框选网页截屏，发送内容或点击右上角即可填写反馈单。";
+          ? "直接提问或框选截屏，我会结合项目实现先排查是用法问题还是故障，确认后再建工单。"
+          : isDiagnoseOffline()
+            ? "反馈诊断助手当前离线，暂不接受在线诊断；你可以稍后再试，或直接填写反馈单。"
+            : "当前为直接提单模式：支持框选网页截屏，发送内容或点击右上角即可提交工单。";
         bodyEl.innerHTML = `
           <div class="welcome">
             <div class="welcome-hero">
@@ -3303,14 +3317,20 @@
             ...state.config,
             ...data,
             agent_enabled: data.agent_enabled === true,
+            agent_available:
+              typeof data.agent_available === "boolean"
+                ? data.agent_available
+                : data.agent_enabled === true,
           };
           if (state.config.project_name) {
             titleEl.textContent = state.config.project_name;
           }
           if (isDiagnoseAvailable()) {
             subtitleEl.textContent = "先诊断问题，疑似缺陷再确认提单";
+          } else if (isDiagnoseOffline()) {
+            subtitleEl.textContent = "诊断助手离线 · 可直接提交反馈单";
           } else {
-            subtitleEl.textContent = "网页截屏反馈 · 人工提单直达队列";
+            subtitleEl.textContent = "直接提单模式 · 支持网页截屏反馈";
           }
           if (!state.config.upload_enabled) {
             screenshotBtn.title = "站点尚未配置 R2 图床存储";
@@ -3564,17 +3584,89 @@
         const payload = images.length ? { messages, images } : { messages };
         const res = await fetch(diagnoseEndpoint, {
           method: "POST",
-          headers: widgetFeedbackHeaders(true),
+          headers: {
+            ...widgetFeedbackHeaders(true),
+            Accept: "text/event-stream, application/json",
+          },
           signal: state.abortController.signal,
           body: JSON.stringify(payload),
         });
 
-        const data = await res.json().catch(() => null);
+        const contentType = (res.headers?.get?.("content-type") || "").toLowerCase();
         if (!res.ok) {
+          const errData = await res.json().catch(() => null);
           throw new Error(
-            (data && typeof data.error === "string" && data.error) ||
+            (errData && typeof errData.error === "string" && errData.error) ||
               `诊断请求失败（HTTP ${res.status}）`,
           );
+        }
+
+        let data = null;
+        if (contentType.includes("text/event-stream") && res.body && res.body.getReader) {
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+          const handleFrame = (rawFrame) => {
+            const lines = rawFrame.split(/\r?\n/);
+            let evName = "message";
+            const dataLines = [];
+            for (const line of lines) {
+              if (!line || line.startsWith(":")) continue;
+              if (line.startsWith("event:")) evName = line.slice(6).trim();
+              else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+            }
+            if (!dataLines.length) return;
+            let parsed;
+            try {
+              parsed = JSON.parse(dataLines.join("\n"));
+            } catch {
+              return;
+            }
+            if (evName === "status" && typeof parsed.label === "string") {
+              assistantItem.statusLabel = parsed.label;
+              updateAssistantItemDom(assistantItem);
+            } else if (evName === "delta" && typeof parsed.text === "string") {
+              assistantItem.statusLabel = "";
+              assistantItem.text += parsed.text;
+              updateAssistantItemDom(assistantItem);
+              scrollToBottom();
+            } else if (evName === "done") {
+              data = parsed;
+            } else if (evName === "error") {
+              throw new Error(
+                typeof parsed.error === "string"
+                  ? parsed.error
+                  : "诊断过程中断，请重试或改为直接提单。",
+              );
+            }
+          };
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (value) {
+                buf += decoder.decode(value, { stream: !done });
+                let sepIdx;
+                while ((sepIdx = buf.search(/\r?\n\r?\n/)) !== -1) {
+                  const frame = buf.slice(0, sepIdx);
+                  const m = buf.slice(sepIdx).match(/^\r?\n\r?\n/);
+                  buf = buf.slice(sepIdx + (m ? m[0].length : 2));
+                  if (frame.trim()) handleFrame(frame);
+                }
+              }
+              if (done) {
+                buf += decoder.decode();
+                if (buf.trim()) handleFrame(buf);
+                break;
+              }
+            }
+          } finally {
+            reader.releaseLock();
+          }
+          if (!data && assistantItem.text.trim()) {
+            data = { reply: assistantItem.text.trim(), outcome: "clarify" };
+          }
+        } else {
+          data = await res.json().catch(() => null);
         }
 
         const outcome = data && data.outcome;
@@ -3661,7 +3753,9 @@
       });
 
       if (!isDiagnoseAvailable()) {
-        if (state.config.agent_enabled && !getVisitorSecret()) {
+        if (isDiagnoseOffline()) {
+          showNotice("反馈诊断助手当前离线，暂不接受在线诊断，已为你打开直接提单。", 0);
+        } else if (state.config.agent_enabled && !getVisitorSecret()) {
           showNotice("当前浏览器环境无法生成访客凭证，已切换为人工提单。", 0);
         }
         openManualTicketCard({

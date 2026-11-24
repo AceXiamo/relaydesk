@@ -15,32 +15,14 @@ Open a task and choose **询问项目 CLI**. The question is queued for the runn
 
 ## Public feedback
 
-The **Feedback Agent** setting is independent of the operator chat, the legacy public AI switch and the global utility model. It is off by default. Choose a CLI harness and an explicit model ID, and provide only product guidance that may be shared with visitors. The harness must match the runtime of the project's saved cloud API key. Changing the operator model does not change the feedback model. A local Bridge login is not a credential for this feature. A healthy runner does not guarantee the key has access to the specified model; inference failures never silently select a different model or runtime.
+The **Feedback Agent** setting is independent of the operator chat, the legacy public AI switch and the global utility model. It is off by default. It runs directly on an operator's connected **Local Bridge** node—no separate `feedback-runner` sidecar container and no cloud provider API key are required.
 
-The feedback runner starts the selected real CLI in a fresh empty directory for every turn. It has no volume mounts, project credentials, global CLI home or public listening port. Its only Docker network is internal. The CLI uses a one-shot loopback model adapter; it receives the public guide and the bounded visitor conversation as JSON, not CLI commands or file arguments. The web broker validates the exact instructions, conversation and model against what that CLI requested, discards its auxiliary metadata and tool catalog, and sends only the approved inference to the project's bound provider. Only validated text completions can reach the CLI, never upstream tool calls or the provider's raw event stream. The sidecar is not an operations runner: do not add mounts, app.env, a Docker socket, MCP, external networks, host networking, managed policies or plugins to it.
+In a project's settings, choose the Local Bridge target (`auto` to follow the project's local node priority, or a specific `local:<id>` node), CLI harness (`codex` or `claude`), optional model and reasoning effort, and an optional custom `system_prompt` describing product context or answer guidelines. Cloud execution is never used as a fallback; if the selected local node is offline or not bound to the project directory, diagnosis requests fail with HTTP `503` and visitors are guided to submit feedback manually.
 
-The Agent can ask follow-up questions, answer a usage question grounded in the public guide, or suggest a bug-report **draft** with user-reported evidence. It never files a ticket. Screenshots are attachments for a later manually confirmed ticket; diagnosis does not fetch or inspect the image. Visitors can submit manually when the runner, key or model is unavailable.
+Every public diagnosis turn executes in a strict read-only isolation mode on the Local Bridge:
+- `sandbox_mode: "read-only"`, `network_access: false`, and `localAccess: "restricted"` (overriding any `codex_full_access` / `claude_full_access` setting on the host).
+- MCP server, task RPCs, datasource credentials, `HANDBOOK.md`, `DEPLOY.md`, and private project workspace files are never exposed to the turn.
+- The CLI can read the bound project repository in read-only mode and inspect visitor screenshots that pass R2 origin allowlist and magic-byte validation (staged transiently into an isolated per-turn directory and deleted immediately after completion).
+- Responses stream over SSE (`Accept: text/event-stream`) or return JSON with a `clarify`, `usage`, or `suspected_bug` (with an editable ticket draft) outcome. The Agent never files a ticket automatically; visitors always review and submit manually.
 
-### Optional production setup
-
-1. In the deployment directory, create a dedicated, owner-only `feedback.env` containing **only** a fresh service authentication token. Keep the token out of Compose's `.env`, Pier events, shell output and git. Generate it once; the command refuses to overwrite an existing file.
-
-   ```sh
-   (set -euC; umask 077; secret=$(openssl rand -hex 32); printf 'RELAYDESK_FEEDBACK_TOKEN=%s\n' "$secret" > feedback.env)
-   ```
-
-   Only this service token is passed to both containers. The optional `RELAYDESK_FEEDBACK_GATEWAYS` policy belongs in **web `app.env`**, never in the sidecar environment. By default, only the selected runtime's official provider is reachable. To approve a trusted custom gateway use exact, canonical, runtime-bound HTTPS base URLs, e.g. `RELAYDESK_FEEDBACK_GATEWAYS={"codex":["https://gateway.example/v1"],"claude":["https://gateway.example"]}`. The project must have saved its key for that exact destination. There are no wildcard hosts, redirect following or fallback from a gateway to an official endpoint. Approval entrusts the gateway with that project's key and visitors' public conversation; use a DNS zone and TLS endpoint under trusted control.
-
-2. Set the nonsecret selectors `RELAYDESK_FEEDBACK_ENV_FILE=./feedback.env` and `COMPOSE_PROFILES=feedback` in the project's Compose `.env`. Never point the selector at `app.env`. Validate with `docker compose --profile feedback config --quiet`. With Pier, reconcile the updated Compose template (preserving host overrides) and cut over **only via the standard Release / `pier deploy` workflow**; see [the production runbook](deployment.md). For standalone Compose installations, `docker compose --profile feedback up -d web feedback-runner` starts both at the same pinned `IMAGE_TAG`. Without either selector the old manual flow still works. Never log plain `docker compose config`, which can reveal secrets.
-
-3. Check service-to-service authentication **from web** without printing secrets:
-
-   ```sh
-   docker compose exec -T web node --input-type=module -e 'const r=await fetch("http://feedback-runner:8790/health",{headers:{authorization:"Bearer "+process.env.RELAYDESK_FEEDBACK_TOKEN},signal:AbortSignal.timeout(2500)});if(!r.ok||await r.text()!=="feedback-cli-v1")process.exit(1);console.log("feedback runner ready")'
-   ```
-
-4. Set the matching project cloud credentials, select a feedback model/guide, and enable it. Verify the portal shows the Agent only when ready. Start with a vague report, then give a documented usage question in the next turn: expect `clarify` then `usage`, without a ticket. A reproducible contradiction of the guide may yield a draft, but only visitor confirmation submits it. In case of an invalid model, incompatible gateway, rejected tool output, timeout or busy runner, manual feedback remains available. No external provider credentials are needed for the offline CLI protocol test `node scripts/verify-feedback-clis.mjs`; the image build runs it without external networking against the pinned binaries.
-
-**Rollback / rotation:** Disable the project feedback switch first. Stop and remove only the optional service (`docker compose --profile feedback stop feedback-runner` then `docker compose --profile feedback rm -f feedback-runner`); do not remove the web volume. Remove the nonsecret profile and env-file selectors if applicable. To rotate the token, update `feedback.env` securely and recreate both services together through the normal release workflow. A missing or mismatched token closes this inference path, never the manual intake path.
-
-For runner provisioning and verification, see [Project CLI runner](project-runner.md).
+For Local Bridge setup, see [Local Bridge and model routing](local-bridge-and-model-routing.md). For runner provisioning and verification, see [Project CLI runner](project-runner.md).

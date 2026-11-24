@@ -78,21 +78,41 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+function parseSseFrames(raw: string): Array<{ event: string; data: any }> {
+  const frames: Array<{ event: string; data: any }> = [];
+  for (const block of raw.split(/\r?\n\r?\n/)) {
+    if (!block.trim()) continue;
+    let event = "message";
+    const dataLines: string[] = [];
+    for (const line of block.split(/\r?\n/)) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    }
+    if (dataLines.length > 0) {
+      frames.push({ event, data: JSON.parse(dataLines.join("\n")) });
+    }
+  }
+  return frames;
+}
+
 describe("project feedback diagnosis over HTTP", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
-  it("saves the project-specific harness and model without changing deployment or another project", async () => {
+
+  it("saves the project-specific Local Bridge feedback settings even when offline without changing deployment or another project", async () => {
     const other = srv.store.createProject({
       name: "Other",
       repo: "fixture/other",
     });
     const before = srv.store.getProjectDeployPolicy(project);
     const settings = {
-      enabled: false,
+      enabled: true,
+      execution_target: "auto",
       runtime: "claude",
-      model: "support-model",
-      public_guide: "从报表页导出。",
+      model: "claude-sonnet-4-5",
+      reasoning_effort: "medium",
+      system_prompt: "从报表页导出，优先区分用法与缺陷。",
     };
     const saved = await call(
       base + "/feedback-agent",
@@ -101,19 +121,31 @@ describe("project feedback diagnosis over HTTP", () => {
       settings,
     );
     expect(saved.res.status).toBe(200);
-    expect(saved.json).toMatchObject({ ...settings, available: false });
+    expect(saved.json).toMatchObject({
+      ...settings,
+      available: false,
+      resolved_agent: null,
+    });
+    expect(typeof saved.json.unavailable_reason).toBe("string");
     expect(
       (await call(base + "/feedback-agent", "GET", admin)).json,
     ).toMatchObject(settings);
     expect(
       (await call(`/api/projects/${other.id}/feedback-agent`, "GET", admin))
-        .json.public_guide,
-    ).not.toBe(settings.public_guide);
+        .json.system_prompt,
+    ).not.toBe(settings.system_prompt);
     expect(srv.store.getProjectDeployPolicy(project)).toEqual(before);
   });
-  it("isolates operator settings from public capabilities and requires an authorized caller", async () => {
+
+  it("isolates operator settings, exposes agent_enabled + agent_available, and rejects offline with 503", async () => {
     const { cookie } = await redeem((await link()).url);
     const headers = { Cookie: cookie };
+    const widgetHeaders = {
+      Authorization: `Bearer ${intake}`,
+      Origin: "https://widget.example",
+      "X-Visitor-Id": randomUUID(),
+    };
+
     expect(
       (await call(base + "/feedback-agent", "GET", admin)).json.enabled,
     ).toBe(false);
@@ -127,31 +159,67 @@ describe("project feedback diagnosis over HTTP", () => {
     expect(
       (await call(base + "/feedback-agent", "GET", headers)).res.status,
     ).toBe(401);
+
     const payload = { messages: [{ role: "user", text: "怎样导出报表？" }] };
+    // Disabled -> 409
     expect(
       (await call(base + "/portal/diagnose", "POST", headers, payload)).res
         .status,
     ).toBe(409);
-    const mock = vi
-      .spyOn(feedbackAgent, "feedbackAgentAvailable")
-      .mockResolvedValue(true);
-    const run = vi
-      .spyOn(feedbackAgent, "diagnoseFeedback")
-      .mockResolvedValue({ reply: "在报表页选择导出。", outcome: "usage" });
-    const widgetHeaders = {
-      Authorization: `Bearer ${intake}`,
-      Origin: "https://widget.example",
-      "X-Visitor-Id": randomUUID(),
-    };
+
+    // Enable without any online local node -> agent_enabled: true, agent_available: false, diagnose -> 503
+    await call(base + "/feedback-agent", "PATCH", admin, {
+      enabled: true,
+      system_prompt: "仅供内部提示词，不得泄露到 config",
+    });
+
     for (const [suffix, h] of [
       ["/portal/config", headers],
       ["/widget-config", widgetHeaders],
     ] as const) {
       const cfg = (await call(base + suffix, "GET", h)).json;
       expect(cfg.agent_enabled).toBe(true);
+      expect(cfg.agent_available).toBe(false);
+      expect(cfg).not.toHaveProperty("system_prompt");
       expect(cfg).not.toHaveProperty("public_guide");
       expect(cfg).not.toHaveProperty("model");
+      expect(cfg).not.toHaveProperty("resolved_agent");
+      expect(cfg).not.toHaveProperty("unavailable_reason");
     }
+
+    // Offline 503 for both JSON and SSE requests (HTTP status 503 before streaming starts)
+    expect(
+      (await call(base + "/portal/diagnose", "POST", headers, payload)).res
+        .status,
+    ).toBe(503);
+    const offlineSse = await fetch(new URL(base + "/portal/diagnose", srv.url), {
+      method: "POST",
+      headers: {
+        ...headers,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(payload),
+    });
+    expect(offlineSse.status).toBe(503);
+
+    // When available: unauthorized / bad origin are still blocked before diagnoseFeedback runs
+    const availSpy = vi
+      .spyOn(feedbackAgent, "feedbackAgentAvailability")
+      .mockReturnValue({ enabled: true, available: true });
+    const runSpy = vi
+      .spyOn(feedbackAgent, "diagnoseFeedback")
+      .mockResolvedValue({ reply: "在报表页选择导出。", outcome: "usage" });
+
+    for (const [suffix, h] of [
+      ["/portal/config", headers],
+      ["/widget-config", widgetHeaders],
+    ] as const) {
+      const cfg = (await call(base + suffix, "GET", h)).json;
+      expect(cfg.agent_enabled).toBe(true);
+      expect(cfg.agent_available).toBe(true);
+    }
+
     expect(
       (await call(base + "/portal/diagnose", "POST", {}, payload)).res.status,
     ).toBe(401);
@@ -165,19 +233,24 @@ describe("project feedback diagnosis over HTTP", () => {
         )
       ).res.status,
     ).toBe(403);
-    expect(run).not.toHaveBeenCalled();
-    expect(
-      (
-        await call(
-          base + "/widget-feedback/diagnose",
-          "POST",
-          widgetHeaders,
-          payload,
-        )
-      ).json.outcome,
-    ).toBe("usage");
+    expect(runSpy).not.toHaveBeenCalled();
+
+    // JSON mode works on widget-feedback/diagnose without creating a ticket
+    const jsonRes = await call(
+      base + "/widget-feedback/diagnose",
+      "POST",
+      widgetHeaders,
+      payload,
+    );
+    expect(jsonRes.res.status).toBe(200);
+    expect(jsonRes.json).toEqual({
+      reply: "在报表页选择导出。",
+      outcome: "usage",
+    });
     expect(srv.store.listTasks(project)).toHaveLength(0);
-    mock.mockResolvedValue(false);
+
+    // Node goes offline mid-session -> 503
+    availSpy.mockReturnValue({ enabled: true, available: false });
     expect(
       (
         await call(
@@ -187,34 +260,93 @@ describe("project feedback diagnosis over HTTP", () => {
           payload,
         )
       ).res.status,
-    ).toBe(409);
+    ).toBe(503);
   });
-  it("does not start a model turn if the client leaves during the health probe", async () => {
+
+  it("streams status, delta, and done over SSE when Accept includes text/event-stream", async () => {
     const { cookie } = await redeem((await link()).url);
-    let entered!: () => void, release!: (ready: boolean) => void;
-    const probing = new Promise<void>((r) => { entered = r; });
-    const health = new Promise<boolean>((r) => { release = r; });
-    vi.spyOn(feedbackAgent, "feedbackAgentAvailable").mockImplementationOnce(() => { entered(); return health; });
-    const diagnose = vi.spyOn(feedbackAgent, "diagnoseFeedback");
-    const disconnected = new Promise<void>((r) => srv.server.once("request", (_req, res) => res.once("close", r)));
-    const controller = new AbortController();
-    const pending = fetch(srv.url + base + "/portal/diagnose", {
-      method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: [{ role: "user", text: "如何导出？" }] }), signal: controller.signal,
-    }).catch(() => null);
-    await probing;
-    controller.abort();
-    await Promise.all([disconnected, pending]);
-    release(true);
-    await new Promise<void>((r) => setImmediate(r));
-    expect(diagnose).not.toHaveBeenCalled();
+    const widgetHeaders = {
+      Authorization: `Bearer ${intake}`,
+      Origin: "https://widget.example",
+      "X-Visitor-Id": randomUUID(),
+    };
+    vi.spyOn(feedbackAgent, "feedbackAgentAvailability").mockReturnValue({
+      enabled: true,
+      available: true,
+    });
+    vi.spyOn(feedbackAgent, "diagnoseFeedback").mockImplementation(
+      async (_store, _hub, _pid, _data, opts) => {
+        opts?.onEvent?.({ type: "status", label: "正在查阅产品实现…" });
+        opts?.onEvent?.({ type: "delta", text: "已确认是按钮" });
+        opts?.onEvent?.({ type: "delta", text: "未绑定事件。" });
+        return {
+          reply: "已确认是按钮未绑定事件。",
+          outcome: "suspected_bug",
+          draft: { title: "导出按钮无响应", body: "点击导出按钮后没有任何请求发出。" },
+        };
+      },
+    );
+
+    const sseRes = await fetch(
+      new URL(base + "/widget-feedback/diagnose", srv.url),
+      {
+        method: "POST",
+        headers: {
+          ...widgetHeaders,
+          "Content-Type": "application/json",
+          Accept: "text/event-stream, application/json",
+        },
+        body: JSON.stringify({
+          messages: [{ role: "user", text: "点击导出没反应" }],
+        }),
+      },
+    );
+    expect(sseRes.status).toBe(200);
+    expect(sseRes.headers.get("content-type")).toContain("text/event-stream");
+    expect(sseRes.headers.get("access-control-allow-origin")).toBe(
+      "https://widget.example",
+    );
+    const frames = parseSseFrames(await sseRes.text());
+    expect(frames).toEqual([
+      { event: "status", data: { label: "正在查阅产品实现…" } },
+      { event: "delta", data: { text: "已确认是按钮" } },
+      { event: "delta", data: { text: "未绑定事件。" } },
+      {
+        event: "done",
+        data: {
+          reply: "已确认是按钮未绑定事件。",
+          outcome: "suspected_bug",
+          draft: {
+            title: "导出按钮无响应",
+            body: "点击导出按钮后没有任何请求发出。",
+          },
+        },
+      },
+    ]);
+
+    // Portal SSE also returns HTTP 400 JSON (not SSE) for malformed input
+    const badRes = await fetch(new URL(base + "/portal/diagnose", srv.url), {
+      method: "POST",
+      headers: {
+        Cookie: cookie,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({ messages: [] }),
+    });
+    expect(badRes.status).toBe(400);
+    expect(badRes.headers.get("content-type")).toContain("application/json");
   });
+
   it("aborts abandoned diagnosis work and frees the slot for the next turn", async () => {
     const h = {
       Cookie: (await redeem((await link()).url)).cookie,
       "Content-Type": "application/json",
     };
-    vi.spyOn(feedbackAgent, "feedbackAgentAvailable").mockResolvedValue(true);
+    vi.spyOn(feedbackAgent, "feedbackAgentAvailability").mockReturnValue({
+      enabled: true,
+      available: true,
+    });
     let started!: () => void, stopped!: () => void;
     const ready = new Promise<void>((resolve) => {
         started = resolve;
@@ -224,9 +356,9 @@ describe("project feedback diagnosis over HTTP", () => {
       });
     vi.spyOn(feedbackAgent, "diagnoseFeedback")
       .mockImplementationOnce(
-        (_s, _p, _d, signal) =>
+        (_s, _hub, _p, _d, opts) =>
           new Promise((_resolve, reject) => {
-            signal!.addEventListener(
+            opts?.signal?.addEventListener(
               "abort",
               () => {
                 stopped();
@@ -253,10 +385,14 @@ describe("project feedback diagnosis over HTTP", () => {
       (await call(base + "/portal/diagnose", "POST", h, payload)).res.status,
     ).toBe(200);
   });
-  it("rejects overlapping turns and withholds results if access is revoked during diagnosis", async () => {
+
+  it("rejects overlapping turns and withholds results if access is revoked during diagnosis (JSON & SSE)", async () => {
     const l = await link();
     const h = { Cookie: (await redeem(l.url)).cookie };
-    vi.spyOn(feedbackAgent, "feedbackAgentAvailable").mockResolvedValue(true);
+    vi.spyOn(feedbackAgent, "feedbackAgentAvailability").mockReturnValue({
+      enabled: true,
+      available: true,
+    });
     let started!: () => void;
     const entered = new Promise<void>((resolve) => {
       started = resolve;
@@ -288,11 +424,47 @@ describe("project feedback diagnosis over HTTP", () => {
     const result = await first;
     expect(result.res.status).toBe(401);
     expect(result.json).not.toHaveProperty("reply");
+
+    // SSE revocation mid-stream emits error event (status 401), never done
+    const l2 = await link();
+    const h2 = { Cookie: (await redeem(l2.url)).cookie };
+    let started2!: () => void;
+    const entered2 = new Promise<void>((resolve) => {
+      started2 = resolve;
+    });
+    let finish2!: (v: Verdict) => void;
+    const completion2 = new Promise<Verdict>((resolve) => {
+      finish2 = resolve;
+    });
+    vi.spyOn(feedbackAgent, "diagnoseFeedback").mockImplementationOnce(async () => {
+      started2();
+      return completion2;
+    });
+    const ssePromise = fetch(new URL(base + "/portal/diagnose", srv.url), {
+      method: "POST",
+      headers: {
+        ...h2,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({ messages: [{ role: "user", text: "如何导出？" }] }),
+    });
+    await entered2;
+    await call(base + "/portal-links/" + l2.id, "DELETE", admin);
+    finish2({ reply: "secret", outcome: "usage" });
+    const sseRes = await ssePromise;
+    const frames = parseSseFrames(await sseRes.text());
+    expect(frames.some((f) => f.event === "done")).toBe(false);
+    expect(frames.some((f) => f.event === "error" && f.data.status === 401)).toBe(true);
   });
+
   it("keeps clarification, usage advice and suspected bugs separate from creating a ticket", async () => {
     const { cookie } = await redeem((await link()).url);
     const h = { Cookie: cookie };
-    vi.spyOn(feedbackAgent, "feedbackAgentAvailable").mockResolvedValue(true);
+    vi.spyOn(feedbackAgent, "feedbackAgentAvailability").mockReturnValue({
+      enabled: true,
+      available: true,
+    });
     const run = vi.spyOn(feedbackAgent, "diagnoseFeedback");
     const draft = {
       title: "导出按钮没有生成文件",
@@ -331,7 +503,7 @@ describe("project feedback diagnosis over HTTP", () => {
         );
       else expect(reply.json.draft).toEqual(draft);
     }
-    expect(run.mock.calls.at(-1)?.[2]).toMatchObject({ messages });
+    expect(run.mock.calls.at(-1)?.[3]).toMatchObject({ messages });
     expect(
       (
         await call(base + "/portal/tasks", "POST", h, {

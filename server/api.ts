@@ -7,7 +7,7 @@ import type { BridgeHub } from "./bridge-hub.ts";
 import { ChatRunManager } from "./chat-run-manager.ts";
 import { ReleaseDispatcher } from "./release-dispatcher.ts";
 import { TaskDispatcher } from "./task-dispatcher.ts";
-import { getFeedbackAgent, patchFeedbackAgent, diagnoseFeedback, feedbackAgentAvailable } from "./feedback-agent.ts";
+import { getFeedbackAgentStatus, patchFeedbackAgent, diagnoseFeedback, feedbackAgentAvailability, validateFeedbackDiagnosePayload } from "./feedback-agent.ts";
 import { manageLinks, portalIdentity, PortalAccessError } from "./portal-access.ts";
 import { createFeedbackTicket, listFeedbackTickets, getFeedbackTicket, replyFeedbackTicket, acceptFeedbackTicket, authorizeFeedbackDeployRequest, addPublicFeedbackQuestion, widgetVisitorDigest } from "./feedback-tickets.ts";
 import { deployGateAvailable, latestDeployGate, listDeployGates, requestDeployGate } from "./deploy-gate.ts";
@@ -517,7 +517,7 @@ export class ApiRouter {
           this.sendJson(req,res,204,null,meta);
         } else {
           const result = await this.handleFeedback(req, res, method, parts, meta);
-          if (!res.destroyed) this.sendJson(req, res, 200, result, meta);
+          if (!res.destroyed && !res.headersSent && result !== undefined) this.sendJson(req, res, 200, result, meta);
         }
         return;
       }
@@ -580,11 +580,11 @@ export class ApiRouter {
       if (parts.length === 3 && parts[0] === "projects" && parts[2] === "feedback-agent") {
         if (method !== "GET" && method !== "PATCH") throw new ApiError(405, "Method not allowed");
         this.store.getProjectRow(parts[1]);
-        const settings = method === "GET"
-          ? getFeedbackAgent(this.store, parts[1])
-          : await patchFeedbackAgent(this.store, parts[1], await this.readJson(req, 64 * 1024));
-        const available = await feedbackAgentAvailable(this.store, parts[1]);
-        this.sendJson(req, res, 200, { ...settings, available }, meta);
+        if (method === "PATCH") {
+          patchFeedbackAgent(this.store, parts[1], await this.readJson(req, 64 * 1024));
+        }
+        const status = getFeedbackAgentStatus(this.store, this.bridgeHub, parts[1]);
+        this.sendJson(req, res, 200, status, meta);
         return;
       }
       if (parts[0] === 'projects' && parts[2] === 'portal-links') {
@@ -1026,6 +1026,12 @@ export class ApiRouter {
     const filePath = urlObj.searchParams.get("path") ?? "";
 
     if (method === "GET") {
+      const headerRunId =
+        typeof req.headers["x-relaydesk-run-id"] === "string"
+          ? req.headers["x-relaydesk-run-id"].trim()
+          : "";
+      const requestedId = headerRunId || urlObj.searchParams.get("run_id")?.trim();
+      this.bridgeHub?.assertPublicFeedbackReadAllowed(agent.id, projectId, filePath, requestedId);
       const { stream, size, sha256 } = streamBridgeWorkspaceFile(this.store.dbPath, projectId, filePath);
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/octet-stream");
@@ -2610,6 +2616,7 @@ export class ApiRouter {
     const p = this.store.getProjectRow(projectId);
     const key = id.kind === "widget" ? id.visitorId : id.deviceId;
     if (method === "GET" && parts.length === 4 && resource === "config") {
+      const availability = feedbackAgentAvailability(this.store, this.bridgeHub, projectId);
       return {
         project_name: p.name,
         label: id.kind === "portal" ? id.label : "本机访客",
@@ -2620,7 +2627,8 @@ export class ApiRouter {
           getEffectiveR2Config(this.store.dbPath),
         ),
         ai_enabled: projectPublicAiEnabled(this.store.dbPath, p.id),
-        agent_enabled: await feedbackAgentAvailable(this.store, projectId),
+        agent_enabled: availability.enabled,
+        agent_available: availability.available,
       };
     }
     if (method === "POST") {
@@ -2633,10 +2641,15 @@ export class ApiRouter {
     // Body streaming yields to revocations and policy changes. Reauthorize before committing.
     const actor = method === "POST" ? authenticate() : id;
     if (parts.length === 4 && resource === "diagnose" && method === "POST") {
-      if (!(await feedbackAgentAvailable(this.store, projectId)))
-        throw new ApiError(409, "项目反馈 Agent 暂不可用，可以直接提交反馈。");
-      // The client can disconnect while the asynchronous runner health check is pending.
-      if (res.destroyed) return;
+      const availability = feedbackAgentAvailability(this.store, this.bridgeHub, projectId);
+      if (!availability.enabled) {
+        throw new ApiError(409, "当前项目未启用反馈诊断 Agent。");
+      }
+      if (!availability.available) {
+        throw new ApiError(503, "反馈诊断助手当前离线，暂不接受在线诊断，请稍后再试或直接提交反馈。");
+      }
+      validateFeedbackDiagnosePayload(data);
+      if (res.destroyed) return undefined;
       authenticate();
       const actorKey = `${projectId}:diagnose:${key}`;
       if (this.diagnosing.has(actorKey)) throw new ApiError(409, "上一条诊断消息仍在处理中。");
@@ -2646,17 +2659,82 @@ export class ApiRouter {
       this.assistantInFlight++;
       this.diagnosing.add(actorKey);
       const abort = new AbortController();
-      const cancel = () => abort.abort();
+      const cancel = () => {
+        if (!res.writableEnded) abort.abort();
+      };
       res.once("close", cancel);
+      const wantsSse =
+        typeof req.headers.accept === "string" &&
+        req.headers.accept.toLowerCase().includes("text/event-stream");
+
+      if (wantsSse) {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Referrer-Policy", "no-referrer");
+        if (meta.corsOrigin) {
+          res.setHeader("Access-Control-Allow-Origin", meta.corsOrigin);
+          res.setHeader("Vary", "Origin");
+          res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+          res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Visitor-Id");
+        }
+        res.flushHeaders?.();
+        const writeSse = (eventName: string, payload: unknown) => {
+          if (res.writableEnded || res.destroyed) return;
+          res.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
+        };
+        try {
+          const result = await diagnoseFeedback(
+            this.store,
+            this.bridgeHub,
+            projectId,
+            data,
+            {
+              signal: abort.signal,
+              onEvent: (ev) => {
+                if (ev.type === "status") writeSse("status", { label: ev.label });
+                else if (ev.type === "delta") writeSse("delta", { text: ev.text });
+              },
+            },
+          );
+          const postAvailability = feedbackAgentAvailability(this.store, this.bridgeHub, projectId);
+          if (!postAvailability.enabled) throw new ApiError(409, "项目反馈 Agent 已停用。");
+          authenticate();
+          writeSse("done", result);
+        } catch (err) {
+          if (!abort.signal.aborted && !res.writableEnded && !res.destroyed) {
+            const status = err instanceof ApiError ? err.status : 500;
+            const error = err instanceof ApiError ? err.message : "诊断过程中断，请重试或直接提交反馈。";
+            writeSse("error", { status, error });
+          }
+        } finally {
+          res.off("close", cancel);
+          this.diagnosing.delete(actorKey);
+          this.assistantInFlight = Math.max(0, this.assistantInFlight - 1);
+          if (!res.writableEnded) res.end();
+        }
+        return undefined;
+      }
+
       try {
-        const result = await diagnoseFeedback(this.store, projectId, data, abort.signal);
-        if (!await feedbackAgentAvailable(this.store, projectId)) throw new ApiError(409, "项目反馈 Agent 已停用或离线。");
+        const result = await diagnoseFeedback(
+          this.store,
+          this.bridgeHub,
+          projectId,
+          data,
+          { signal: abort.signal },
+        );
+        const postAvailability = feedbackAgentAvailability(this.store, this.bridgeHub, projectId);
+        if (!postAvailability.enabled) throw new ApiError(409, "项目反馈 Agent 已停用。");
         authenticate();
         return result;
       } finally {
         res.off("close", cancel);
         this.diagnosing.delete(actorKey);
-        this.assistantInFlight--;
+        this.assistantInFlight = Math.max(0, this.assistantInFlight - 1);
       }
     }
     if (parts.length === 4 && resource === "clarify" && method === "POST") {
@@ -2754,11 +2832,13 @@ export class ApiRouter {
     });
     const r2Cfg = getEffectiveR2Config(this.store.dbPath);
     const aiEnabled = projectPublicAiEnabled(this.store.dbPath, project.id);
+    const availability = feedbackAgentAvailability(this.store, this.bridgeHub, projectId);
     return {
       project_id: project.id,
       project_name: project.name,
       ai_enabled: aiEnabled,
-      agent_enabled: await feedbackAgentAvailable(this.store, projectId),
+      agent_enabled: availability.enabled,
+      agent_available: availability.available,
       tracking_enabled:true,
       can_request_deploy:deployGateAvailable(this.store,projectId,true),
       release_window:this.releaseWindow(projectId),

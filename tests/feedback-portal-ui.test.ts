@@ -19,7 +19,7 @@ import type { ProjectDetail } from "../app/lib/types.ts";
 const mockApi = vi.hoisted(() => ({
   getProjectFeedbackAgent: vi.fn(),
   updateProjectFeedbackAgent: vi.fn(),
-  getProjectCliConfig: vi.fn(),
+  getProjectExecutionRouting: vi.fn(),
 }));
 
 vi.mock("../app/components/Icon.tsx", () => ({
@@ -233,13 +233,13 @@ describe("PortalFeedbackConversation UI", () => {
 
     const sendMsg = async (text: string) => {
       const input = container.querySelector<HTMLTextAreaElement>(
-        '[data-testid="portal-chat-input"]',
+        '[data-testid="portal-agent-input"]',
       )!;
       await act(async () => {
         setReactValue(input, text);
       });
       const btn = container.querySelector<HTMLButtonElement>(
-        '[data-testid="portal-chat-send"]',
+        '[data-testid="portal-agent-send"]',
       )!;
       await act(async () => {
         btn.click();
@@ -247,21 +247,38 @@ describe("PortalFeedbackConversation UI", () => {
     };
 
     await sendMsg("收不到通知");
-    expect(container.querySelector('[data-testid="portal-outcome-clarify"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="portal-draft-card"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="portal-turn-assistant"][data-outcome="clarify"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="portal-bug-draft-card"]')).toBeNull();
 
     await sendMsg("我还没打开通知开关");
-    expect(container.querySelector('[data-testid="portal-outcome-usage"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="portal-draft-card"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="portal-turn-assistant"][data-outcome="usage"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="portal-bug-draft-card"]')).toBeNull();
     expect(onCreateTask).not.toHaveBeenCalled();
 
     await sendMsg("打开开关保存后依然收不到通知");
     expect(
-      container.querySelector('[data-testid="portal-outcome-suspected_bug"]'),
+      container.querySelector(
+        '[data-testid="portal-turn-assistant"][data-outcome="suspected_bug"]',
+      ),
     ).not.toBeNull();
-    const draftCard = container.querySelector('[data-testid="portal-draft-card"]');
+    const draftCard = container.querySelector('[data-testid="portal-bug-draft-card"]');
     expect(draftCard).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="portal-draft-title-preview"]')?.textContent,
+    ).toBe("通知开关开启后仍不推送");
     expect(onCreateTask).not.toHaveBeenCalled();
+
+    // Expand compact draft card to edit title before explicit confirmation
+    const expandBtn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="portal-draft-toggle-edit"]',
+    )!;
+    await act(async () => {
+      expandBtn.click();
+    });
 
     const titleEl = container.querySelector<HTMLInputElement>(
       '[data-testid="portal-draft-title"]',
@@ -285,6 +302,58 @@ describe("PortalFeedbackConversation UI", () => {
         type: "功能异常",
       }),
     );
+  });
+
+  it("streams status and delta tokens incrementally before finalizing outcome", async () => {
+    const onDiagnose = vi.fn(async (_payload, _signal, onEvent) => {
+      onEvent?.({ type: "status", label: "正在读取项目配置与代码…" });
+      onEvent?.({ type: "delta", text: "请先开启通知权限，" });
+      onEvent?.({ type: "delta", text: "保存后即可生效。" });
+      return {
+        reply: "请先开启通知权限，保存后即可生效。",
+        outcome: "usage" as const,
+      };
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(
+          ToastProvider,
+          null,
+          createElement(PortalFeedbackConversation, {
+            config: { ...baseConfig, agent_available: true },
+            stagedImages: [],
+            onUploadFiles: vi.fn(async () => {}),
+            onRemoveStagedImage: vi.fn(),
+            onClearStagedImages: vi.fn(),
+            onOpenLightbox: vi.fn(),
+            onDiagnose,
+            onCreateTask: vi.fn(),
+            onSwitchToManual: vi.fn(),
+            onPossibleAuthError: () => false,
+          }),
+        ),
+      );
+    });
+
+    const input = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="portal-agent-input"]',
+    )!;
+    await act(async () => {
+      setReactValue(input, "为什么没有推送提醒");
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="portal-agent-send"]')!
+        .click();
+    });
+
+    const replyTurn = container.querySelector(
+      '[data-testid="portal-turn-assistant"][data-outcome="usage"]',
+    );
+    expect(replyTurn).not.toBeNull();
+    expect(replyTurn?.textContent).toContain("请先开启通知权限，保存后即可生效。");
+    expect(container.querySelector('[data-testid="portal-bug-draft-card"]')).toBeNull();
   });
 
   it("merges consecutive user messages cleanly when user follows up after an abort or error", async () => {
@@ -322,14 +391,14 @@ describe("PortalFeedbackConversation UI", () => {
 
     const sendMsg = async (text: string) => {
       const input = container.querySelector<HTMLTextAreaElement>(
-        '[data-testid="portal-chat-input"]',
+        '[data-testid="portal-agent-input"]',
       )!;
       await act(async () => {
         setReactValue(input, text);
       });
       await act(async () => {
         container
-          .querySelector<HTMLButtonElement>('[data-testid="portal-chat-send"]')!
+          .querySelector<HTMLButtonElement>('[data-testid="portal-agent-send"]')!
           .click();
       });
     };
@@ -337,14 +406,16 @@ describe("PortalFeedbackConversation UI", () => {
     await sendMsg("第一次描述被取消");
     expect(
       container.querySelector('[data-testid="portal-diagnose-error"]')?.textContent,
-    ).toContain("已取消本轮诊断");
+    ).toContain("已停止本轮排查");
 
     await sendMsg("补充具体报错 500");
     expect(receivedPayloads).toHaveLength(2);
     expect(receivedPayloads[1]?.messages).toEqual([
       { role: "user", text: "第一次描述被取消\n\n补充具体报错 500" },
     ]);
-    expect(container.querySelector('[data-testid="portal-outcome-clarify"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="portal-turn-assistant"][data-outcome="clarify"]'),
+    ).not.toBeNull();
   });
 });
 
@@ -361,6 +432,56 @@ describe("FeedbackAgentSettingsCard UI", () => {
     created_at: new Date().toISOString(),
   } as unknown as ProjectDetail;
 
+  const mockAgents = [
+    {
+      id: "agent-mac",
+      name: "MacBook Pro",
+      online: true,
+      active_runs: 0,
+      max_concurrency: 2,
+      accept_cli_runs: true,
+      platform: "darwin",
+      hostname: "mbp",
+      bridge_version: "1.0.0",
+      capabilities: {},
+      last_seen_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      bindings: [
+        {
+          id: "bind-1",
+          agent_id: "agent-mac",
+          project_id: "proj-1",
+          workdir: "/Users/dev/demo",
+          allow_datasource_secrets: false,
+          enabled: true,
+          path_ok: true,
+          git_ok: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ],
+      runtimes: {
+        codex: { available: true, default_model: "gpt-5.3-codex" },
+        claude: { available: true, default_model: "claude-sonnet-4-6" },
+      },
+      models: [
+        {
+          id: "gpt-5.3-codex",
+          label: "GPT-5.3 Codex",
+          runtime: "codex",
+          is_default: true,
+        },
+        {
+          id: "claude-sonnet-4-6",
+          label: "Claude Sonnet 4.6",
+          runtime: "claude",
+          is_default: true,
+        },
+      ],
+    },
+  ];
+
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -375,23 +496,49 @@ describe("FeedbackAgentSettingsCard UI", () => {
     vi.clearAllMocks();
   });
 
-  it("loads and saves independent feedback agent runtime, model, and public guide", async () => {
+  it("loads local bridge agents and saves execution_target, runtime, model, effort, and system_prompt", async () => {
     mockApi.getProjectFeedbackAgent.mockResolvedValue({
       enabled: false,
+      available: false,
+      execution_target: "auto",
       runtime: "codex",
-      model: "gpt-5.3-codex",
-      public_guide: "初始说明",
+      model: "",
+      reasoning_effort: "default",
+      system_prompt: "初始系统提示词",
+      resolved_agent: {
+        id: "agent-mac",
+        name: "MacBook Pro",
+        online: true,
+        model: "gpt-5.3-codex",
+      },
+      unavailable_reason: null,
     });
-    mockApi.getProjectCliConfig.mockResolvedValue({
-      runtime: "claude",
-      model: "claude-sonnet-4-6",
-      has_api_key: true,
+    mockApi.getProjectExecutionRouting.mockResolvedValue({
+      routing: {
+        priority: ["local:agent-mac"],
+        auto_fallback: false,
+        route_cli_runs: true,
+        auto_dispatch_tasks: false,
+        task_network_access: false,
+      },
+      effective_priority: ["local:agent-mac"],
+      agents: mockAgents,
     });
     mockApi.updateProjectFeedbackAgent.mockResolvedValue({
       enabled: true,
+      available: true,
+      execution_target: "local:agent-mac",
       runtime: "claude",
-      model: "claude-sonnet-4-6",
-      public_guide: "更新后的公开使用指南",
+      model: "",
+      reasoning_effort: "default",
+      system_prompt: "只读排查并面向终端用户回答",
+      resolved_agent: {
+        id: "agent-mac",
+        name: "MacBook Pro",
+        online: true,
+        model: "claude-sonnet-4-6",
+      },
+      unavailable_reason: null,
     });
 
     await act(async () => {
@@ -407,33 +554,55 @@ describe("FeedbackAgentSettingsCard UI", () => {
     await vi.waitFor(() =>
       expect(mockApi.getProjectFeedbackAgent).toHaveBeenCalledWith("proj-1"),
     );
+    await vi.waitFor(() =>
+      expect(mockApi.getProjectExecutionRouting).toHaveBeenCalledWith("proj-1"),
+    );
 
-    const claudeBtn = Array.from(container.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("Claude"),
+    // Select specific local computer node
+    const targetTrigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="反馈诊断执行节点"]',
     )!;
     await act(async () => {
-      claudeBtn.click();
+      targetTrigger.click();
     });
-
-    const modelInput = container.querySelector<HTMLInputElement>(
-      'input[placeholder*="claude"], input[placeholder*="gpt"]',
+    const macOption = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+      (el) => el.textContent?.includes("MacBook Pro") && el.textContent?.includes("在线 · 已绑定"),
     )!;
     await act(async () => {
-      setReactValue(modelInput, "claude-sonnet-4-6");
+      macOption.click();
     });
 
-    const guideTextarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    // Switch harness to Claude Code
+    const runtimeTrigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="反馈诊断 Harness"]',
+    )!;
     await act(async () => {
-      setReactValue(guideTextarea, "更新后的公开使用指南");
+      runtimeTrigger.click();
+    });
+    const claudeOption = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+      (el) => el.textContent?.includes("Claude Code"),
+    )!;
+    await act(async () => {
+      claudeOption.click();
     });
 
+    // Edit System Prompt
+    const promptTextarea = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="feedback-agent-system-prompt"]',
+    )!;
+    await act(async () => {
+      setReactValue(promptTextarea, "只读排查并面向终端用户回答");
+    });
+
+    // Enable switch
     const toggle = container.querySelector<HTMLButtonElement>('button[role="switch"]')!;
     await act(async () => {
       toggle.click();
     });
 
+    // Submit form
     const saveBtn = Array.from(container.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("保存反馈 Agent 配置"),
+      b.textContent?.includes("保存配置"),
     )!;
     await act(async () => {
       saveBtn.click();
@@ -441,9 +610,63 @@ describe("FeedbackAgentSettingsCard UI", () => {
 
     expect(mockApi.updateProjectFeedbackAgent).toHaveBeenCalledWith("proj-1", {
       enabled: true,
+      execution_target: "local:agent-mac",
       runtime: "claude",
-      model: "claude-sonnet-4-6",
-      public_guide: "更新后的公开使用指南",
+      model: "",
+      reasoning_effort: "default",
+      system_prompt: "只读排查并面向终端用户回答",
     });
+
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="feedback-agent-status-pill"]')?.textContent,
+      ).toContain("在线 · MacBook Pro"),
+    );
+  });
+
+  it("displays honest offline status pill when enabled but local node is offline", async () => {
+    mockApi.getProjectFeedbackAgent.mockResolvedValue({
+      enabled: true,
+      available: false,
+      execution_target: "local:agent-mac",
+      runtime: "codex",
+      model: "",
+      reasoning_effort: "default",
+      system_prompt: "",
+      resolved_agent: {
+        id: "agent-mac",
+        name: "MacBook Pro",
+        online: false,
+        model: "gpt-5.3-codex",
+      },
+      unavailable_reason: "MacBook Pro 当前离线",
+    });
+    mockApi.getProjectExecutionRouting.mockResolvedValue({
+      routing: {
+        priority: ["local:agent-mac"],
+        auto_fallback: false,
+        route_cli_runs: true,
+        auto_dispatch_tasks: false,
+        task_network_access: false,
+      },
+      effective_priority: ["local:agent-mac"],
+      agents: [{ ...mockAgents[0], online: false }],
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(
+          ToastProvider,
+          null,
+          createElement(FeedbackAgentSettingsCard, { project }),
+        ),
+      );
+    });
+
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="feedback-agent-status-pill"]')?.textContent,
+      ).toContain("MacBook Pro 当前离线"),
+    );
   });
 });

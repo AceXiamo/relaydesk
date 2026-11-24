@@ -2,6 +2,7 @@ import type {
   DeployGateEvaluation,
   FeedbackDiagnoseMessage,
   FeedbackDiagnoseResponse,
+  FeedbackDiagnoseStreamEvent,
   FeedbackReleasePreference,
   PortalAccessErrorCode,
   PortalConfig,
@@ -51,6 +52,120 @@ async function portalRequest<T>(
   }
 
   return data as T;
+}
+
+async function portalDiagnoseStream(
+  path: string,
+  payload: { messages: FeedbackDiagnoseMessage[]; images?: string[] },
+  signal?: AbortSignal,
+  onEvent?: (event: FeedbackDiagnoseStreamEvent) => void,
+): Promise<FeedbackDiagnoseResponse> {
+  const response = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream, application/json",
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+
+  if (!response.ok) {
+    let data: Record<string, unknown> = {};
+    try {
+      data = (await response.json()) as Record<string, unknown>;
+    } catch {
+      data = {};
+    }
+    throw new PortalApiError(
+      response.status,
+      typeof data.error === "string"
+        ? data.error
+        : `诊断请求失败（HTTP ${response.status}）`,
+      typeof data.code === "string" ? data.code : undefined,
+    );
+  }
+
+  if (!contentType.includes("text/event-stream") || !response.body) {
+    const data = (await response.json()) as FeedbackDiagnoseResponse;
+    return data;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let accumulatedText = "";
+  let finalResult: FeedbackDiagnoseResponse | null = null;
+
+  const processFrame = (rawFrame: string) => {
+    const lines = rawFrame.split(/\r?\n/);
+    let eventName = "message";
+    const dataLines: string[] = [];
+    for (const line of lines) {
+      if (!line || line.startsWith(":")) continue;
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+    if (dataLines.length === 0) return;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+
+    if (eventName === "status" && typeof parsed.label === "string") {
+      onEvent?.({ type: "status", label: parsed.label });
+    } else if (eventName === "delta" && typeof parsed.text === "string") {
+      accumulatedText += parsed.text;
+      onEvent?.({ type: "delta", text: parsed.text });
+    } else if (eventName === "done") {
+      finalResult = parsed as unknown as FeedbackDiagnoseResponse;
+    } else if (eventName === "error") {
+      throw new PortalApiError(
+        typeof parsed.status === "number" ? parsed.status : 500,
+        typeof parsed.error === "string"
+          ? parsed.error
+          : "诊断过程中断，请重试或直接提交反馈。",
+        typeof parsed.code === "string" ? parsed.code : undefined,
+      );
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (value) {
+        buffer += decoder.decode(value, { stream: !done });
+        let sepIndex: number;
+        while ((sepIndex = buffer.search(/\r?\n\r?\n/)) !== -1) {
+          const frame = buffer.slice(0, sepIndex);
+          const sepMatch = buffer.slice(sepIndex).match(/^\r?\n\r?\n/);
+          buffer = buffer.slice(sepIndex + (sepMatch ? sepMatch[0].length : 2));
+          if (frame.trim()) processFrame(frame);
+        }
+      }
+      if (done) {
+        buffer += decoder.decode();
+        if (buffer.trim()) processFrame(buffer);
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (finalResult) return finalResult;
+  if (accumulatedText.trim()) {
+    return { reply: accumulatedText.trim(), outcome: "clarify" };
+  }
+  throw new PortalApiError(502, "诊断流意外结束，请重试或直接提交反馈。");
 }
 
 export function createPortalApi(projectId: string) {
@@ -110,13 +225,8 @@ export function createPortalApi(projectId: string) {
     diagnose: (
       payload: { messages: FeedbackDiagnoseMessage[]; images?: string[] },
       signal?: AbortSignal,
-    ) =>
-      portalRequest<FeedbackDiagnoseResponse>(
-        `${base}/diagnose`,
-        "POST",
-        payload,
-        signal,
-      ),
+      onEvent?: (event: FeedbackDiagnoseStreamEvent) => void,
+    ) => portalDiagnoseStream(`${base}/diagnose`, payload, signal, onEvent),
 
     clarify: (body: string) =>
       portalRequest<{ reply: string }>(`${base}/clarify`, "POST", { body }),

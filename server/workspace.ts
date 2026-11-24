@@ -1712,6 +1712,22 @@ export function writeBridgeWorkspaceFile(dbPath: string, projectId: string, path
   } finally { rmSync(tmp, { force: true }); }
 }
 
+export function cleanupFeedbackImagesDir(dbPath: string, projectId: string, turnId: string): void {
+  if (dbPath === ":memory:") return;
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(turnId)) return;
+  try {
+    const filesDir = getProjectFilesDir(dbPath, projectId);
+    const feedbackRoot = join(filesDir, "_feedback_images");
+    const turnDir = join(feedbackRoot, turnId);
+    rmSync(turnDir, { recursive: true, force: true });
+    if (existsSync(feedbackRoot) && readdirSync(feedbackRoot).length === 0) {
+      rmSync(feedbackRoot, { recursive: true, force: true });
+    }
+  } catch {
+    // Ignore cleanup errors for temporary feedback image directories
+  }
+}
+
 export function buildWorkspaceManifest(dbPath: string, projectId: string) {
   const files: Array<{ path: string; size: number; updated_at: string; mtime: string; sha256: string }> = [];
   let handbook: { size: number; sha256: string; updated_at: string } | null = null;
@@ -1733,6 +1749,7 @@ export function buildWorkspaceManifest(dbPath: string, projectId: string) {
   const permitted: WorkspaceFileEntry[] = [];
   for (const entry of listWorkspaceFiles(dbPath, projectId).files) {
     if (entry.type !== "file") continue;
+    if (entry.path === "_feedback_images" || entry.path.startsWith("_feedback_images/")) continue;
     try {
       const wirePath = `files/${entry.path}`;
       const { fd, size, updated_at } = openBridgeFile(dbPath, projectId, wirePath, Number.MAX_SAFE_INTEGER);

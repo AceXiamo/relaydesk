@@ -29,6 +29,7 @@ export interface BridgeChatStart {
   image_paths?: string[];
   datasource_env?: Record<string, string>;
   pg_read_only_enforced?: boolean;
+  public_feedback?: boolean;
 }
 
 export interface BridgeCliRunStart {
@@ -149,7 +150,7 @@ function streamOutput(onEvent: (event: ChatStreamEvent) => void, secrets: string
   };
 }
 interface Run {
-  id: string; project: string; session: string; write: boolean; owner: Connection; workdir: string;
+  id: string; project: string; session: string; write: boolean; publicFeedback: boolean; allowedReadPaths?: Set<string>; owner: Connection; workdir: string;
   grace?: NodeJS.Timeout;
   grantedSecrets: boolean;
   status: (message: string) => void;
@@ -418,7 +419,10 @@ export class BridgeHub {
           if (bytes.toString("base64") !== p.data) throw new ApiError(400, "无效的 Base64 数据");
           if (p.sha256 !== undefined && p.sha256 !== createHash("sha256").update(bytes).digest("hex")) throw new ApiError(400, "文件摘要不匹配");
           writeBridgeWorkspaceFile(this.store.dbPath, project_id, path, bytes);
-        } else bytes = readBridgeWorkspaceFile(this.store.dbPath, project_id, path, RPC_BYTES);
+        } else {
+          this.assertPublicFeedbackReadAllowed(conn.id, project_id, path, typeof p.run_id === "string" ? p.run_id : undefined);
+          bytes = readBridgeWorkspaceFile(this.store.dbPath, project_id, path, RPC_BYTES);
+        }
         this.send(conn, type + ".result", { ok: true, data: bytes.toString("base64"), sha256: createHash("sha256").update(bytes).digest("hex") }, id);
       } catch (err) {
         this.send(conn, type + ".result", { ok: false, error: err instanceof ApiError ? err.message : "文件请求无效", status: err instanceof ApiError ? err.status : 400 }, id);
@@ -430,6 +434,9 @@ export class BridgeHub {
         const run = this.runs.get(req.run_id);
         if (!run || run.owner !== conn || run.project !== req.project_id) {
           throw new ApiError(403, "没有有效的对话执行上下文");
+        }
+        if (run.publicFeedback) {
+          throw new ApiError(403, "公开反馈会话禁止调用工单工具");
         }
         if (this.assertWorkspaceAccess(conn.id, req.project_id).workdir !== run.workdir) {
           throw new ApiError(403, "项目目录绑定已失效");
@@ -539,6 +546,25 @@ export class BridgeHub {
     }
     return binding;
   }
+  assertPublicFeedbackReadAllowed(agentId: string, projectId: string, path: string, runId?: string) {
+    const run = runId ? this.runs.get(runId) : undefined;
+    if (run?.publicFeedback) {
+      if (run.owner.id !== agentId || run.project !== projectId || !run.allowedReadPaths?.has(path)) {
+        throw new ApiError(403, "公开反馈会话仅允许读取本次诊断附带的附件");
+      }
+      return;
+    }
+    if (!runId) {
+      const projectRuns = Array.from(this.runs.values()).filter(
+        r => r.owner.id === agentId && r.project === projectId,
+      );
+      if (projectRuns.length > 0 && projectRuns.every(r => r.publicFeedback)) {
+        if (!projectRuns.some(r => r.allowedReadPaths?.has(path))) {
+          throw new ApiError(403, "公开反馈会话仅允许读取本次诊断附带的附件");
+        }
+      }
+    }
+  }
   assertCanRun(agentId: string, projectId: string, runtime: ChatRuntime) {
     if (!this.live(agentId)) throw new ApiError(409, "本机节点离线");
     let binding;
@@ -569,21 +595,47 @@ export class BridgeHub {
   async runChatTurn(agentId: string, payload: BridgeChatStart, onEvent: (event: ChatStreamEvent) => void, signal: AbortSignal, secrets: string[] = []): Promise<RunChatTurnResult> {
     if (signal.aborted) return { status: "aborted", content: "", events: [], externalSessionId: payload.resume_session_id };
     const binding = this.assertCanRun(agentId, payload.project_id, payload.runtime);
-    if (payload.runtime === "codex" && payload.fast_mode && payload.fast_mode !== "default") {
+    const isPublicFeedback = payload.public_feedback === true;
+    const effectivePayload: BridgeChatStart = isPublicFeedback
+      ? {
+          ...payload,
+          sandbox_mode: "read-only",
+          network_access: false,
+          resume_session_id: "",
+          fast_mode: undefined,
+          datasource_env: undefined,
+          pg_read_only_enforced: undefined,
+          workspace_manifest: {
+            handbook: null,
+            handbook_sha256: null,
+            deploy_doc: null,
+            deploy_doc_sha256: null,
+            files: (payload.workspace_manifest?.files ?? []).filter((f) =>
+              f.path.startsWith("_feedback_images/"),
+            ),
+            databases: [],
+          },
+          public_feedback: true,
+        }
+      : payload;
+    if (effectivePayload.runtime === "codex" && effectivePayload.fast_mode && effectivePayload.fast_mode !== "default") {
       const agent = this.store.getBridgeAgent(agentId);
-      const model = payload.model || agent?.runtimes.codex?.default_model;
+      const model = effectivePayload.model || agent?.runtimes.codex?.default_model;
       if (!agent?.models.some(m => m.runtime === "codex" && (model ? m.id === model : m.is_default) && m.supports_fast)) {
         throw new ApiError(409, "该节点未确认模型支持 GPT Fast。请选择「跟随 Harness」或更换模型。");
       }
     }
-    if (this.isChatSessionRunning(payload.session_id)) throw new ApiError(409, "会话正在运行");
+    if (this.isChatSessionRunning(effectivePayload.session_id)) throw new ApiError(409, "会话正在运行");
     const conn = this.live(agentId)!;
     const id = randomUUID();
-    const { datasource_env, pg_read_only_enforced, ...start } = payload;
-    const grant = binding.allow_datasource_secrets ? { datasource_env, pg_read_only_enforced } : {};
+    const { datasource_env, pg_read_only_enforced, ...start } = effectivePayload;
+    const grant = !isPublicFeedback && binding.allow_datasource_secrets ? { datasource_env, pg_read_only_enforced } : {};
+    const allowedReadPaths = isPublicFeedback
+      ? new Set((effectivePayload.workspace_manifest?.files ?? []).map((f) => `files/${f.path}`))
+      : undefined;
     return new Promise(resolve => {
       let content = "";
-      let externalSessionId = payload.resume_session_id;
+      let externalSessionId = effectivePayload.resume_session_id;
       const tools = new Map<string, RunChatTurnResult["events"][number]>();
       const finish = (result: RunChatTurnResult) => {
         const current = this.runs.get(id);
@@ -607,7 +659,7 @@ export class BridgeHub {
         finish({ status: aborted ? "aborted" : "error", content: "", error: reason, events: [], externalSessionId,
           ...(stopReason && { stopReason }) });
         if (owner && this.connections.get(agentId) === owner && owner.ws.readyState === WebSocket.OPEN) {
-          this.send(owner, "chat.abort", { run_id: id, session_id: payload.session_id });
+          this.send(owner, "chat.abort", { run_id: id, session_id: effectivePayload.session_id });
         }
       };
       const abort = () => stop("对话已中止", true);
@@ -619,9 +671,10 @@ export class BridgeHub {
         else if (event.type === "tool" && (tools.has(event.event.id) || tools.size < 1000)) tools.set(event.event.id, event.event);
         onEvent(event);
       }, secrets);
-      this.runs.set(id, { id, session: payload.session_id, project: payload.project_id, workdir: binding.workdir,
-        owner: conn, grantedSecrets: !!(binding.allow_datasource_secrets && Object.keys(datasource_env ?? {}).length),
-        status: message => onEvent({ type: "status", message }), write: payload.sandbox_mode === "workspace-write", onEvent: event => { clock.progress(); publish(event); },
+      this.runs.set(id, { id, session: effectivePayload.session_id, project: effectivePayload.project_id, workdir: binding.workdir,
+        owner: conn, publicFeedback: isPublicFeedback, allowedReadPaths,
+        grantedSecrets: !isPublicFeedback && !!(binding.allow_datasource_secrets && Object.keys(datasource_env ?? {}).length),
+        status: message => onEvent({ type: "status", message }), write: !isPublicFeedback && effectivePayload.sandbox_mode === "workspace-write", onEvent: event => { clock.progress(); publish(event); },
         emitTaskUpdated: (mutated) => onEvent({ type: "task_updated", task_id: mutated.task_id, action: mutated.action }),
         secrets, finish, stop });
       if (signal.aborted) { abort(); return; }

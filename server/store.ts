@@ -303,7 +303,10 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS feedback_agents (
     project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
     enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), runtime TEXT NOT NULL CHECK(runtime IN ('codex','claude')),
-    model TEXT NOT NULL, public_guide TEXT NOT NULL
+    model TEXT NOT NULL, public_guide TEXT NOT NULL DEFAULT '',
+    execution_target TEXT NOT NULL DEFAULT 'auto',
+    reasoning_effort TEXT NOT NULL DEFAULT 'default',
+    system_prompt TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS bridge_agents (
     id TEXT PRIMARY KEY, name TEXT NOT NULL,
@@ -1033,6 +1036,21 @@ export class Store {
       if (!chatSessionCols.some(c => c.name === column)) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN ${column} INTEGER`);
     }
     this.migrateReleasesTable();
+    const feedbackAgentCols = this.db
+      .prepare("PRAGMA table_info(feedback_agents)")
+      .all() as Array<{ name: string }>;
+    if (!feedbackAgentCols.some((c) => c.name === "execution_target")) {
+      this.db.exec("ALTER TABLE feedback_agents ADD COLUMN execution_target TEXT NOT NULL DEFAULT 'auto'");
+    }
+    if (!feedbackAgentCols.some((c) => c.name === "reasoning_effort")) {
+      this.db.exec("ALTER TABLE feedback_agents ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'default'");
+    }
+    if (!feedbackAgentCols.some((c) => c.name === "system_prompt")) {
+      this.db.exec("ALTER TABLE feedback_agents ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''");
+    }
+    this.db.exec(
+      "UPDATE feedback_agents SET system_prompt = public_guide WHERE system_prompt = '' AND public_guide != ''",
+    );
     this.db.exec("CREATE INDEX IF NOT EXISTS chat_sessions_project_kind ON chat_sessions(project_id, kind, updated_at DESC)");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS chat_sessions_task_unique ON chat_sessions(task_id) WHERE task_id IS NOT NULL");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS chat_sessions_release_unique ON chat_sessions(release_id) WHERE release_id IS NOT NULL");

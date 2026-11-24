@@ -34,6 +34,7 @@ export interface ChatStart {
   image_paths?: string[];
   datasource_env?: Record<string, unknown>;
   pg_read_only_enforced?: boolean;
+  public_feedback?: boolean;
 }
 export function datasourceValues(input: ChatStart["datasource_env"]) {
   const env: Record<string, string> = Object.create(null);
@@ -139,6 +140,13 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   const p = o.p,
     runtime = p.runtime,
     cfg = o.config.runtimes?.[runtime];
+  const isPublicFeedback = p.public_feedback === true;
+  const effectiveSandboxMode: ChatSandboxMode = isPublicFeedback ? "read-only" : p.sandbox_mode;
+  const effectiveNetworkAccess = isPublicFeedback ? false : p.network_access === true;
+  const effectiveAllowSecrets = isPublicFeedback ? false : o.allowSecrets;
+  const effectiveEnableMcp = isPublicFeedback ? false : Boolean(o.enableMcp);
+  const effectiveResumeSessionId = isPublicFeedback ? "" : (p.resume_session_id || "");
+  const effectiveFastMode = isPublicFeedback ? undefined : p.fast_mode;
   const configured = cfg?.bin || runtime;
   // Resolve before changing cwd so a project cannot substitute a CLI through a relative PATH entry.
   const candidates =
@@ -160,7 +168,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   const model = p.model || o.catalog.runtimes[runtime].default_model || "";
   const metadata = o.catalog.models.find((m) => m.runtime === runtime && m.id === model);
   const fastModel = model ? metadata : o.catalog.models.find(m => m.runtime === runtime && m.is_default);
-  if (runtime === "codex" && p.fast_mode && p.fast_mode !== "default" && fastModel?.supports_fast !== true) {
+  if (runtime === "codex" && effectiveFastMode && effectiveFastMode !== "default" && fastModel?.supports_fast !== true) {
     throw new Error("当前模型未确认支持 GPT Fast。请在会话模型设置中选择「跟随 Harness」或更换模型。");
   }
   let effort =
@@ -172,18 +180,22 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     (effort !== "default" && metadata?.effort_levels && !metadata.effort_levels.includes(effort))
   )
     effort = "default";
-  const datasource = datasourceValues(p.datasource_env);
+  const datasource = isPublicFeedback
+    ? { env: Object.create(null) as Record<string, string>, secrets: [] as string[] }
+    : datasourceValues(p.datasource_env);
   const secrets = [...datasource.secrets, String(o.config.agent_token || "")].filter(Boolean);
-  const fullAccess = runtime === "codex" ? o.config.codex_full_access : o.config.claude_full_access;
+  const fullAccess = isPublicFeedback
+    ? false
+    : (runtime === "codex" ? o.config.codex_full_access : o.config.claude_full_access);
   let mcpHandle: RelaydeskMcpHandle | null = null;
   let claudeMcpConfigPath: string | null = null;
-  if (o.enableMcp) {
+  if (effectiveEnableMcp) {
     mcpHandle = await startRelaydeskMcpServer({
       projectId: p.project_id,
       spaceDir: o.spaceDir,
       databases: normalizeManifestDatabases(p.workspace_manifest?.databases),
-      datasourceEnv: o.allowSecrets ? datasource.env : {},
-      allowDatasourceSecrets: o.allowSecrets,
+      datasourceEnv: effectiveAllowSecrets ? datasource.env : {},
+      allowDatasourceSecrets: effectiveAllowSecrets,
       secrets,
       taskClient: o.taskClient,
       signal: o.signal,
@@ -206,16 +218,16 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     bin,
     model,
     reasoningEffort: effort,
-    fastMode: p.fast_mode,
-    sandboxMode: p.sandbox_mode,
-    networkAccess: p.network_access === true,
-    localAccess: fullAccess === true ? "full" : "restricted",
+    fastMode: effectiveFastMode,
+    sandboxMode: effectiveSandboxMode,
+    networkAccess: effectiveNetworkAccess,
+    localAccess: !isPublicFeedback && fullAccess === true ? "full" : "restricted",
     workspaceDir: o.cwd,
     // Fresh turns mount the shadow dir; Claude also accepts --add-dir on resume.
-    reposDir: runtime === "claude" && p.resume_session_id ? o.spaceDir : null,
+    reposDir: runtime === "claude" && effectiveResumeSessionId ? o.spaceDir : null,
     extraAddDirs: [o.spaceDir],
     imagePaths: attachedImages.paths,
-    resumeSessionId: p.resume_session_id || "",
+    resumeSessionId: effectiveResumeSessionId,
     projectSettings: null,
     ...(mcpHandle
       ? {
@@ -234,8 +246,8 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     if (/^RELAYDESK_/i.test(k)) delete env[k];
     else if (v && v.length >= 4 && /(key|token|secret|password|credential)/i.test(k)) secrets.push(v);
   }
-  if (o.allowSecrets) Object.assign(env, datasource.env);
-  if (o.allowSecrets && p.pg_read_only_enforced === true)
+  if (effectiveAllowSecrets) Object.assign(env, datasource.env);
+  if (effectiveAllowSecrets && p.pg_read_only_enforced === true)
     env.PGOPTIONS = `${env.PGOPTIONS ?? ""} -c default_transaction_read_only=on`.trim();
   if (mcpHandle && runtime === "codex") env.RELAYDESK_MCP_TOKEN = mcpHandle.token;
   env.RELAYDESK_SPACE_DIR = o.spaceDir;
@@ -292,7 +304,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     "image/avif": "avif",
   };
   let savedToolImages = 0;
-  const saveToolImage = p.sandbox_mode === "workspace-write"
+  const saveToolImage = !isPublicFeedback && effectiveSandboxMode === "workspace-write"
     ? (img: { mime: string; data: string; toolName?: string }) => {
         if (savedToolImages >= 12) return null;
         const ext = IMAGE_MIME_EXT[img.mime.toLowerCase()];

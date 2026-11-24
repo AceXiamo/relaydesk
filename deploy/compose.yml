@@ -4,10 +4,9 @@ services:
     restart: unless-stopped
     env_file:
       - app.env
-      - ${RELAYDESK_FEEDBACK_ENV_FILE:-/dev/null}
     volumes:
       - ./data:/app/data
-    networks: [edge, feedback]
+    networks: [edge]
     labels:
       traefik.enable: "true"
       traefik.docker.network: edge
@@ -22,29 +21,6 @@ services:
       retries: 3
       start_period: 10s
 
-  feedback-runner:
-    profiles: [feedback]
-    image: ghcr.io/acexiamo/relaydesk:${IMAGE_TAG:-latest}
-    command: [node, server/feedback-runner.ts]
-    restart: unless-stopped
-    init: true
-    read_only: true
-    user: "10001:10001"
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    pids_limit: 128
-    cpus: 1.0
-    mem_limit: 1g
-    # Never pass the web's app.env or the deployment .env to this service.
-    env_file: ${RELAYDESK_FEEDBACK_ENV_FILE:-/dev/null}
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=128m
-    networks: [feedback]
-    labels:
-      traefik.enable: "false"
-
 networks:
-  feedback:
-    internal: true
   edge:
     external: true

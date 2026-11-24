@@ -14,6 +14,7 @@ export interface PortalConfig {
   upload_enabled: boolean;
   ai_enabled?: boolean;
   agent_enabled?: boolean;
+  agent_available?: boolean;
   release_window: string;
 }
 
@@ -34,6 +35,10 @@ export interface FeedbackDiagnoseResponse {
   outcome: FeedbackDiagnoseOutcome;
   draft?: FeedbackDiagnoseDraft;
 }
+
+export type FeedbackDiagnoseStreamEvent =
+  | { type: "status"; label: string }
+  | { type: "delta"; text: string };
 
 export interface PortalTask {
   id: string;

@@ -19,6 +19,7 @@ import type {
   FeedbackDiagnoseMessage,
   FeedbackDiagnoseOutcome,
   FeedbackDiagnoseResponse,
+  FeedbackDiagnoseStreamEvent,
   FeedbackReleasePreference,
   PortalConfig,
   PortalTaskDetail,
@@ -37,6 +38,7 @@ interface ConversationTurn {
   text: string;
   images?: string[];
   outcome?: FeedbackDiagnoseOutcome;
+  streaming?: boolean;
 }
 
 interface EditableDraftState {
@@ -45,6 +47,7 @@ interface EditableDraftState {
   body: string;
   images: string[];
   releasePreference: FeedbackReleasePreference;
+  expanded: boolean;
   dismissed: boolean;
 }
 
@@ -58,6 +61,7 @@ interface PortalFeedbackConversationProps {
   onDiagnose: (
     payload: { messages: FeedbackDiagnoseMessage[]; images?: string[] },
     signal?: AbortSignal,
+    onEvent?: (event: FeedbackDiagnoseStreamEvent) => void,
   ) => Promise<FeedbackDiagnoseResponse>;
   onCreateTask: (payload: {
     title: string;
@@ -70,6 +74,7 @@ interface PortalFeedbackConversationProps {
     body: string;
     extraImageUrls: string[];
   }) => void;
+  onRefreshConfig?: () => Promise<void> | void;
   onPossibleAuthError: (err: unknown) => boolean;
 }
 
@@ -78,45 +83,24 @@ const STARTERS = [
     id: "bug",
     icon: "alert-circle",
     label: "页面或功能异常",
+    hint: "描述操作步骤与异常表现",
     prompt: "我在这个页面遇到了一个异常：",
   },
   {
     id: "usage",
     icon: "book-open",
     label: "这个功能怎么用",
+    hint: "不确定配置方式或操作入口",
     prompt: "请问这个功能应该怎么操作或配置：",
   },
   {
     id: "check",
     icon: "search",
-    label: "帮忙排查问题原因",
+    label: "结果与预期不符",
+    hint: "附带截图一起定位原因",
     prompt: "我按常规步骤操作但结果和预期不符：",
   },
 ] as const;
-
-const OUTCOME_META: Record<
-  FeedbackDiagnoseOutcome,
-  { label: string; icon: string; badgeClass: string }
-> = {
-  clarify: {
-    label: "需要补充信息",
-    icon: "help-circle",
-    badgeClass:
-      "border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300",
-  },
-  usage: {
-    label: "使用指导 · 无需建单",
-    icon: "book-open",
-    badgeClass:
-      "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-  },
-  suspected_bug: {
-    label: "疑似功能故障 · 待确认草稿",
-    icon: "file-warning",
-    badgeClass:
-      "border-amber-500/30 bg-amber-500/12 text-amber-800 dark:text-amber-300",
-  },
-};
 
 function makeTurnId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -144,14 +128,19 @@ export function PortalFeedbackConversation({
   onDiagnose,
   onCreateTask,
   onSwitchToManual,
+  onRefreshConfig,
   onPossibleAuthError,
 }: PortalFeedbackConversationProps) {
   const toast = useToast();
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
   const [input, setInput] = useState("");
   const [diagnosing, setDiagnosing] = useState(false);
+  const [statusLabel, setStatusLabel] = useState("正在排查问题…");
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [diagnoseError, setDiagnoseError] = useState<string | null>(null);
+  const [diagnoseError, setDiagnoseError] = useState<{
+    message: string;
+    offline?: boolean;
+  } | null>(null);
   const [historyTrimmedHint, setHistoryTrimmedHint] = useState(false);
   const [draft, setDraft] = useState<EditableDraftState | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -160,10 +149,8 @@ export function PortalFeedbackConversation({
   const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const threadContainerRef = useRef<HTMLDivElement | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Elapsed timer while a genuine /diagnose request is in flight
   useEffect(() => {
     if (!diagnosing) {
       setElapsedMs(0);
@@ -193,113 +180,157 @@ export function PortalFeedbackConversation({
     return dedupeUrls(urls).slice(-6);
   }, [turns, stagedImages]);
 
-  // Keep open draft images synced when user uploads new screenshots while reviewing draft
   useEffect(() => {
     if (!draft || draft.dismissed) return;
     const readyStaged = stagedImages
       .filter((img) => img.remoteUrl && !img.uploading)
       .map((img) => img.remoteUrl);
-    if (readyStaged.length === 0) return;
+    if (!readyStaged.length) return;
     setDraft((prev) => {
-      if (!prev) return prev;
+      if (!prev || prev.dismissed) return prev;
       const merged = dedupeUrls([...prev.images, ...readyStaged]).slice(0, 6);
       if (merged.length === prev.images.length) return prev;
       return { ...prev, images: merged };
     });
   }, [stagedImages, draft]);
 
-  const scrollToEnd = useCallback(() => {
+  const scrollToLatest = useCallback((behavior: ScrollBehavior = "smooth") => {
     requestAnimationFrame(() => {
-      const container = threadContainerRef.current;
-      if (container && container.scrollHeight > container.clientHeight + 4) {
-        container.scrollTop = container.scrollHeight;
-        return;
-      }
-      threadEndRef.current?.scrollIntoView({ behavior: "auto", block: "nearest" });
+      threadEndRef.current?.scrollIntoView({ behavior, block: "nearest" });
     });
   }, []);
 
-  useEffect(() => {
-    if (turns.length === 0) return;
-    scrollToEnd();
-  }, [turns.length, draft?.turnId, draft?.dismissed, diagnosing, diagnoseError, scrollToEnd]);
+  const runDiagnoseTurn = useCallback(
+    async (nextTurns: ConversationTurn[], allImageUrls: string[]) => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
 
-  const runDiagnose = useCallback(
-    async (nextTurns: ConversationTurn[], imageUrls: string[]) => {
       const normalized = normalizeDiagnosePayload(
-        nextTurns.map((t) => ({ role: t.role, text: t.text })),
-        imageUrls,
+        nextTurns
+          .filter((t) => !t.streaming)
+          .map((t) => ({ role: t.role, text: t.text })),
+        allImageUrls,
       );
       if (normalized.messages.length === 0) return;
 
-      const controller = new AbortController();
-      abortRef.current = controller;
+      const assistantTurnId = makeTurnId();
+      setHistoryTrimmedHint(normalized.trimmedHistory);
       setDiagnosing(true);
+      setStatusLabel("正在分析问题与上下文…");
       setDiagnoseError(null);
-      setHistoryTrimmedHint(normalized.trimmedHistory || normalized.clampedMessage);
+
+      let streamed = "";
+      let streamStarted = false;
 
       try {
         const res = await onDiagnose(
-          normalized.images.length > 0
-            ? { messages: normalized.messages, images: normalized.images }
-            : { messages: normalized.messages },
+          {
+            messages: normalized.messages,
+            ...(normalized.images.length ? { images: normalized.images } : {}),
+          },
           controller.signal,
+          (ev) => {
+            if (controller.signal.aborted) return;
+            if (ev.type === "status") {
+              setStatusLabel(ev.label || "正在排查问题…");
+            } else if (ev.type === "delta" && ev.text) {
+              streamed += ev.text;
+              if (!streamStarted) {
+                streamStarted = true;
+                setTurns((prev) => [
+                  ...prev,
+                  {
+                    id: assistantTurnId,
+                    role: "assistant",
+                    text: streamed,
+                    streaming: true,
+                  },
+                ]);
+              } else {
+                const currentText = streamed;
+                setTurns((prev) =>
+                  prev.map((item) =>
+                    item.id === assistantTurnId
+                      ? { ...item, text: currentText }
+                      : item,
+                  ),
+                );
+              }
+              scrollToLatest("auto");
+            }
+          },
         );
-        const turnId = makeTurnId();
-        const outcome: FeedbackDiagnoseOutcome =
-          res.outcome === "usage" || res.outcome === "suspected_bug"
-            ? res.outcome
-            : "clarify";
-        const replyText =
-          typeof res.reply === "string" && res.reply.trim()
-            ? res.reply.trim()
-            : outcome === "suspected_bug"
-              ? "已整理出疑似故障草稿，请核对下方内容并确认是否提交工单。"
-              : "请继续补充更多细节，我会结合说明帮你进一步定位。";
+        if (controller.signal.aborted) return;
 
-        const assistantTurn: ConversationTurn = {
-          id: turnId,
-          role: "assistant",
-          text: replyText,
-          outcome,
-        };
-        setTurns((prev) => [...prev, assistantTurn]);
+        const finalText = (res.reply || streamed).trim();
+        setTurns((prev) => {
+          const exists = prev.some((t) => t.id === assistantTurnId);
+          if (exists) {
+            return prev.map((item) =>
+              item.id === assistantTurnId
+                ? {
+                    ...item,
+                    text: finalText,
+                    outcome: res.outcome,
+                    streaming: false,
+                  }
+                : item,
+            );
+          }
+          return [
+            ...prev,
+            {
+              id: assistantTurnId,
+              role: "assistant",
+              text: finalText,
+              outcome: res.outcome,
+              streaming: false,
+            },
+          ];
+        });
 
-        if (outcome === "suspected_bug") {
-          const fallbackBody = nextTurns
-            .filter((t) => t.role === "user")
-            .map((t) => t.text)
-            .join("\n\n");
-          const draftTitle =
-            res.draft?.title?.trim() ||
-            fallbackBody.split(/\r?\n/)[0]?.slice(0, 80) ||
-            "功能异常反馈";
-          const draftBody = res.draft?.body?.trim() || fallbackBody;
+        if (res.outcome === "suspected_bug" && res.draft) {
           setDraft({
-            turnId,
-            title: draftTitle,
-            body: draftBody,
-            images: normalized.images,
+            turnId: assistantTurnId,
+            title: res.draft.title.trim(),
+            body: res.draft.body.trim(),
+            images: dedupeUrls(allImageUrls).slice(0, 6),
             releasePreference: "default",
+            expanded: false,
             dismissed: false,
           });
         } else {
-          setDraft(null);
+          setDraft((prev) => (prev ? { ...prev, dismissed: true } : null));
         }
-        scrollToEnd();
+
+        scrollToLatest();
       } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") {
-          setDiagnoseError("已取消本轮诊断。你可以点击「重试本轮」，或补充文字后重新发送。");
+        if (streamStarted) {
+          setTurns((prev) =>
+            prev.map((item) =>
+              item.id === assistantTurnId ? { ...item, streaming: false } : item,
+            ),
+          );
+        }
+        if (
+          controller.signal.aborted ||
+          (err instanceof Error && err.name === "AbortError")
+        ) {
+          setDiagnoseError({
+            message: "已停止本轮排查。你可以继续补充信息、重试，或直接提交工单。",
+          });
           return;
         }
         if (onPossibleAuthError(err)) return;
-        const msg =
-          err instanceof PortalApiError
+        const isOffline =
+          err instanceof PortalApiError &&
+          (err.status === 503 || err.status === 409);
+        const message =
+          err instanceof Error
             ? err.message
-            : err instanceof Error
-              ? err.message
-              : "反馈诊断请求失败，你可以重试或直接改用人工提单。";
-        setDiagnoseError(msg);
+            : "诊断请求失败，请稍后重试或直接提交反馈。";
+        setDiagnoseError({ message, offline: isOffline });
       } finally {
         if (abortRef.current === controller) {
           abortRef.current = null;
@@ -307,126 +338,124 @@ export function PortalFeedbackConversation({
         setDiagnosing(false);
       }
     },
-    [onDiagnose, onPossibleAuthError, scrollToEnd],
+    [onDiagnose, onPossibleAuthError, scrollToLatest],
   );
 
   const handleSend = useCallback(
     async (e?: FormEvent) => {
       e?.preventDefault();
-      if (diagnosing) {
-        abortRef.current?.abort();
-        return;
-      }
-      const trimmed = input.trim();
-      const anyUploading = stagedImages.some((i) => i.uploading);
-      if (anyUploading) {
+      if (diagnosing || confirming) return;
+      if (stagedImages.some((img) => img.uploading)) {
         toast.info("请等待截图上传完成后再发送");
         return;
       }
+
+      const trimmed = input.trim();
       if (!trimmed) {
-        if (stagedImages.length > 0) {
-          toast.info("请先用文字简述问题现象（截图将作为附件保留，当前诊断不读取图片内容）");
-          inputRef.current?.focus();
-        }
+        inputRef.current?.focus();
         return;
       }
 
-      const turnImageUrls = stagedImages
-        .filter((i) => i.remoteUrl && !i.uploading)
-        .map((i) => i.remoteUrl);
+      const turnImages = stagedImages
+        .filter((img) => img.remoteUrl && !img.uploading)
+        .map((img) => img.remoteUrl);
 
       const userTurn: ConversationTurn = {
         id: makeTurnId(),
         role: "user",
         text: trimmed,
-        images: turnImageUrls.length > 0 ? turnImageUrls : undefined,
+        ...(turnImages.length ? { images: turnImages } : {}),
       };
+
       const nextTurns = [...turns, userTurn];
-      const allImages = dedupeUrls([
-        ...turns.flatMap((t) => t.images ?? []),
-        ...turnImageUrls,
-      ]).slice(-6);
+      const allImages = dedupeUrls([...conversationImages, ...turnImages]).slice(-6);
 
       setTurns(nextTurns);
       setInput("");
-      setDraft(null);
-      if (turnImageUrls.length > 0) {
+      if (turnImages.length) {
         onClearStagedImages();
       }
-      scrollToEnd();
-      await runDiagnose(nextTurns, allImages);
+      scrollToLatest();
+
+      await runDiagnoseTurn(nextTurns, allImages);
     },
     [
+      confirming,
+      conversationImages,
       diagnosing,
       input,
-      stagedImages,
-      turns,
-      toast,
       onClearStagedImages,
-      scrollToEnd,
-      runDiagnose,
+      runDiagnoseTurn,
+      scrollToLatest,
+      stagedImages,
+      toast,
+      turns,
     ],
   );
 
   const handleRetryLast = () => {
     if (diagnosing || turns.length === 0) return;
-    const allImages = dedupeUrls(turns.flatMap((t) => t.images ?? [])).slice(-6);
-    void runDiagnose(turns, allImages);
+    const cleanTurns = turns.filter((t) => !(t.role === "assistant" && !t.outcome));
+    setTurns(cleanTurns);
+    void runDiagnoseTurn(cleanTurns, conversationImages);
   };
 
-  const handleReset = () => {
+  const handleStop = () => {
+    abortRef.current?.abort();
+  };
+
+  const handleResetConversation = () => {
     abortRef.current?.abort();
     setTurns([]);
-    setInput("");
     setDraft(null);
     setDiagnoseError(null);
     setHistoryTrimmedHint(false);
+    setInput("");
     onClearStagedImages();
-    inputRef.current?.focus();
+    requestAnimationFrame(() => inputRef.current?.focus());
   };
 
-  const handleManualEscalation = () => {
+  const handleSwitchManualClick = () => {
     abortRef.current?.abort();
     const userSummary = turns
       .filter((t) => t.role === "user")
-      .map((t) => t.text)
+      .map((t) => t.text.trim())
+      .filter(Boolean)
       .join("\n\n");
-    const prefillBody = draft?.body?.trim()
-      ? draft.body.trim()
-      : [userSummary, input.trim()].filter(Boolean).join("\n\n");
+    const draftBody =
+      draft && !draft.dismissed && draft.body.trim()
+        ? draft.body.trim()
+        : [userSummary, input.trim()].filter(Boolean).join("\n\n");
     const extraImageUrls = dedupeUrls([
-      ...turns.flatMap((t) => t.images ?? []),
+      ...conversationImages,
       ...(draft?.images ?? []),
     ]);
-    onSwitchToManual({ body: prefillBody, extraImageUrls });
+    onSwitchToManual({ body: draftBody, extraImageUrls });
   };
 
-  const handleConfirmDraft = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!draft || confirming) return;
-    const cleanTitle = draft.title.trim();
-    const cleanBody = draft.body.trim();
-    if (!cleanBody) {
-      toast.error("请填写工单详情描述后再确认提交");
+  const handleConfirmDraft = async () => {
+    if (!draft || confirming || diagnosing) return;
+    if (stagedImages.some((img) => img.uploading)) {
+      toast.info("请等待截图上传完成后再提交");
       return;
     }
+    const cleanTitle = draft.title.trim();
+    const cleanBody = draft.body.trim();
+    if (!cleanTitle || !cleanBody) {
+      setDraft((prev) => (prev ? { ...prev, expanded: true } : prev));
+      toast.error("请确认工单标题与详情内容不为空");
+      return;
+    }
+
     setConfirming(true);
     try {
       await onCreateTask({
-        title: cleanTitle || cleanBody.split(/\r?\n/)[0].slice(0, 80),
+        title: cleanTitle,
         body: cleanBody,
         type: "功能异常",
-        images: dedupeUrls(draft.images).slice(0, 6),
-        release_preference: config.can_request_deploy
-          ? draft.releasePreference
-          : "default",
+        images: draft.images,
+        release_preference: draft.releasePreference,
       });
-      setTurns([]);
-      setInput("");
-      setDraft(null);
-      setDiagnoseError(null);
-      setHistoryTrimmedHint(false);
-      onClearStagedImages();
     } catch (err) {
       if (onPossibleAuthError(err)) return;
       toast.error(err instanceof Error ? err.message : "提交工单失败，请重试");
@@ -435,25 +464,32 @@ export function PortalFeedbackConversation({
     }
   };
 
-  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleComposerKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       void handleSend();
     }
   };
 
-  const hasUploading = stagedImages.some((img) => img.uploading);
-  const canSend = !hasUploading && input.trim().length > 0;
+  const uploadingCount = stagedImages.filter((i) => i.uploading).length;
+  const elapsedSeconds = (elapsedMs / 1000).toFixed(1);
+  const canSend =
+    Boolean(input.trim()) && !diagnosing && !confirming && uploadingCount === 0;
+  const nearCharLimit = input.length >= Math.floor(DIAGNOSE_MAX_MESSAGE_CHARS * 0.75);
+  const hasConversation = turns.length > 0;
+  const activeStreamingTurn = turns.find((t) => t.streaming);
 
   return (
     <section
       data-testid="portal-agent-conversation"
       onDragOver={(e) => {
+        if (!config.upload_enabled) return;
         e.preventDefault();
         setDragOver(true);
       }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(e) => {
+        if (!config.upload_enabled) return;
         e.preventDefault();
         setDragOver(false);
         if (e.dataTransfer?.files?.length) {
@@ -461,70 +497,83 @@ export function PortalFeedbackConversation({
         }
       }}
       className={cn(
-        "rounded-2xl border bg-[var(--surface-card)] overflow-hidden shadow-[var(--rd-shadow-sm)] rd-hairline-glow transition-all duration-200 flex flex-col",
+        "relative flex flex-col min-h-[calc(100dvh-10.5rem)] rounded-2xl border bg-[var(--surface-card)]/90 shadow-[var(--rd-shadow-sm)] rd-hairline-glow transition-all duration-200 overflow-hidden",
         dragOver
           ? "border-indigo-500 ring-2 ring-indigo-500/20"
           : "border-[var(--border-subtle)]",
       )}
     >
-      {/* Conversation Header */}
-      <div className="px-5 py-3.5 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2.5 bg-[var(--surface-card)]">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-indigo-500/25 bg-indigo-500/[0.08] text-[11.5px] font-medium text-indigo-700 dark:text-indigo-300">
-            <LivePulseDot tone="indigo" active={!diagnosing} />
-            <span>反馈诊断对话</span>
+      {/* Subtle Top Status Bar (only visible once chatting, keeps welcome ultra-clean) */}
+      {hasConversation && (
+        <div className="px-5 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)]/75 backdrop-blur-sm flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-[12px] text-[var(--text-secondary)] min-w-0">
+            <LivePulseDot tone="emerald" active={diagnosing} />
+            <span className="font-medium text-[var(--text-primary)] truncate">
+              {config.project_name} · 诊断对话
+            </span>
+            <span className="hidden sm:inline text-[11px] text-[var(--text-muted)]">
+              确认前不建单
+            </span>
           </div>
-          <span className="text-[12px] text-[var(--text-muted)] hidden sm:inline truncate">
-            先核实问题，疑似故障再经你确认建单
-          </span>
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          {turns.length > 0 && (
+          <div className="flex items-center gap-1.5 shrink-0">
             <Button
               type="button"
               variant="ghost"
               size="xs"
               icon="rotate-ccw"
-              disabled={diagnosing}
-              onClick={handleReset}
+              onClick={handleResetConversation}
+              disabled={confirming}
             >
               新对话
             </Button>
-          )}
-          <Button
-            type="button"
-            variant="secondary"
-            size="xs"
-            icon="file-pen-line"
-            data-testid="portal-switch-manual"
-            onClick={handleManualEscalation}
-          >
-            人工直接提单
-          </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              icon="pen-line"
+              data-testid="portal-switch-manual"
+              onClick={handleSwitchManualClick}
+              disabled={confirming}
+            >
+              直接提单
+            </Button>
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* Thread Viewport: flow naturally on narrow mobile screens so the draft confirm CTA is never clipped/covered by the composer dock */}
+      {/* Conversation Thread / Empty Welcome Canvas */}
       <div
-        ref={threadContainerRef}
-        className="px-4 sm:px-5 pt-5 pb-6 sm:pb-8 space-y-4 min-h-[260px] sm:min-h-[300px] sm:max-h-[62vh] sm:overflow-y-auto rd-scroll"
+        className={cn(
+          "flex-1 overflow-y-auto px-4 sm:px-7 py-6 sm:py-8 rd-scroll",
+          !hasConversation && "flex flex-col",
+        )}
       >
-        {turns.length === 0 ? (
-          <div className="py-6 sm:py-8 max-w-lg mx-auto text-center space-y-5 animate-rd-msg-in">
-            <div className="mx-auto w-11 h-11 rounded-2xl border border-indigo-500/20 bg-indigo-500/[0.08] text-indigo-600 dark:text-indigo-400 flex items-center justify-center shadow-2xs">
-              <Icon name="message-square-text" size={20} />
+        {!hasConversation ? (
+          <div className="w-full max-w-xl mx-auto my-auto py-6 sm:py-10 flex flex-col items-center text-center space-y-6 animate-rd-portal-in">
+            <div className="relative">
+              <div
+                aria-hidden="true"
+                className="absolute -inset-3 rounded-3xl bg-indigo-500/12 blur-xl pointer-events-none"
+              />
+              <div className="relative w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500/15 via-violet-500/10 to-transparent border border-indigo-500/25 flex items-center justify-center text-indigo-600 dark:text-indigo-400 shadow-2xs">
+                <Icon name="sparkles" size={22} />
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <h2 className="text-[16px] font-semibold tracking-tight text-[var(--text-primary)]">
-                遇到问题或使用疑问？直接告诉我
+
+            <div className="space-y-2">
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border border-emerald-500/25 bg-emerald-500/8 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
+                <LivePulseDot tone="emerald" active />
+                <span>诊断助手在线 · 确认后再建工单</span>
+              </div>
+              <h2 className="text-[20px] sm:text-[22px] font-semibold tracking-tight text-[var(--text-primary)]">
+                遇到问题或疑问？先聊聊看
               </h2>
-              <p className="text-[12.5px] leading-relaxed text-[var(--text-muted)]">
-                我会结合「{config.project_name}」的公开使用说明与你连续排查：若属于用法或配置问题会直接解答而不建单；若信息不足会继续追问；仅当疑似功能故障时才为你生成可编辑草稿，经你确认后才会正式提单。
+              <p className="text-[13px] leading-relaxed text-[var(--text-muted)] max-w-md mx-auto">
+                直接描述现象或粘贴报错截图，我会结合「{config.project_name}」的实现帮你判断是使用问题还是产品故障。
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+            <div className="w-full grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 text-left">
               {STARTERS.map((s, idx) => (
                 <button
                   key={s.id}
@@ -534,27 +583,32 @@ export function PortalFeedbackConversation({
                     setInput(s.prompt);
                     requestAnimationFrame(() => inputRef.current?.focus());
                   }}
-                  className="animate-rd-chip-pop inline-flex items-center gap-1.5 h-8.5 px-3 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-elevated)] hover:border-indigo-500/45 hover:bg-indigo-500/[0.06] text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all cursor-pointer"
+                  className="animate-rd-chip-pop group rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/80 hover:bg-[var(--surface-hover)] hover:border-indigo-500/40 p-3.5 transition-all duration-150 cursor-pointer space-y-1.5"
                 >
-                  <Icon
-                    name={s.icon}
-                    size={13}
-                    className="text-indigo-500 shrink-0"
-                  />
-                  <span>{s.label}</span>
+                  <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-[var(--text-primary)]">
+                    <Icon
+                      name={s.icon}
+                      size={13.5}
+                      className="text-indigo-500 group-hover:scale-105 transition-transform shrink-0"
+                    />
+                    <span>{s.label}</span>
+                  </div>
+                  <p className="text-[11.5px] leading-snug text-[var(--text-muted)]">
+                    {s.hint}
+                  </p>
                 </button>
               ))}
             </div>
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="max-w-2xl mx-auto space-y-6 pb-4">
             {turns.map((turn) => {
               if (turn.role === "user") {
                 return (
                   <div
                     key={turn.id}
                     data-testid="portal-turn-user"
-                    className="flex flex-col items-end gap-1.5 animate-rd-msg-in"
+                    className="flex flex-col items-end gap-2 animate-rd-msg-in"
                   >
                     {turn.images && turn.images.length > 0 && (
                       <div className="flex flex-wrap justify-end gap-2 max-w-[85%]">
@@ -563,11 +617,11 @@ export function PortalFeedbackConversation({
                             key={url}
                             type="button"
                             onClick={() => onOpenLightbox(url)}
-                            className="w-20 h-16 rounded-xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-elevated)] hover:border-indigo-500/60 transition-colors cursor-zoom-in"
+                            className="w-24 h-18 rounded-xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-elevated)] hover:border-indigo-500/60 transition-colors cursor-zoom-in shadow-2xs"
                           >
                             <img
                               src={url}
-                              alt="已附带截图"
+                              alt="附带截图"
                               className="w-full h-full object-cover"
                             />
                           </button>
@@ -577,16 +631,10 @@ export function PortalFeedbackConversation({
                     <div className="max-w-[85%] rounded-2xl rounded-br-md bg-zinc-900 text-zinc-50 dark:bg-zinc-100 dark:text-zinc-950 px-4 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words shadow-2xs">
                       {turn.text}
                     </div>
-                    {turn.images && turn.images.length > 0 && (
-                      <span className="text-[11px] text-[var(--text-muted)]">
-                        已附带 {turn.images.length} 张截图作为附件（确认建单时将随草稿转交研发，本轮不读图）
-                      </span>
-                    )}
                   </div>
                 );
               }
 
-              const meta = turn.outcome ? OUTCOME_META[turn.outcome] : null;
               const isActiveDraftTurn =
                 draft && !draft.dismissed && draft.turnId === turn.id;
 
@@ -595,309 +643,351 @@ export function PortalFeedbackConversation({
                   key={turn.id}
                   data-testid="portal-turn-assistant"
                   data-outcome={turn.outcome || ""}
-                  className="space-y-2.5 animate-rd-msg-in"
+                  className="space-y-3 animate-rd-msg-in"
                 >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-[var(--text-primary)]">
-                      <span className="w-5 h-5 rounded-md bg-indigo-500/12 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400 inline-flex items-center justify-center">
-                        <Icon name="sparkles" size={11} />
-                      </span>
-                      <span>反馈诊断助手</span>
-                    </span>
-                    {meta && (
-                      <span
-                        data-testid={`portal-outcome-${turn.outcome}`}
-                        className={cn(
-                          "inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-medium",
-                          meta.badgeClass,
+                  <div className="flex items-start gap-3">
+                    <div className="w-7 h-7 rounded-lg bg-indigo-500/12 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0 mt-0.5">
+                      <Icon name="sparkles" size={13} />
+                    </div>
+                    <div className="flex-1 min-w-0 space-y-2.5">
+                      <div className="text-[13.5px] leading-relaxed text-[var(--text-primary)]">
+                        <MarkdownContent content={turn.text} />
+                        {turn.streaming && (
+                          <span
+                            aria-hidden="true"
+                            className="inline-block w-1.5 h-4 ml-0.5 align-middle rounded-xs bg-indigo-500/80 animate-[rd-caret-blink_1s_ease-in-out_infinite]"
+                          />
                         )}
-                      >
-                        <Icon name={meta.icon} size={11} />
-                        <span>{meta.label}</span>
-                      </span>
-                    )}
-                  </div>
+                      </div>
 
-                  <div className="max-w-[92%] rounded-2xl rounded-tl-md border border-[var(--border-subtle)] bg-[var(--surface-elevated)] px-4 py-3 text-[13.5px] leading-relaxed text-[var(--text-primary)] shadow-2xs space-y-3">
-                    <MarkdownContent content={turn.text} />
-
-                    {turn.outcome === "usage" && (
-                      <div className="pt-2.5 border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2 text-[11.5px]">
-                        <span className="text-emerald-700 dark:text-emerald-300 inline-flex items-center gap-1.5 font-medium">
-                          <Icon name="check-circle-2" size={13} />
-                          <span>以上为使用指导，未创建研发工单</span>
-                        </span>
-                        <div className="flex items-center gap-2">
+                      {/* Usage resolved subtle strip */}
+                      {turn.outcome === "usage" && !turn.streaming && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.06] px-3.5 py-2 text-[12px]">
+                          <span className="inline-flex items-center gap-1.5 font-medium text-emerald-700 dark:text-emerald-300">
+                            <Icon name="check-circle-2" size={13.5} />
+                            <span>已识别为使用/配置问题 · 无需建单</span>
+                          </span>
                           <button
                             type="button"
-                            onClick={handleReset}
-                            className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] underline underline-offset-2 cursor-pointer"
+                            onClick={handleResetConversation}
+                            className="text-[11.5px] font-medium text-emerald-700 dark:text-emerald-300 hover:underline cursor-pointer"
                           >
-                            已解决，开始新对话
-                          </button>
-                          <span className="text-[var(--border-strong)]">·</span>
-                          <button
-                            type="button"
-                            onClick={handleManualEscalation}
-                            className="text-indigo-600 dark:text-indigo-400 hover:underline underline-offset-2 font-medium cursor-pointer"
-                          >
-                            仍未解决，人工提单
+                            已解决，开启新对话
                           </button>
                         </div>
-                      </div>
-                    )}
+                      )}
 
-                    {turn.outcome === "clarify" && (
-                      <div className="pt-2 border-t border-[var(--border-subtle)] text-[11.5px] text-[var(--text-muted)] flex items-center gap-1.5">
-                        <Icon name="corner-down-right" size={12} />
-                        <span>请在下方继续补充细节，我会结合历史对话进一步判断。</span>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Tool-Approval inspired Editable Draft Confirmation Card */}
-                  {isActiveDraftTurn && (
-                    <form
-                      data-testid="portal-draft-card"
-                      onSubmit={(e) => void handleConfirmDraft(e)}
-                      className="max-w-full sm:max-w-[96%] scroll-my-16 rounded-2xl border border-amber-500/35 bg-[var(--surface-card)] shadow-[var(--rd-shadow-md)] overflow-hidden animate-rd-draft-reveal"
-                    >
-                      <div className="px-4 py-3 border-b border-amber-500/20 bg-amber-500/[0.06] flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                          <span className="w-6 h-6 rounded-lg bg-amber-500/15 text-amber-700 dark:text-amber-300 inline-flex items-center justify-center shrink-0">
-                            <Icon name="file-check-2" size={14} />
-                          </span>
-                          <div>
-                            <h3 className="text-[13px] font-semibold text-[var(--text-primary)]">
-                              疑似故障工单草稿 · 需你确认后提交
-                            </h3>
-                            <p className="text-[11px] text-[var(--text-muted)]">
-                              尚未创建工单。你可以先修改标题、详情或增删截图，点击确认后正式进入处理队列。
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="p-4 space-y-3.5">
-                        <label className="block space-y-1">
-                          <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                            工单标题
-                          </span>
-                          <input
-                            type="text"
-                            data-testid="portal-draft-title"
-                            maxLength={180}
-                            required
-                            value={draft.title}
-                            onChange={(e) =>
-                              setDraft((prev) =>
-                                prev ? { ...prev, title: e.target.value } : prev,
-                              )
-                            }
-                            placeholder="简明概括故障现象"
-                            className="w-full h-9.5 px-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] font-medium text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
-                          />
-                        </label>
-
-                        <label className="block space-y-1">
-                          <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                            故障详情与复现信息
-                          </span>
-                          <textarea
-                            data-testid="portal-draft-body"
-                            rows={5}
-                            maxLength={20000}
-                            required
-                            value={draft.body}
-                            onChange={(e) =>
-                              setDraft((prev) =>
-                                prev ? { ...prev, body: e.target.value } : prev,
-                              )
-                            }
-                            placeholder="核对或补充复现步骤、报错信息与预期行为…"
-                            className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-3 text-[13px] leading-relaxed text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
-                          />
-                        </label>
-
-                        {/* Draft R2 Attachments */}
-                        {(draft.images.length > 0 || config.upload_enabled) && (
-                          <div className="space-y-1.5">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                                随草稿转交研发的截图附件（{draft.images.length} / 6）
+                      {/* Compact Tool-Approval Suspected Bug Draft Card */}
+                      {isActiveDraftTurn && (
+                        <div
+                          data-testid="portal-bug-draft-card"
+                          className="rounded-2xl border border-amber-500/30 bg-[var(--surface-elevated)]/95 shadow-[var(--rd-shadow-sm)] overflow-hidden animate-rd-draft-reveal scroll-mb-28"
+                        >
+                          {/* Header */}
+                          <div className="px-4 py-3 border-b border-amber-500/15 bg-amber-500/[0.05] flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="w-6 h-6 rounded-lg bg-amber-500/15 text-amber-700 dark:text-amber-300 inline-flex items-center justify-center shrink-0">
+                                <Icon name="file-check-2" size={13.5} />
                               </span>
-                              {config.upload_enabled && draft.images.length < 6 && (
-                                <button
-                                  type="button"
-                                  onClick={() => fileInputRef.current?.click()}
-                                  className="inline-flex items-center gap-1 text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
-                                >
-                                  <Icon name="image-plus" size={12.5} />
-                                  <span>补充截图</span>
-                                </button>
-                              )}
+                              <span className="text-[12.5px] font-semibold text-[var(--text-primary)] truncate">
+                                疑似产品故障 · 待确认提交工单
+                              </span>
                             </div>
-                            {draft.images.length > 0 ? (
-                              <div className="flex flex-wrap gap-2">
-                                {draft.images.map((url) => (
-                                  <div
-                                    key={url}
-                                    className="relative group w-20 h-16 rounded-xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-elevated)] animate-rd-chip-pop"
-                                  >
-                                    <img
-                                      src={url}
-                                      alt="草稿附件截图"
-                                      onClick={() => onOpenLightbox(url)}
-                                      className="w-full h-full object-cover cursor-zoom-in"
-                                    />
-                                    <button
-                                      type="button"
-                                      aria-label="从草稿移除截图"
-                                      onClick={() =>
-                                        setDraft((prev) =>
-                                          prev
-                                            ? {
-                                                ...prev,
-                                                images: prev.images.filter(
-                                                  (u) => u !== url,
-                                                ),
-                                              }
-                                            : prev,
-                                        )
-                                      }
-                                      className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/70 text-white flex items-center justify-center hover:bg-black cursor-pointer"
-                                    >
-                                      <Icon name="x" size={10} />
-                                    </button>
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10.5px] font-medium border border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-300">
+                              尚未建单
+                            </span>
+                          </div>
+
+                          {/* Compact Preview vs Expanded Editor */}
+                          <div className="p-4 space-y-3">
+                            {!draft.expanded ? (
+                              <div className="space-y-2">
+                                <p
+                                  data-testid="portal-draft-title-preview"
+                                  className="text-[13.5px] font-semibold text-[var(--text-primary)]"
+                                >
+                                  {draft.title}
+                                </p>
+                                <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)] line-clamp-3 whitespace-pre-wrap">
+                                  {draft.body}
+                                </p>
+                                {draft.images.length > 0 && (
+                                  <div className="flex items-center gap-1.5 pt-1">
+                                    {draft.images.map((url) => (
+                                      <button
+                                        key={url}
+                                        type="button"
+                                        onClick={() => onOpenLightbox(url)}
+                                        className="w-11 h-9 rounded-lg overflow-hidden border border-[var(--border-subtle)] cursor-zoom-in"
+                                      >
+                                        <img
+                                          src={url}
+                                          alt="工单附图"
+                                          className="w-full h-full object-cover"
+                                        />
+                                      </button>
+                                    ))}
+                                    <span className="text-[11px] text-[var(--text-muted)] ml-1">
+                                      将随工单附带 {draft.images.length} 张截图
+                                    </span>
                                   </div>
-                                ))}
+                                )}
                               </div>
                             ) : (
-                              <p className="text-[11px] text-[var(--text-muted)]">
-                                如需辅助研发排查，可补充上传截图附件随工单转交。
-                              </p>
+                              <div className="space-y-3 animate-rd-msg-in">
+                                <label className="block space-y-1">
+                                  <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                                    工单标题
+                                  </span>
+                                  <input
+                                    type="text"
+                                    data-testid="portal-draft-title"
+                                    maxLength={180}
+                                    required
+                                    value={draft.title}
+                                    onChange={(e) =>
+                                      setDraft((prev) =>
+                                        prev
+                                          ? { ...prev, title: e.target.value }
+                                          : prev,
+                                      )
+                                    }
+                                    placeholder="简明概括故障现象"
+                                    className="w-full h-9 px-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[13px] font-medium text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                                  />
+                                </label>
+
+                                <label className="block space-y-1">
+                                  <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                                    故障详情与复现步骤
+                                  </span>
+                                  <textarea
+                                    data-testid="portal-draft-body"
+                                    rows={5}
+                                    maxLength={20000}
+                                    required
+                                    value={draft.body}
+                                    onChange={(e) =>
+                                      setDraft((prev) =>
+                                        prev
+                                          ? { ...prev, body: e.target.value }
+                                          : prev,
+                                      )
+                                    }
+                                    className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-3 text-[12.5px] leading-relaxed text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
+                                  />
+                                </label>
+
+                                {(draft.images.length > 0 || config.upload_enabled) && (
+                                  <div className="space-y-1.5">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                                        附图（{draft.images.length} / 6）
+                                      </span>
+                                      {config.upload_enabled && draft.images.length < 6 && (
+                                        <button
+                                          type="button"
+                                          onClick={() => fileInputRef.current?.click()}
+                                          className="inline-flex items-center gap-1 text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                                        >
+                                          <Icon name="image-plus" size={12} />
+                                          <span>补充截图</span>
+                                        </button>
+                                      )}
+                                    </div>
+                                    {draft.images.length > 0 && (
+                                      <div className="flex flex-wrap gap-2">
+                                        {draft.images.map((url) => (
+                                          <div
+                                            key={url}
+                                            className="relative group w-14 h-12 rounded-lg overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-card)]"
+                                          >
+                                            <img
+                                              src={url}
+                                              alt="工单附图"
+                                              onClick={() => onOpenLightbox(url)}
+                                              className="w-full h-full object-cover cursor-zoom-in"
+                                            />
+                                            <button
+                                              type="button"
+                                              aria-label="移除该截图"
+                                              onClick={() =>
+                                                setDraft((prev) =>
+                                                  prev
+                                                    ? {
+                                                        ...prev,
+                                                        images: prev.images.filter(
+                                                          (u) => u !== url,
+                                                        ),
+                                                      }
+                                                    : prev,
+                                                )
+                                              }
+                                              className="absolute top-0.5 right-0.5 w-4.5 h-4.5 rounded-full bg-zinc-950/75 text-white inline-flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                                            >
+                                              <Icon name="x" size={10} />
+                                            </button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
                             )}
-                          </div>
-                        )}
 
-                        {config.can_request_deploy && (
-                          <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/[0.04] p-3">
-                            <Switch
-                              checked={
-                                draft.releasePreference === "request_immediate"
-                              }
-                              onChange={(checked) =>
-                                setDraft((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        releasePreference: checked
-                                          ? "request_immediate"
-                                          : "default",
-                                      }
-                                    : prev,
-                                )
-                              }
-                              label="修复完成后，若线上空闲请 AI 评估即时发布"
-                              description={
-                                config.release_window
-                                  ? `默认发布窗口 ${config.release_window}；勾选后修复完成将触发一次只读 AI 门禁评估。`
-                                  : "勾选后修复完成将自动触发只读 AI 门禁评估，低风险时即时上线。"
-                              }
-                            />
-                          </div>
-                        )}
-                      </div>
+                            {config.can_request_deploy && (
+                              <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/[0.04] px-3 py-2.5">
+                                <Switch
+                                  checked={draft.releasePreference === "request_immediate"}
+                                  onChange={(checked) =>
+                                    setDraft((prev) =>
+                                      prev
+                                        ? {
+                                            ...prev,
+                                            releasePreference: checked
+                                              ? "request_immediate"
+                                              : "default",
+                                          }
+                                        : prev,
+                                    )
+                                  }
+                                  label="修复完成后由 AI 评估是否立即发布"
+                                  description={
+                                    config.release_window
+                                      ? `当前默认发布窗口：${config.release_window}`
+                                      : "修复待发时自动进入只读发布门禁评估"
+                                  }
+                                />
+                              </div>
+                            )}
 
-                      <div className="px-4 py-3 bg-[var(--surface-subtle)] border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="xs"
-                          data-testid="portal-draft-dismiss"
-                          disabled={confirming}
-                          onClick={() => {
-                            setDraft((prev) =>
-                              prev ? { ...prev, dismissed: true } : prev,
-                            );
-                            inputRef.current?.focus();
-                          }}
-                        >
-                          暂不提单，继续补充
-                        </Button>
-                        <Button
-                          type="submit"
-                          variant="primary"
-                          size="sm"
-                          icon="check"
-                          data-testid="portal-draft-confirm"
-                          className="scroll-mb-28"
-                          loading={confirming}
-                          disabled={!draft.body.trim() || confirming}
-                        >
-                          确认并提交工单
-                        </Button>
-                      </div>
-                    </form>
-                  )}
+                            {/* Approval Action Row */}
+                            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--border-subtle)]">
+                              <div className="flex items-center gap-1.5">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="xs"
+                                  icon={draft.expanded ? "chevron-up" : "pen-line"}
+                                  data-testid="portal-draft-toggle-edit"
+                                  disabled={confirming}
+                                  onClick={() =>
+                                    setDraft((prev) =>
+                                      prev
+                                        ? { ...prev, expanded: !prev.expanded }
+                                        : prev,
+                                    )
+                                  }
+                                >
+                                  {draft.expanded ? "收起编辑" : "编辑草稿"}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="xs"
+                                  disabled={confirming}
+                                  onClick={() => {
+                                    setDraft((prev) =>
+                                      prev ? { ...prev, dismissed: true } : prev,
+                                    );
+                                    requestAnimationFrame(() =>
+                                      inputRef.current?.focus(),
+                                    );
+                                  }}
+                                >
+                                  继续补充
+                                </Button>
+                              </div>
+                              <Button
+                                type="button"
+                                variant="primary"
+                                size="sm"
+                                icon="send"
+                                data-testid="portal-draft-confirm"
+                                loading={confirming}
+                                disabled={
+                                  !draft.title.trim() ||
+                                  !draft.body.trim() ||
+                                  diagnosing ||
+                                  uploadingCount > 0
+                                }
+                                onClick={() => void handleConfirmDraft()}
+                              >
+                                确认提交工单
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               );
             })}
 
-            {/* Honest Diagnosing State (No fabricated runtime steps) */}
-            {diagnosing && (
+            {/* Live Honest Status Indicator (while waiting before first text delta) */}
+            {diagnosing && !activeStreamingTurn && (
               <div
                 data-testid="portal-diagnosing-indicator"
-                className="flex items-center gap-2.5 py-1 animate-rd-msg-in"
+                className="flex items-center gap-3 animate-rd-msg-in"
               >
-                <span className="w-5 h-5 rounded-md bg-indigo-500/12 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400 inline-flex items-center justify-center shrink-0">
-                  <Icon name="loader-2" size={11.5} className="animate-spin" />
-                </span>
-                <span className="text-[12.5px] font-medium rd-shimmer-text">
-                  正在核对产品使用说明并分析你的描述…
-                </span>
-                <span className="text-[11px] font-mono text-[var(--text-muted)] tabular-nums">
-                  {(elapsedMs / 1000).toFixed(1)}s
-                </span>
-                <button
-                  type="button"
-                  onClick={() => abortRef.current?.abort()}
-                  className="text-[11.5px] text-[var(--text-muted)] hover:text-[var(--text-primary)] underline underline-offset-2 cursor-pointer ml-1"
-                >
-                  取消
-                </button>
+                <div className="w-7 h-7 rounded-lg bg-indigo-500/12 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                  <Icon name="sparkles" size={13} className="animate-pulse" />
+                </div>
+                <div className="inline-flex items-center gap-2.5 px-3.5 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]">
+                  <span className="rd-shimmer-text text-[12.5px] font-medium">
+                    {statusLabel}
+                  </span>
+                  <span className="text-[11px] font-mono tabular-nums text-[var(--text-muted)]">
+                    {elapsedSeconds}s
+                  </span>
+                </div>
               </div>
             )}
 
-            {/* Honest Error Recovery Banner */}
+            {/* Error / Offline Recovery Banner */}
             {diagnoseError && !diagnosing && (
               <div
                 role="alert"
                 data-testid="portal-diagnose-error"
-                className="rounded-xl border border-rose-500/30 bg-rose-500/[0.07] p-3.5 space-y-2.5 animate-rd-msg-in"
+                className="rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-4 py-3 flex flex-wrap items-center justify-between gap-2.5 animate-rd-msg-in"
               >
-                <div className="flex items-start gap-2 text-[12.5px] text-rose-700 dark:text-rose-300">
-                  <Icon name="alert-circle" size={14.5} className="shrink-0 mt-0.5" />
-                  <span>{diagnoseError}</span>
+                <div className="flex items-center gap-2 text-[12.5px] text-amber-900 dark:text-amber-200 min-w-0">
+                  <Icon name="alert-triangle" size={14} className="shrink-0" />
+                  <span>{diagnoseError.message}</span>
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {diagnoseError.offline && onRefreshConfig ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="xs"
+                      icon="refresh-cw"
+                      onClick={() => void onRefreshConfig()}
+                    >
+                      重新检测状态
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="xs"
+                      icon="refresh-cw"
+                      data-testid="portal-diagnose-retry"
+                      onClick={handleRetryLast}
+                    >
+                      重试
+                    </Button>
+                  )}
                   <Button
                     type="button"
-                    variant="secondary"
+                    variant="ghost"
                     size="xs"
-                    icon="refresh-cw"
-                    onClick={handleRetryLast}
+                    icon="pen-line"
+                    onClick={handleSwitchManualClick}
                   >
-                    重试本轮
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="xs"
-                    icon="file-pen-line"
-                    onClick={handleManualEscalation}
-                  >
-                    保留内容并改用人工提单
+                    改为直接提单
                   </Button>
                 </div>
               </div>
@@ -908,158 +998,176 @@ export function PortalFeedbackConversation({
         )}
       </div>
 
-      {/* Prompt-Box Inspired Composer Dock */}
-      <form
-        onSubmit={(e) => void handleSend(e)}
-        className="px-4 py-3.5 border-t border-[var(--border-subtle)] bg-[var(--surface-subtle)]/65 space-y-2.5"
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files?.length) void onUploadFiles(e.target.files);
-            e.target.value = "";
-          }}
-        />
-
-        {/* Staged R2 screenshot chips */}
-        {stagedImages.length > 0 && (
-          <div className="space-y-1.5">
-            <div className="flex flex-wrap gap-2">
-              {stagedImages.map((img) => (
-                <div
-                  key={img.id}
-                  className="relative group w-16 h-12 rounded-lg overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-elevated)] animate-rd-chip-pop"
-                >
-                  <img
-                    src={img.remoteUrl || img.previewUrl}
-                    alt="待附带截图"
-                    onClick={() => onOpenLightbox(img.remoteUrl || img.previewUrl)}
-                    className={cn(
-                      "w-full h-full object-cover cursor-zoom-in",
-                      img.uploading && "opacity-45",
-                    )}
-                  />
-                  {img.uploading && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/35 text-white">
-                      <Icon name="loader-2" size={14} className="animate-spin" />
-                    </div>
-                  )}
-                  <button
-                    type="button"
-                    aria-label="移除截图"
-                    onClick={() => onRemoveStagedImage(img.id)}
-                    className="absolute top-0.5 right-0.5 w-4.5 h-4.5 rounded-full bg-black/75 text-white flex items-center justify-center hover:bg-black cursor-pointer"
-                  >
-                    <Icon name="x" size={9} />
-                  </button>
-                </div>
-              ))}
-            </div>
-            <p className="text-[11px] text-[var(--text-muted)]">
-              已附带截图将作为附件保留并在确认建单时转交研发；当前轮诊断仅分析文字描述，不读取图片内容。
-            </p>
-          </div>
-        )}
-
-        {historyTrimmedHint && (
-          <p
-            data-testid="portal-history-trimmed-hint"
-            className="text-[11px] text-[var(--text-muted)] flex items-center gap-1.5"
-          >
-            <Icon name="info" size={12} className="shrink-0" />
-            <span>对话较长，发送诊断时已自动保留最新上下文（最多 25 轮 / 单条 6000 字）。</span>
-          </p>
-        )}
-
-        <div className="rounded-xl border border-[var(--border-strong)] bg-[var(--surface-card)] focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/15 transition-all">
-          <textarea
-            ref={inputRef}
-            data-testid="portal-chat-input"
-            rows={2}
-            maxLength={DIAGNOSE_MAX_MESSAGE_CHARS}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onPaste={(e) => {
-              const files = e.clipboardData?.files;
-              if (files && files.length > 0) {
-                const imgs = Array.from(files).filter((f) =>
-                  f.type.startsWith("image/"),
-                );
-                if (imgs.length > 0) {
-                  e.preventDefault();
-                  void onUploadFiles(imgs);
-                }
-              }
+      {/* Elevated Floating Prompt Composer (DesignBookmark Prompt Box) */}
+      <div className="px-4 sm:px-7 pb-5 pt-2 bg-gradient-to-t from-[var(--surface-card)] via-[var(--surface-card)]/95 to-transparent">
+        <form
+          onSubmit={(e) => void handleSend(e)}
+          className="max-w-2xl mx-auto space-y-2"
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files?.length) void onUploadFiles(e.target.files);
+              e.target.value = "";
             }}
-            placeholder={
-              turns.length === 0
-                ? "描述你遇到的现象、操作步骤或使用疑问…（Enter 发送，Shift+Enter 换行）"
-                : "补充更多现象、报错信息或回答助手的追问…"
-            }
-            className="w-full px-3.5 pt-3 pb-1.5 bg-transparent text-[13.5px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none resize-none"
           />
 
-          <div className="px-2.5 pb-2.5 pt-1 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5">
-              {config.upload_enabled && (
-                <button
-                  type="button"
-                  disabled={conversationImages.length >= 6}
-                  onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex items-center gap-1.5 h-7.5 px-2.5 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] disabled:opacity-45 transition-colors cursor-pointer"
-                >
-                  <Icon name="image-plus" size={13.5} />
-                  <span>附带截图</span>
-                  {conversationImages.length > 0 && (
-                    <span className="font-mono text-[10.5px] text-[var(--text-muted)]">
-                      {conversationImages.length}/6
-                    </span>
-                  )}
-                </button>
-              )}
-              <span className="text-[11px] text-[var(--text-muted)] hidden sm:inline">
-                以「{config.label}」身份沟通
-              </span>
-            </div>
+          <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] focus-within:border-indigo-500/70 focus-within:ring-2 focus-within:ring-indigo-500/15 shadow-[var(--rd-shadow-sm)] transition-all">
+            {/* Staged image chips inside dock */}
+            {stagedImages.length > 0 && (
+              <div className="px-3.5 pt-3 flex flex-wrap gap-2">
+                {stagedImages.map((img) => (
+                  <div
+                    key={img.id}
+                    className="relative group w-14 h-12 rounded-xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-card)] animate-rd-chip-pop"
+                  >
+                    <img
+                      src={img.previewUrl}
+                      alt="待发送截图"
+                      onClick={() =>
+                        img.remoteUrl && onOpenLightbox(img.remoteUrl)
+                      }
+                      className={cn(
+                        "w-full h-full object-cover",
+                        img.remoteUrl && "cursor-zoom-in",
+                      )}
+                    />
+                    {img.uploading && (
+                      <div className="absolute inset-0 bg-zinc-950/60 flex items-center justify-center">
+                        <Icon
+                          name="loader-2"
+                          size={12}
+                          className="animate-spin text-white"
+                        />
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      aria-label="移除截图"
+                      onClick={() => onRemoveStagedImage(img.id)}
+                      className="absolute top-0.5 right-0.5 w-4.5 h-4.5 rounded-full bg-zinc-950/75 text-white inline-flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                    >
+                      <Icon name="x" size={10} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
-            <div className="flex items-center gap-2">
-              {input.length >= 4800 && (
-                <span
-                  data-testid="portal-char-counter"
-                  className={cn(
-                    "text-[11px] font-mono tabular-nums",
-                    input.length >= DIAGNOSE_MAX_MESSAGE_CHARS
-                      ? "text-amber-600 dark:text-amber-400 font-medium"
-                      : "text-[var(--text-muted)]",
-                  )}
-                >
-                  {input.length}/{DIAGNOSE_MAX_MESSAGE_CHARS}
-                </span>
-              )}
-              <button
-                type="submit"
-                data-testid="portal-chat-send"
-                disabled={!diagnosing && !canSend}
-                aria-label={diagnosing ? "停止诊断" : "发送消息"}
-                className={cn(
-                  "inline-flex items-center justify-center gap-1.5 h-8 px-3.5 rounded-lg text-[12.5px] font-medium transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed",
-                  diagnosing
-                    ? "bg-rose-600 hover:bg-rose-700 text-white"
-                    : "bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:hover:bg-white dark:text-zinc-950 shadow-2xs",
+            <textarea
+              ref={inputRef}
+              data-testid="portal-agent-input"
+              rows={hasConversation ? 2 : 3}
+              maxLength={DIAGNOSE_MAX_MESSAGE_CHARS}
+              disabled={confirming}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleComposerKeyDown}
+              onPaste={(e) => {
+                if (!config.upload_enabled) return;
+                const files = Array.from(e.clipboardData?.files ?? []).filter(
+                  (f) => f.type.startsWith("image/"),
+                );
+                if (files.length > 0) {
+                  e.preventDefault();
+                  void onUploadFiles(files);
+                }
+              }}
+              placeholder={
+                hasConversation
+                  ? "继续补充细节或追问…（Enter 发送，Shift+Enter 换行）"
+                  : "描述你遇到的问题、操作步骤或使用疑问，支持直接粘贴截图…"
+              }
+              className="w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-[13.5px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none disabled:opacity-60"
+            />
+
+            <div className="px-3 pb-2.5 pt-1 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                {config.upload_enabled && (
+                  <button
+                    type="button"
+                    disabled={stagedImages.length >= 6 || confirming}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 h-7.5 px-2.5 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors disabled:opacity-45 cursor-pointer"
+                  >
+                    <Icon name="image-plus" size={14} />
+                    <span>截图</span>
+                    {stagedImages.length > 0 && (
+                      <span className="font-mono text-[11px] tabular-nums text-[var(--text-muted)]">
+                        {stagedImages.length}/6
+                      </span>
+                    )}
+                  </button>
                 )}
-              >
-                <Icon name={diagnosing ? "square" : "arrow-up"} size={13.5} />
-                <span>{diagnosing ? "停止" : "发送"}</span>
-              </button>
+
+                {!hasConversation && (
+                  <button
+                    type="button"
+                    data-testid="portal-switch-manual"
+                    onClick={handleSwitchManualClick}
+                    className="inline-flex items-center gap-1 h-7.5 px-2.5 rounded-lg text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
+                  >
+                    <Icon name="pen-line" size={12.5} />
+                    <span>跳过对话，直接提单</span>
+                  </button>
+                )}
+
+                {historyTrimmedHint && (
+                  <span className="hidden sm:inline text-[11px] text-[var(--text-muted)]">
+                    已自动保留最近对话上下文
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                {nearCharLimit && (
+                  <span
+                    className={cn(
+                      "text-[11px] font-mono tabular-nums",
+                      input.length >= DIAGNOSE_MAX_MESSAGE_CHARS
+                        ? "text-amber-600 dark:text-amber-400 font-medium"
+                        : "text-[var(--text-muted)]",
+                    )}
+                  >
+                    {input.length}/{DIAGNOSE_MAX_MESSAGE_CHARS}
+                  </span>
+                )}
+                {diagnosing ? (
+                  <button
+                    type="button"
+                    data-testid="portal-agent-stop"
+                    onClick={handleStop}
+                    aria-label="停止排查"
+                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-xl bg-rose-500/12 border border-rose-500/30 text-rose-700 dark:text-rose-300 hover:bg-rose-500/18 text-[12px] font-medium transition-colors cursor-pointer"
+                  >
+                    <Icon name="square" size={11} />
+                    <span>停止</span>
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    data-testid="portal-agent-send"
+                    disabled={!canSend}
+                    aria-label="发送消息"
+                    className={cn(
+                      "inline-flex items-center justify-center w-8 h-8 rounded-xl transition-all duration-150",
+                      canSend
+                        ? "bg-indigo-600 hover:bg-indigo-500 text-white shadow-xs cursor-pointer active:scale-95"
+                        : "bg-[var(--surface-subtle)] text-[var(--text-muted)] opacity-55 cursor-not-allowed",
+                    )}
+                  >
+                    <Icon name="arrow-up" size={15} />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      </form>
+        </form>
+      </div>
     </section>
   );
 }

@@ -11,6 +11,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   watch,
@@ -505,49 +506,85 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       });
       const c = config,
         cat = catalog;
+      const isPublicFeedback = p.public_feedback === true;
+      const effectiveP: ChatStart = isPublicFeedback
+        ? {
+            ...p,
+            sandbox_mode: "read-only",
+            network_access: false,
+            resume_session_id: "",
+            fast_mode: undefined,
+            datasource_env: undefined,
+            pg_read_only_enforced: undefined,
+            workspace_manifest: {
+              handbook: null,
+              handbook_sha256: null,
+              deploy_doc: null,
+              deploy_doc_sha256: null,
+              files: Array.isArray(p.workspace_manifest?.files)
+                ? p.workspace_manifest.files.filter(
+                    (f) => typeof f?.path === "string" && f.path.startsWith("_feedback_images/"),
+                  )
+                : [],
+              databases: [],
+            },
+            public_feedback: true,
+          }
+        : p;
       const job = (async () => {
         let result: RunChatTurnResult = { status: "aborted", content: "", events: [], externalSessionId: "" };
         let release: (() => void) | undefined;
+        let feedbackCacheDir: string | undefined;
         try {
-          checkChat(p);
-          if (!validProjectId(p.project_id) || !Object.hasOwn(c.projects ?? {}, p.project_id))
+          checkChat(effectiveP);
+          if (!validProjectId(effectiveP.project_id) || !Object.hasOwn(c.projects ?? {}, effectiveP.project_id))
             throw new Error("Project is not locally bound");
-          result.externalSessionId = p.resume_session_id || "";
-          const boundDir = p.expected_workdir ?? projectWorkdir(c.projects![p.project_id], c, home);
-          release = await lock(p.project_id, abort.signal);
+          result.externalSessionId = effectiveP.resume_session_id || "";
+          const boundDir = effectiveP.expected_workdir ?? projectWorkdir(c.projects![effectiveP.project_id], c, home);
+          release = await lock(effectiveP.project_id, abort.signal);
           abort.signal.throwIfAborted();
-          const project = config.projects?.[p.project_id];
+          const project = config.projects?.[effectiveP.project_id];
           if (!project) throw new Error("Project binding was removed");
           const cwd = projectWorkdir(project, config, home);
           if (cwd !== boundDir) throw new Error("Project binding changed while waiting");
-          if (!cat.runtimes[p.runtime].available) throw new Error("Requested CLI is not available");
+          if (!cat.runtimes[effectiveP.runtime].available) throw new Error("Requested CLI is not available");
           const onEvent = (event: ChatStreamEvent) => {
             clock.progress();
             if (link) link.event(event);
             else if (event.type !== "context_usage" || acceptsUsage) send(socket, "chat.event", { ...ids, event });
           };
+          const baseCacheDir =
+            o.cacheDir ?? (c.cache_dir ? expand(c.cache_dir, home) : join(home, ".cache/relaydesk-bridge/spaces"));
+          if (isPublicFeedback) {
+            const safeRunDirName = effectiveP.run_id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || randomUUID();
+            feedbackCacheDir = join(baseCacheDir, "_public_feedback", safeRunDirName);
+          }
           const opts = {
             workdir: cwd,
-            onFileSynced: () => onEvent({ type: "status", message: "已同步项目空间文件" }),
-            cacheDir:
-              o.cacheDir ?? (c.cache_dir ? expand(c.cache_dir, home) : join(home, ".cache/relaydesk-bridge/spaces")),
-            projectId: p.project_id,
-            runId: p.run_id,
+            onFileSynced: () => {
+              if (!isPublicFeedback) onEvent({ type: "status", message: "已同步项目空间文件" });
+            },
+            cacheDir: feedbackCacheDir ?? baseCacheDir,
+            projectId: effectiveP.project_id,
+            runId: effectiveP.run_id,
             serverUrl: c.server_url,
             token: c.agent_token,
             rpc: link?.rpc ?? rpc,
             waitForConnection: link?.waitForConnection,
             signal: abort.signal,
           };
-          onEvent({ type: "status", message: "正在同步本机项目空间…" });
-          const mirror = await syncSpace(opts, p.workspace_manifest);
-          const before = p.sandbox_mode === "workspace-write" ? snapshotShadowFiles(mirror) : null;
+          if (!isPublicFeedback) onEvent({ type: "status", message: "正在同步本机项目空间…" });
+          const mirror = await syncSpace(opts, effectiveP.workspace_manifest);
+          const before = !isPublicFeedback && effectiveP.sandbox_mode === "workspace-write" ? snapshotShadowFiles(mirror) : null;
           const promptFor = (resumeId: string) => {
-            if (resumeId) return p.prompt;
-            const hasDbContext = Boolean(p.system_context?.includes("## Project Databases"));
-            const hasMcpContext = Boolean(p.system_context?.includes("relaydesk"));
+            if (isPublicFeedback) {
+              return [effectiveP.system_context, effectiveP.prompt].filter(Boolean).join("\n\n");
+            }
+            if (resumeId) return effectiveP.prompt;
+            const hasDbContext = Boolean(effectiveP.system_context?.includes("## Project Databases"));
+            const hasMcpContext = Boolean(effectiveP.system_context?.includes("relaydesk"));
             const modeNote =
-              p.sandbox_mode === "read-only"
+              effectiveP.sandbox_mode === "read-only"
                 ? "Read-only turn for local code and workspace files; do not modify either workspace."
                 : "Changes under $RELAYDESK_SPACE_DIR/files/, $RELAYDESK_SPACE_DIR/HANDBOOK.md, and $RELAYDESK_SPACE_DIR/DEPLOY.md sync back to the cloud (HANDBOOK.md and DEPLOY.md are writable up to 64 KiB each). Embed generated images in Markdown as ![description](files/...).";
             const mcpFallbackNote = hasMcpContext
@@ -557,67 +594,69 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
               "./ is the bound local project workdir. $RELAYDESK_SPACE_DIR/HANDBOOK.md is the project handbook; $RELAYDESK_SPACE_DIR/DEPLOY.md is the project deployment runbook; $RELAYDESK_SPACE_DIR/files/ contains cloud workspace files and SQLite databases. Never disclose credentials or database connection strings.",
               [modeNote, mcpFallbackNote].filter(Boolean).join(" "),
               mirror.handbook,
-              hasDbContext ? "" : databaseContext(p.workspace_manifest.databases),
+              hasDbContext ? "" : databaseContext(effectiveP.workspace_manifest.databases),
               mirror.skipped.length ? `Large files not mirrored: ${mirror.skipped.join(", ")}` : "",
-              p.system_context,
-              p.prompt,
+              effectiveP.system_context,
+              effectiveP.prompt,
             ]
               .filter(Boolean)
               .join("\n\n");
           };
-          const taskClient = {
-            async call(
-              action:
-                | "list_tasks"
-                | "get_task"
-                | "comment_task"
-                | "update_task"
-                | "transition_task"
-                | "create_task"
-                | "list_releases"
-                | "checkpoint_release"
-                | "finish_release",
-              params: Record<string, unknown>,
-            ) {
-              const res = await (link?.rpc ?? bridgeRpc)(
-                "task.rpc",
-                { run_id: p.run_id, project_id: p.project_id, action, params },
-                abort.signal,
-              );
-              return res.data;
-            },
-          };
+          const taskClient = isPublicFeedback
+            ? undefined
+            : {
+                async call(
+                  action:
+                    | "list_tasks"
+                    | "get_task"
+                    | "comment_task"
+                    | "update_task"
+                    | "transition_task"
+                    | "create_task"
+                    | "list_releases"
+                    | "checkpoint_release"
+                    | "finish_release",
+                  params: Record<string, unknown>,
+                ) {
+                  const res = await (link?.rpc ?? bridgeRpc)(
+                    "task.rpc",
+                    { run_id: effectiveP.run_id, project_id: effectiveP.project_id, action, params },
+                    abort.signal,
+                  );
+                  return res.data;
+                },
+              };
           const execute = (resumeId: string) => {
-            const current = config.projects?.[p.project_id];
+            const current = config.projects?.[effectiveP.project_id];
             if (!current || projectWorkdir(current, config, home) !== cwd) throw new Error("Project binding changed");
             return runLocalChat({
               config: c,
               catalog: cat,
-              p: { ...p, resume_session_id: resumeId },
+              p: { ...effectiveP, resume_session_id: resumeId },
               cwd,
               homeDir: home,
               spaceDir: mirror.root,
-              allowSecrets: current.allow_datasource_secrets !== false,
-              enableMcp: true,
+              allowSecrets: isPublicFeedback ? false : current.allow_datasource_secrets !== false,
+              enableMcp: !isPublicFeedback,
               taskClient,
               signal: abort.signal,
               prompt: promptFor(resumeId),
               onEvent,
             });
           };
-          const resumeId = p.resume_session_id || "";
+          const resumeId = effectiveP.resume_session_id || "";
           result = await execute(resumeId);
-          if (resumeId && result.status === "error" && !abort.signal.aborted && !result.content && !result.events.length &&
+          if (!isPublicFeedback && resumeId && result.status === "error" && !abort.signal.aborted && !result.content && !result.events.length &&
               missingResumeSession(result.error ?? "")) {
             result.externalSessionId = "";
             onEvent({ type: "status", message: "原 CLI 线程不存在，正在携带上下文开启新线程…", external_session_id: "" });
             result = await execute("");
           }
-          if (!abort.signal.aborted && result.status === "done" && before) {
-            const n = await pushChangedShadowFiles(opts, mirror, before, [c.agent_token, ...datasourceValues(p.datasource_env).secrets]);
+          if (!isPublicFeedback && !abort.signal.aborted && result.status === "done" && before) {
+            const n = await pushChangedShadowFiles(opts, mirror, before, [c.agent_token, ...datasourceValues(effectiveP.datasource_env).secrets]);
             if (n) {
               const event = {
-                id: `space-${p.run_id}`,
+                id: `space-${effectiveP.run_id}`,
                 tool: "workspace.push",
                 status: "done" as const,
                 summary: `已同步 ${n} 个项目空间文件到云端`,
@@ -629,6 +668,13 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         } catch (e) {
           result = { ...result, status: "error", error: message(e) };
         } finally {
+          if (feedbackCacheDir) {
+            try {
+              rmSync(feedbackCacheDir, { recursive: true, force: true });
+            } catch {
+              // ignore cleanup errors
+            }
+          }
           release?.();
         }
         if (abort.signal.aborted) {

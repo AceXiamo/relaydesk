@@ -37,7 +37,6 @@
 /srv/apps/relaydesk/
 ├── compose.yml                  # 来源模板: deploy/compose.yml（切勿设置顶层 name:）
 ├── .env                         # Pier 维护的 IMAGE_TAG 与非密钥 Compose 参数，不存令牌
-├── feedback.env                 # 可选：仅供反馈执行器与 Web 共用的认证令牌（0600）
 ├── app.env                      # 运行时环境变量与密钥（chmod 600，绝不入库）
 ├── backup.py                    # SQLite 在线备份脚本（来源: deploy/backup.py）
 └── data/                        # 挂载到容器 /app/data（严禁删除或 volume prune）
@@ -193,7 +192,7 @@ $PIER_SSH tw-1 "docker pull ghcr.io/acexiamo/relaydesk:$SHA"
 
 > 若本次修改了 `deploy/compose.yml`，须在切流前先对比远端 `/srv/apps/relaydesk/compose.yml`（保留任何主机定制项）；模板中的 Traefik 域名来自 Compose `.env` 的 `RELAYDESK_HOST`（生产为 `relaydesk.acexiamo.com`），同步前确认已设置，用 `pier-scp` 同步后再记录一条 `pier event -kind note`。
 
-如本次发布需要启用**项目反馈诊断执行器**，切流前按 [反馈 Agent 配置](assistant.md#optional-production-setup) 准备专用 `feedback.env`、Compose profile 和内部网络。禁止将 Web 的 `app.env` 传给执行器。切流后核验 Web 与 `feedback-runner` 均为目标 SHA、Web 可通过鉴权健康检查访问执行器。部署执行器不等于为所有项目启用模型：每个项目仍需显式选择 Harness、模型和公开指南。
+反馈诊断 Agent 直接运行在用户已接入的 **Local Bridge 只读沙箱**中（无需在服务端额外部署 `feedback-runner` 容器，也无需配置云端 API Key）。当所选本机节点离线时，线上诊断接口自动返回 `503` 并引导访客改为人工提交反馈；详细配置见 [公开反馈诊断 Agent 说明](assistant.md#public-feedback)。
 
 ### 3.3 阶段 B：触发 Web 切流（本轮最后一步，脱离当前进程树）
 
