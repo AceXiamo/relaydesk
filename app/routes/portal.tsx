@@ -110,7 +110,7 @@ function resolveStatusVisual(label: string): StatusVisual {
   if (label === "已确认解决") {
     return {
       stepIndex: 4,
-      badgeClass: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25",
+      badgeClass: "bg-[var(--p-forest-tint)] text-[var(--p-forest)] border-transparent",
       dotTone: "emerald",
       pulse: false,
     };
@@ -118,7 +118,7 @@ function resolveStatusVisual(label: string): StatusVisual {
   if (label === "已上线") {
     return {
       stepIndex: 3,
-      badgeClass: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25",
+      badgeClass: "bg-[var(--p-forest-tint)] text-[var(--p-forest)] border-transparent",
       dotTone: "emerald",
       pulse: true,
     };
@@ -126,7 +126,7 @@ function resolveStatusVisual(label: string): StatusVisual {
   if (label === "正在发布上线") {
     return {
       stepIndex: 2,
-      badgeClass: "bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/25",
+      badgeClass: "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] border-transparent",
       dotTone: "indigo",
       pulse: true,
     };
@@ -134,7 +134,7 @@ function resolveStatusVisual(label: string): StatusVisual {
   if (label === "已修复，等待发布") {
     return {
       stepIndex: 2,
-      badgeClass: "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/25",
+      badgeClass: "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] border-transparent",
       dotTone: "indigo",
       pulse: false,
     };
@@ -142,7 +142,7 @@ function resolveStatusVisual(label: string): StatusVisual {
   if (label === "发布暂缓") {
     return {
       stepIndex: 2,
-      badgeClass: "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25",
+      badgeClass: "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] border-transparent",
       dotTone: "amber",
       pulse: false,
       specialNote: "发布暂时顺延，团队会跟进处理",
@@ -151,7 +151,7 @@ function resolveStatusVisual(label: string): StatusVisual {
   if (label === "等待补充信息") {
     return {
       stepIndex: 1,
-      badgeClass: "bg-amber-500/12 text-amber-700 dark:text-amber-300 border-amber-500/30",
+      badgeClass: "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] border-transparent",
       dotTone: "amber",
       pulse: true,
       specialNote: "需要你补充信息后继续推进",
@@ -160,7 +160,7 @@ function resolveStatusVisual(label: string): StatusVisual {
   if (label === "排查与修复中" || label === "内部复核中") {
     return {
       stepIndex: 1,
-      badgeClass: "bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/25",
+      badgeClass: "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] border-transparent",
       dotTone: "indigo",
       pulse: true,
     };
@@ -168,7 +168,7 @@ function resolveStatusVisual(label: string): StatusVisual {
   if (label === "已完成处理") {
     return {
       stepIndex: 4,
-      badgeClass: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25",
+      badgeClass: "bg-[var(--p-forest-tint)] text-[var(--p-forest)] border-transparent",
       dotTone: "emerald",
       pulse: false,
     };
@@ -176,14 +176,14 @@ function resolveStatusVisual(label: string): StatusVisual {
   if (label === "已关联处理" || label === "已结束处理") {
     return {
       stepIndex: 4,
-      badgeClass: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-zinc-500/25",
+      badgeClass: "bg-[var(--p-field)] text-[var(--p-ink-2)] border-transparent",
       dotTone: "zinc",
       pulse: false,
     };
   }
   return {
     stepIndex: 0,
-    badgeClass: "bg-[var(--surface-subtle)] text-[var(--text-secondary)] border-[var(--border-subtle)]",
+    badgeClass: "bg-[var(--p-field)] text-[var(--p-ink-2)] border-transparent",
     dotTone: "zinc",
     pulse: false,
   };
@@ -234,61 +234,63 @@ function PortalAccessBlockedView({
     ACCESS_ERROR_COPY[code as PortalAccessErrorCode] ?? ACCESS_ERROR_COPY.unknown;
   const toneClasses =
     meta.tone === "amber"
-      ? "bg-amber-500/12 text-amber-600 dark:text-amber-400 border-amber-500/25"
+      ? "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]"
       : meta.tone === "indigo"
-        ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 border-indigo-500/25"
-        : "bg-rose-500/12 text-rose-600 dark:text-rose-400 border-rose-500/25";
+        ? "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)]"
+        : "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]";
 
   return (
-    <main className="min-h-dvh flex flex-col items-center justify-center p-5 bg-[var(--surface-canvas)] text-[var(--text-primary)]">
-      <div className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-6 sm:p-7 shadow-[var(--rd-shadow-md)] rd-hairline-glow space-y-5 animate-rd-portal-in">
-        <div className="flex items-center justify-between gap-3">
-          <div className="inline-flex items-center gap-2 text-xs font-mono text-[var(--text-muted)]">
-            <span className="w-2 h-2 rounded-full bg-indigo-500/70" />
-            <span>RELAYDESK PORTAL</span>
+    <main className="rd-portal-shell min-h-dvh flex flex-col items-center justify-center p-5 bg-[var(--p-page)] text-[var(--p-ink)]">
+      <div className="w-full max-w-md rd-portal-dots rounded-[20px] bg-[var(--p-canvas)] p-3 shadow-[var(--p-shadow-hairline)] animate-rd-portal-in">
+        <div className="rounded-[14px] bg-[var(--p-surface)] p-6 sm:p-7 shadow-[var(--p-shadow-card)] space-y-5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="inline-flex items-center gap-2 text-[11.5px] font-mono text-[var(--p-ink-3)]">
+              <span className="w-2 h-2 rounded-full bg-[var(--p-cobalt)]" />
+              <span>RELAYDESK PORTAL</span>
+            </div>
+            <span className="px-2 py-0.5 rounded-full text-[11px] font-mono bg-[var(--p-field)] text-[var(--p-ink-3)]">
+              {code || "unauthorized"}
+            </span>
           </div>
-          <span className="px-2 py-0.5 rounded-full text-[11px] font-mono border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[var(--text-muted)]">
-            {code || "unauthorized"}
-          </span>
-        </div>
 
-        <div className="flex items-start gap-3.5">
-          <div
-            className={cn(
-              "w-11 h-11 rounded-xl border flex items-center justify-center shrink-0",
-              toneClasses,
-            )}
-          >
-            <Icon name={meta.icon} size={20} />
+          <div className="flex items-start gap-3.5">
+            <div
+              className={cn(
+                "w-11 h-11 rounded-[10px] flex items-center justify-center shrink-0",
+                toneClasses,
+              )}
+            >
+              <Icon name={meta.icon} size={20} />
+            </div>
+            <div className="min-w-0 space-y-1.5">
+              <h1 className="text-[18px] font-semibold tracking-[-0.02em] text-[var(--p-ink)]">
+                {meta.title}
+              </h1>
+              <p className="text-[13.5px] leading-relaxed text-[var(--p-ink-2)]">
+                {message || meta.fallback}
+              </p>
+            </div>
           </div>
-          <div className="min-w-0 space-y-1.5">
-            <h1 className="text-[17px] font-semibold tracking-tight text-[var(--text-primary)]">
-              {meta.title}
-            </h1>
-            <p className="text-[13px] leading-relaxed text-[var(--text-secondary)]">
-              {message || meta.fallback}
+
+          <div className="rounded-[10px] bg-[var(--p-canvas)] px-3.5 py-3 text-[12px] leading-relaxed text-[var(--p-ink-3)] space-y-1">
+            <p className="font-medium text-[var(--p-ink-2)]">如何恢复访问？</p>
+            <p>
+              请向项目管理员获取新的专属分享链接并直接打开；若仅是刚刚在另一标签页完成了授权，可点击下方按钮重新检测会话。
             </p>
           </div>
-        </div>
 
-        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/70 px-3.5 py-2.5 text-[12px] leading-relaxed text-[var(--text-muted)] space-y-1">
-          <p className="font-medium text-[var(--text-secondary)]">如何恢复访问？</p>
-          <p>
-            请向项目管理员获取新的专属分享链接并直接打开；若仅是刚刚在另一标签页完成了授权，可点击下方按钮重新检测会话。
-          </p>
-        </div>
-
-        <div className="flex items-center justify-end gap-2 pt-1">
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            icon="refresh-cw"
-            loading={retrying}
-            onClick={onRetry}
-          >
-            重新检测会话
-          </Button>
+          <div className="flex items-center justify-end gap-2 pt-2 border-t border-dashed border-[var(--p-line)]">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              icon="refresh-cw"
+              loading={retrying}
+              onClick={onRetry}
+            >
+              重新检测会话
+            </Button>
+          </div>
         </div>
       </div>
     </main>
@@ -323,28 +325,28 @@ function PortalDeployGateCard({
   };
 
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-3">
       {gate && (
         <div
           className={cn(
-            "relative overflow-hidden rounded-xl border p-3.5 space-y-1.5 animate-rd-portal-in",
+            "relative overflow-hidden rounded-[12px] p-4 space-y-1.5 animate-rd-portal-in",
             gate.status === "evaluating"
-              ? "border-indigo-500/30 bg-indigo-500/[0.06]"
+              ? "bg-[var(--p-cobalt-tint)]"
               : gate.status === "approved"
-                ? "border-emerald-500/30 bg-emerald-500/[0.06]"
+                ? "bg-[var(--p-forest-tint)]"
                 : gate.status === "deferred"
-                  ? "border-amber-500/30 bg-amber-500/[0.06]"
+                  ? "bg-[var(--p-vermilion-tint)]"
                   : gate.status === "escalated"
-                    ? "border-violet-500/30 bg-violet-500/[0.06]"
-                    : "border-[var(--border-subtle)] bg-[var(--surface-subtle)]",
+                    ? "bg-[var(--p-cobalt-tint)]"
+                    : "bg-[var(--p-canvas)] shadow-[var(--p-shadow-hairline)]",
           )}
         >
           {isEvaluating && (
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute inset-x-0 top-0 h-0.5 overflow-hidden bg-indigo-500/15"
+              className="pointer-events-none absolute inset-x-0 top-0 h-0.5 overflow-hidden bg-[var(--p-cobalt-tint)]"
             >
-              <div className="h-full w-1/3 bg-gradient-to-r from-transparent via-indigo-500 to-transparent animate-rd-gate-scan" />
+              <div className="h-full w-1/3 bg-gradient-to-r from-transparent via-[var(--p-cobalt)] to-transparent animate-rd-gate-scan" />
             </div>
           )}
 
@@ -354,34 +356,34 @@ function PortalDeployGateCard({
                 <Icon
                   name="loader-2"
                   size={14}
-                  className="animate-spin text-indigo-600 dark:text-indigo-400"
+                  className="animate-spin text-[var(--p-cobalt)]"
                 />
               ) : gate.status === "approved" ? (
                 <Icon
                   name="shield-check"
                   size={14}
-                  className="text-emerald-600 dark:text-emerald-400"
+                  className="text-[var(--p-forest)]"
                 />
               ) : gate.status === "deferred" ? (
                 <Icon
                   name="clock"
                   size={14}
-                  className="text-amber-600 dark:text-amber-400"
+                  className="text-[var(--p-vermilion)]"
                 />
               ) : gate.status === "escalated" ? (
                 <Icon
                   name="shield-alert"
                   size={14}
-                  className="text-violet-600 dark:text-violet-400"
+                  className="text-[var(--p-cobalt)]"
                 />
               ) : (
                 <Icon
                   name="alert-circle"
                   size={14}
-                  className="text-[var(--text-muted)]"
+                  className="text-[var(--p-ink-3)]"
                 />
               )}
-              <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+              <span className="text-[13px] font-semibold text-[var(--p-ink)]">
                 {gate.status === "evaluating"
                   ? "AI 正在只读评估是否可立即发布…"
                   : gate.status === "approved"
@@ -393,12 +395,12 @@ function PortalDeployGateCard({
                         : "即时发布评估未完成"}
               </span>
             </div>
-            <span className="text-[11px] text-[var(--text-muted)] tabular-nums">
+            <span className="text-[11px] font-mono text-[var(--p-ink-3)] tabular-nums">
               {formatRelativeTime(gate.finished_at || gate.created_at)}
             </span>
           </div>
 
-          <p className="text-[12px] leading-relaxed text-[var(--text-secondary)]">
+          <p className="text-[12.5px] leading-relaxed text-[var(--p-ink-2)]">
             {gate.public_reason ||
               (gate.status === "evaluating"
                 ? "正在核查线上当前活跃使用情况与变更风险面，结果将自动刷新。"
@@ -414,18 +416,18 @@ function PortalDeployGateCard({
       )}
 
       {canRequestDeploy && !isEvaluating && (
-        <div className="rounded-xl border border-indigo-500/25 bg-[var(--surface-elevated)] p-3.5 space-y-2.5">
+        <div className="rounded-[12px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] p-4 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2.5">
             <div className="min-w-0 space-y-0.5">
-              <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-[var(--text-primary)]">
+              <div className="flex items-center gap-1.5 text-[13px] font-semibold text-[var(--p-ink)]">
                 <Icon
                   name="zap"
-                  size={13.5}
-                  className="text-indigo-600 dark:text-indigo-400 shrink-0"
+                  size={14}
+                  className="text-[var(--p-cobalt)] shrink-0"
                 />
                 <span>修复已就绪，急需立即上线？</span>
               </div>
-              <p className="text-[11.5px] text-[var(--text-muted)]">
+              <p className="text-[12px] text-[var(--p-ink-3)]">
                 {releaseWindow
                   ? `默认将在发布窗口（${releaseWindow}）上线；你可申请 AI 评估线上空闲状态后提前发布。`
                   : "可申请 AI 只读评估线上使用状态与风险，满足安全条件时将立即触发发布。"}
@@ -447,7 +449,7 @@ function PortalDeployGateCard({
           {composerOpen && (
             <form
               onSubmit={(e) => void handleSubmit(e)}
-              className="space-y-2 pt-2 border-t border-[var(--border-subtle)] animate-rd-portal-in"
+              className="space-y-2.5 pt-2.5 border-t border-dashed border-[var(--p-line)] animate-rd-portal-in"
             >
               <input
                 type="text"
@@ -455,7 +457,7 @@ function PortalDeployGateCard({
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
                 placeholder="可选：简述急需立即上线的原因（例如：客户演示在即 / 影响核心下单流程）"
-                className="w-full h-9 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500"
+                className="w-full h-9.5 px-3 rounded-[10px] bg-[var(--p-page)] shadow-[var(--p-shadow-hairline)] text-[12.5px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)]"
               />
               <div className="flex items-center justify-end gap-1.5">
                 <Button
@@ -503,6 +505,7 @@ function PortalContent() {
   // Navigation
   const [tab, setTab] = useState<PortalTab>("submit");
   const [submitMode, setSubmitMode] = useState<SubmitMode>("agent");
+  const [conversationActive, setConversationActive] = useState(false);
 
   // Submit form state
   const [feedbackType, setFeedbackType] = useState<string>("功能异常");
@@ -1046,18 +1049,30 @@ function PortalContent() {
     }
   };
 
-  const navTabs = useMemo<Array<{ id: PortalTab; label: string; icon: string; badge?: number; alert?: boolean }>>(() => {
-    const actionCount = mineTasks.filter((t) => t.can_reply || t.can_accept).length;
-    const base: Array<{ id: PortalTab; label: string; icon: string; badge?: number; alert?: boolean }> = [
+  const actionCount = useMemo(
+    () => mineTasks.filter((t) => t.can_reply || t.can_accept).length,
+    [mineTasks],
+  );
+
+  const returningPreviewTasks = useMemo(() => {
+    if (mineTasks.length === 0) return [];
+    const prioritized = [...mineTasks].sort((a, b) => {
+      const aAct = a.can_reply || a.can_accept || a.can_request_deploy ? 1 : 0;
+      const bAct = b.can_reply || b.can_accept || b.can_request_deploy ? 1 : 0;
+      return bAct - aAct;
+    });
+    return prioritized.slice(0, 3);
+  }, [mineTasks]);
+
+  const navTabs = useMemo<Array<{ id: PortalTab; label: string; badge?: number; alert?: boolean }>>(() => {
+    const base: Array<{ id: PortalTab; label: string; badge?: number; alert?: boolean }> = [
       {
         id: "submit",
-        label: config?.agent_enabled ? "反馈对话" : "提交反馈",
-        icon: config?.agent_enabled ? "sparkles" : "pen-line",
+        label: config?.agent_enabled ? "表达反馈" : "提交反馈",
       },
       {
         id: "mine",
         label: "我的反馈",
-        icon: "inbox",
         badge: mineTasks.length || undefined,
         alert: actionCount > 0,
       },
@@ -1066,17 +1081,11 @@ function PortalContent() {
       base.push({
         id: "team",
         label: "团队动态",
-        icon: "layers",
         badge: teamTasks.length || undefined,
       });
     }
     return base;
-  }, [config?.agent_enabled, config?.can_view_team, mineTasks, teamTasks]);
-
-  const activeTabIndex = Math.max(
-    0,
-    navTabs.findIndex((t) => t.id === tab),
-  );
+  }, [actionCount, config?.agent_enabled, config?.can_view_team, mineTasks.length, teamTasks.length]);
 
   const currentList = tab === "team" ? teamTasks : mineTasks;
   const filteredTasks = useMemo(() => {
@@ -1108,14 +1117,22 @@ function PortalContent() {
     });
   }, [currentList, taskFilter, searchQuery]);
 
+  const openTaskStory = useCallback((taskId: string, targetTab: "mine" | "team" = "mine") => {
+    setTab(targetTab);
+    setSelectedTaskId(taskId);
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }, []);
+
   if (loadingConfig) {
     return (
-      <main className="min-h-dvh flex items-center justify-center bg-[var(--surface-canvas)] text-[var(--text-muted)]">
+      <main className="rd-portal-shell min-h-dvh flex items-center justify-center bg-[var(--p-page)] text-[var(--p-ink-3)]">
         <div className="flex flex-col items-center gap-3 animate-rd-portal-in">
-          <div className="w-10 h-10 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] flex items-center justify-center shadow-xs">
-            <Icon name="loader-2" size={18} className="animate-spin text-indigo-500" />
+          <div className="w-10 h-10 rounded-[12px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] flex items-center justify-center">
+            <Icon name="loader-2" size={18} className="animate-spin text-[var(--p-cobalt)]" />
           </div>
-          <p className="text-xs font-medium">正在校验访问授权…</p>
+          <p className="text-[12.5px] font-medium">正在校验访问授权…</p>
         </div>
       </main>
     );
@@ -1145,1013 +1162,1296 @@ function PortalContent() {
     }
   };
 
-  const segmentedNav = (
-    <div
-      role="tablist"
-      aria-label="反馈面板导航"
-      className="relative grid md:inline-grid w-full max-w-[360px] md:w-auto md:max-w-none p-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/90 shadow-2xs"
-      style={{
-        gridTemplateColumns: `repeat(${navTabs.length}, minmax(0, 1fr))`,
-      }}
-    >
-      {/* Spring Sliding Pill */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute top-1 bottom-1 left-1 rounded-lg bg-[var(--surface-card)] border border-[var(--border-subtle)] shadow-xs transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-        style={{
-          width: `calc((100% - 8px) / ${navTabs.length})`,
-          transform: `translateX(${activeTabIndex * 100}%)`,
-        }}
-      />
-      {navTabs.map((item) => {
-        const active = tab === item.id;
-        return (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            onClick={() => {
-              setTab(item.id);
-              if (item.id === "submit") setSelectedTaskId(null);
-            }}
-            className={cn(
-              "relative z-10 inline-flex items-center justify-center gap-1 sm:gap-1.5 h-8 px-2 sm:px-3.5 md:min-w-[108px] rounded-lg text-[12px] sm:text-[12.5px] font-medium whitespace-nowrap transition-colors cursor-pointer select-none",
-              active
-                ? "text-[var(--text-primary)]"
-                : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]",
-            )}
-          >
-            <Icon
-              name={item.icon}
-              size={13.5}
-              className={active ? "text-indigo-600 dark:text-indigo-400" : undefined}
-            />
-            <span>{item.label}</span>
-            {item.badge !== undefined && (
-              <span
-                className={cn(
-                  "inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10.5px] font-mono tabular-nums",
-                  active
-                    ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300"
-                    : "bg-[var(--surface-hover)] text-[var(--text-muted)]",
-                )}
-              >
-                {item.badge}
-              </span>
-            )}
-            {item.alert && (
-              <span
-                aria-label="有待处理工单"
-                className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0"
-              />
-            )}
-          </button>
-        );
-      })}
-    </div>
-  );
+  const pendingActionInList = currentList.filter(
+    (t) => t.can_reply || t.can_accept || t.can_request_deploy,
+  ).length;
 
   return (
-    <div className="min-h-dvh flex flex-col bg-[var(--surface-canvas)] text-[var(--text-primary)]">
-      {/* Sticky Minimal Symmetrical Header */}
-      <header className="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[var(--surface-card)]/85 backdrop-blur-md">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 grid grid-cols-[1fr_auto] md:grid-cols-[1fr_auto_1fr] items-center gap-3">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 text-white flex items-center justify-center shadow-xs shrink-0">
-              <Icon name="message-square" size={15} />
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <h1 className="text-[14.5px] font-semibold tracking-tight text-[var(--text-primary)] truncate">
-                  {config.project_name}
-                </h1>
-                <span className="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded-md text-[10.5px] font-medium bg-[var(--surface-subtle)] border border-[var(--border-subtle)] text-[var(--text-muted)]">
-                  反馈中心
-                </span>
-              </div>
-              {config.release_window && (
-                <p className="hidden lg:flex items-center gap-1 text-[11px] text-[var(--text-muted)] truncate">
-                  <Icon name="calendar-clock" size={11} />
-                  <span>发布窗口：{config.release_window}</span>
-                </p>
-              )}
-            </div>
-          </div>
-
-          {/* Center Symmetrical Segmented Navigation (Desktop) */}
-          <div className="hidden md:flex items-center justify-center">
-            {segmentedNav}
-          </div>
-
-          <div className="flex items-center justify-end gap-2 shrink-0">
-            <div
-              title={`当前授权身份：${config.label}`}
-              className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[12px] font-medium text-[var(--text-primary)] max-w-[160px]"
-            >
-              <LivePulseDot tone="emerald" active />
-              <span className="truncate">{config.label}</span>
-            </div>
+    <div className="rd-portal-shell min-h-dvh bg-[var(--p-page)] text-[var(--p-ink)]">
+      {/* Framed Architectural Canvas (Beautiful UI-inspired hairline rails + dashed dividers) */}
+      <div className="relative mx-auto max-w-[920px] min-h-dvh bg-[var(--p-page)] shadow-[0_0_0_1px_var(--p-line)] flex flex-col">
+        {/* Un-stuck Editorial Masthead (no sticky admin chrome) */}
+        <header className="border-b border-dashed border-[var(--p-line)] px-5 sm:px-9 py-5">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            {/* Brand / Project Identity */}
             <button
               type="button"
-              onClick={toggleTheme}
-              aria-label={dark ? "切换浅色主题" : "切换深色主题"}
-              className="w-8 h-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] hover:bg-[var(--surface-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center transition-colors cursor-pointer"
-            >
-              <Icon name={dark ? "sun" : "moon"} size={14} />
-            </button>
-          </div>
-        </div>
-
-        {/* Mobile Centered Segmented Navigation */}
-        <div className="md:hidden border-t border-[var(--border-subtle)]/70 px-4 py-2 flex items-center justify-center">
-          {segmentedNav}
-        </div>
-      </header>
-
-      {/* Main Content Container */}
-      <main className="flex-1 w-full max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-6 space-y-4">
-        {tab !== "submit" && (
-          <div className="flex items-center justify-end">
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              icon="refresh-cw"
               onClick={() => {
-                void loadTasks(tab === "team" ? "team" : "mine", false);
-                if (selectedTaskId) void loadTaskDetail(selectedTaskId, true);
+                setTab("submit");
+                setSelectedTaskId(null);
               }}
+              className="group inline-flex items-center gap-3 min-w-0 text-left cursor-pointer"
             >
-              刷新进度
-            </Button>
+              {/* Minimalist 3x3 Dot Grid Mark */}
+              <span
+                aria-hidden="true"
+                className="w-8 h-8 rounded-[9px] bg-[var(--p-surface)] shadow-[var(--p-shadow-btn)] grid grid-cols-3 place-items-center p-1.5 shrink-0 transition-transform duration-150 group-hover:scale-[1.04]"
+              >
+                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
+                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-cobalt)]" />
+                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
+                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-forest)]" />
+                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
+                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-vermilion)]" />
+                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
+                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
+                <span className="w-[3.5px] h-[3.5px] rounded-[1px] bg-[var(--p-ink)]" />
+              </span>
+
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h1 className="text-[15px] font-semibold tracking-[-0.02em] text-[var(--p-ink)] truncate">
+                    {config.project_name}
+                  </h1>
+                  <span className="text-[var(--p-line-strong)]">/</span>
+                  <span className="font-mono text-[11.5px] text-[var(--p-ink-3)] shrink-0">
+                    反馈中心
+                  </span>
+                </div>
+              </div>
+            </button>
+
+            {/* Right Controls: Identity + Sliding Pill Theme Toggle */}
+            <div className="flex items-center gap-2.5 shrink-0">
+              <div
+                title={`当前授权身份：${config.label}`}
+                className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-[var(--p-field)] text-[12px] font-medium text-[var(--p-ink-2)] max-w-[160px]"
+              >
+                <LivePulseDot tone="emerald" active />
+                <span className="truncate">{config.label}</span>
+              </div>
+
+              {/* Beautiful UI-style 2-cell sliding pill theme switch */}
+              <button
+                type="button"
+                onClick={toggleTheme}
+                aria-label={dark ? "切换浅色主题" : "切换深色主题"}
+                className="relative inline-grid h-8 w-15 grid-cols-2 items-center rounded-full bg-[var(--p-field)] p-0.5 cursor-pointer"
+              >
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-[var(--p-surface)] shadow-[var(--p-shadow-btn)] transition-transform duration-200 ease-[cubic-bezier(0.23,1,0.32,1)]",
+                    dark ? "translate-x-7" : "translate-x-0",
+                  )}
+                />
+                <span
+                  className={cn(
+                    "relative z-10 inline-flex items-center justify-center transition-colors",
+                    !dark ? "text-[var(--p-ink)]" : "text-[var(--p-ink-3)]",
+                  )}
+                >
+                  <Icon name="sun" size={13} />
+                </span>
+                <span
+                  className={cn(
+                    "relative z-10 inline-flex items-center justify-center transition-colors",
+                    dark ? "text-[var(--p-ink)]" : "text-[var(--p-ink-3)]",
+                  )}
+                >
+                  <Icon name="moon" size={13} />
+                </span>
+              </button>
+            </div>
           </div>
-        )}
 
-        {/* TAB 1: SUBMIT FEEDBACK / AGENT TRIAGE */}
-        {tab === "submit" && (
-          <div className="max-w-3xl mx-auto space-y-5 animate-rd-portal-in">
-            {submittedDetail ? (
-              <section className="rounded-2xl border border-emerald-500/30 bg-[var(--surface-card)] p-6 sm:p-7 shadow-[var(--rd-shadow-md)] rd-hairline-glow space-y-5 animate-rd-portal-in">
-                <div className="flex items-start gap-3.5">
-                  <div className="w-11 h-11 rounded-xl bg-emerald-500/12 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25 flex items-center justify-center shrink-0 animate-rd-step-pop">
-                    <Icon name="check-circle-2" size={22} />
-                  </div>
-                  <div className="min-w-0 space-y-1.5">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
-                        反馈已提交并进入处理队列
-                      </h2>
-                      <CopyButton
-                        value={submittedDetail.task.code}
-                        label={submittedDetail.task.code}
-                        copiedLabel="已复制编号"
-                        size="xs"
-                        variant="secondary"
-                      />
-                    </div>
-                    <p className="text-[13px] text-[var(--text-secondary)]">
-                      {submittedDetail.task.title}
-                    </p>
-                    <p className="text-[12px] text-[var(--text-muted)]">
-                      你可以随时在「我的反馈」中追踪排查修复、发布上线状态，回复团队追问或在线确认验收。
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-[var(--border-subtle)]">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    icon="plus"
-                    onClick={() => {
-                      setSubmittedDetail(null);
-                      if (agentEnabled) setSubmitMode("agent");
-                    }}
-                  >
-                    继续提交新反馈
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="sm"
-                    icon="arrow-right"
-                    onClick={() => {
-                      const targetId = submittedDetail.task.id;
-                      setSubmittedDetail(null);
-                      setTab("mine");
-                      setSelectedTaskId(targetId);
-                    }}
-                  >
-                    查看工单进度
-                  </Button>
-                </div>
-              </section>
-            ) : agentOnline && submitMode === "agent" ? (
-              <PortalFeedbackConversation
-                config={config}
-                stagedImages={images}
-                onUploadFiles={uploadFiles}
-                onRemoveStagedImage={removeImage}
-                onClearStagedImages={clearStagedImages}
-                onOpenLightbox={(src) => setLightboxSrc(src)}
-                onDiagnose={portalApi.diagnose}
-                onCreateTask={handleCreateFromConversation}
-                onSwitchToManual={handleSwitchToManual}
-                onRefreshConfig={handleRecheckAvailability}
-                onPossibleAuthError={handlePossibleAuthError}
-              />
-            ) : agentOffline && submitMode === "agent" ? (
-              <section
-                data-testid="portal-agent-offline"
-                className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] px-6 py-12 sm:px-10 sm:py-16 shadow-[var(--rd-shadow-sm)] rd-hairline-glow text-center space-y-5 animate-rd-portal-in"
-              >
-                <div className="mx-auto w-12 h-12 rounded-2xl border border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center">
-                  <Icon name="wifi-off" size={22} />
-                </div>
-                <div className="space-y-2 max-w-md mx-auto">
-                  <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 text-[11px] font-medium text-amber-800 dark:text-amber-300">
-                    <LivePulseDot tone="amber" active={false} />
-                    <span>节点离线 · 暂不接受在线诊断</span>
-                  </div>
-                  <h2 className="text-[18px] font-semibold tracking-tight text-[var(--text-primary)]">
-                    反馈诊断助手当前离线
-                  </h2>
-                  <p className="text-[13px] leading-relaxed text-[var(--text-muted)]">
-                    项目维护者的本地诊断节点暂时未在线，当前暂不接受 AI 对话排查。你可以稍后重新检测，或直接填写反馈单进入研发处理队列。
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    icon="refresh-cw"
-                    loading={recheckingConfig}
-                    onClick={() => void handleRecheckAvailability()}
-                  >
-                    重新检测状态
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="sm"
-                    icon="pen-line"
-                    data-testid="portal-offline-to-manual"
-                    onClick={() => setSubmitMode("manual")}
-                  >
-                    直接填写反馈单
-                  </Button>
-                </div>
-              </section>
-            ) : (
-              <form
-                data-testid="portal-manual-form"
-                onSubmit={(e) => void handleSubmitFeedback(e)}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDragOver(true);
-                }}
-                onDragLeave={() => setDragOver(false)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setDragOver(false);
-                  if (e.dataTransfer?.files?.length) {
-                    void uploadFiles(e.dataTransfer.files);
-                  }
-                }}
-                className={cn(
-                  "rounded-2xl border bg-[var(--surface-card)] overflow-hidden shadow-[var(--rd-shadow-sm)] rd-hairline-glow transition-all duration-200",
-                  dragOver
-                    ? "border-indigo-500 ring-2 ring-indigo-500/20"
-                    : "border-[var(--border-subtle)]",
-                )}
-              >
-                <div className="px-6 py-4.5 border-b border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2.5">
-                  <div className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h2 className="text-[15.5px] font-semibold text-[var(--text-primary)]">
-                        {agentEnabled ? "人工直接提交反馈" : "提交新反馈"}
-                      </h2>
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10.5px] font-medium border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[var(--text-secondary)]">
-                        直接提单模式 · 提交即建单
-                      </span>
-                    </div>
-                    <p className="text-[12px] text-[var(--text-muted)]">
-                      {agentEnabled
-                        ? "跳过对话排查，直接创建工单并进入项目处理队列。"
-                        : "当前项目未开启 AI 对话预诊，提交后将直接创建工单进入处理队列。"}
-                    </p>
-                  </div>
-                  {agentOnline && (
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="xs"
-                      icon="sparkles"
-                      data-testid="portal-switch-agent"
-                      onClick={() => setSubmitMode("agent")}
-                    >
-                      返回 AI 诊断对话
-                    </Button>
+          {/* Lightweight Editorial View Switcher */}
+          <nav
+            role="tablist"
+            aria-label="反馈面板导航"
+            className="mt-4 pt-3.5 border-t border-dashed border-[var(--p-line)]/80 flex flex-wrap items-center gap-1.5"
+          >
+            {navTabs.map((item) => {
+              const active = tab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => {
+                    setTab(item.id);
+                    setSelectedTaskId(null);
+                  }}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 h-8 px-3.5 rounded-full text-[12.5px] font-medium transition-all duration-150 cursor-pointer select-none",
+                    active
+                      ? "bg-[var(--p-ink)] text-[var(--p-page)] shadow-xs"
+                      : "text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)]",
                   )}
-                  {agentOffline && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="xs"
-                      icon="refresh-cw"
-                      loading={recheckingConfig}
-                      onClick={() => {
-                        setSubmitMode("agent");
-                        void handleRecheckAvailability();
-                      }}
+                >
+                  <span>{item.label}</span>
+                  {item.badge !== undefined && (
+                    <span
+                      className={cn(
+                        "inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full text-[10.5px] font-mono tabular-nums",
+                        active
+                          ? "bg-white/20 text-[var(--p-page)] dark:bg-black/20"
+                          : "bg-[var(--p-field)] text-[var(--p-ink-2)]",
+                      )}
                     >
-                      检测助手是否上线
-                    </Button>
-                  )}
-                </div>
-
-                <div className="p-5 space-y-5">
-                  {/* Type selector pills */}
-                  <div className="space-y-2">
-                    <span className="block text-[12px] font-medium text-[var(--text-secondary)]">
-                      反馈类型
+                      {item.badge}
                     </span>
-                    <div className="grid grid-cols-3 gap-2">
-                      {FEEDBACK_TYPES.map((item) => {
-                        const active = feedbackType === item.id;
+                  )}
+                  {item.alert && (
+                    <span
+                      aria-label="有待处理工单"
+                      className="w-1.5 h-1.5 rounded-full bg-[var(--p-vermilion)] shrink-0"
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+        </header>
+
+        {/* Main Content Canvas */}
+        <main className="flex-1 w-full">
+          {/* ── TAB 1: EXPRESS FEEDBACK (HERO + COMPOSER + RETURNING PROGRESS DOCK) ── */}
+          {tab === "submit" && (
+            <div className="animate-rd-portal-in">
+              <div className="px-5 sm:px-9 py-9 sm:py-13">
+                {submittedDetail ? (
+                  <section className="rd-portal-dots rounded-[20px] bg-[var(--p-canvas)] p-3 sm:p-4 shadow-[var(--p-shadow-hairline)] animate-rd-portal-in">
+                    <div className="rounded-[14px] bg-[var(--p-surface)] p-6 sm:p-8 shadow-[var(--p-shadow-card)] space-y-6">
+                      <div className="flex items-start gap-4">
+                        <div className="w-11 h-11 rounded-[12px] bg-[var(--p-forest-tint)] text-[var(--p-forest)] flex items-center justify-center shrink-0 animate-rd-step-pop">
+                          <Icon name="check-circle-2" size={22} />
+                        </div>
+                        <div className="min-w-0 space-y-2">
+                          <div className="flex flex-wrap items-center gap-2.5">
+                            <h2 className="text-[20px] font-semibold tracking-[-0.025em] text-[var(--p-ink)]">
+                              反馈已收到，正在跟进处理
+                            </h2>
+                            <CopyButton
+                              value={submittedDetail.task.code}
+                              label={submittedDetail.task.code}
+                              copiedLabel="已复制编号"
+                              size="xs"
+                              variant="secondary"
+                            />
+                          </div>
+                          <p className="text-[14.5px] font-medium text-[var(--p-ink)]">
+                            {submittedDetail.task.title}
+                          </p>
+                          <p className="text-[13px] leading-relaxed text-[var(--p-ink-2)]">
+                            你可以随时在「我的反馈」查看排查修复与上线进度，回复团队追问或在线确认解决。
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-end gap-2.5 pt-4 border-t border-dashed border-[var(--p-line)]">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSubmittedDetail(null);
+                            if (agentEnabled) setSubmitMode("agent");
+                          }}
+                          className="inline-flex items-center gap-1.5 h-9 px-4 rounded-full bg-[var(--p-field)] text-[13px] font-medium text-[var(--p-ink)] shadow-[var(--p-shadow-btn)] hover:bg-[var(--p-hover)] transition-all active:scale-[0.97] cursor-pointer"
+                        >
+                          <Icon name="plus" size={14} />
+                          <span>继续反馈</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const targetId = submittedDetail.task.id;
+                            setSubmittedDetail(null);
+                            openTaskStory(targetId, "mine");
+                          }}
+                          className="inline-flex items-center gap-1.5 h-9 px-4.5 rounded-full bg-[var(--p-ink)] text-[var(--p-page)] text-[13px] font-medium hover:opacity-90 transition-all active:scale-[0.97] cursor-pointer shadow-xs"
+                        >
+                          <span>查看处理进度</span>
+                          <Icon name="arrow-right" size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+                ) : agentOnline && submitMode === "agent" ? (
+                  <PortalFeedbackConversation
+                    config={config}
+                    stagedImages={images}
+                    onUploadFiles={uploadFiles}
+                    onRemoveStagedImage={removeImage}
+                    onClearStagedImages={clearStagedImages}
+                    onOpenLightbox={(src) => setLightboxSrc(src)}
+                    onDiagnose={portalApi.diagnose}
+                    onCreateTask={handleCreateFromConversation}
+                    onSwitchToManual={handleSwitchToManual}
+                    onRefreshConfig={handleRecheckAvailability}
+                    onPossibleAuthError={handlePossibleAuthError}
+                    onConversationActiveChange={setConversationActive}
+                  />
+                ) : agentOffline && submitMode === "agent" ? (
+                  <section
+                    data-testid="portal-agent-offline"
+                    className="space-y-7 animate-rd-portal-in"
+                  >
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-2.5 text-[12px]">
+                        <span className="font-mono text-[11.5px] text-[var(--p-ink-3)] tabular-nums">
+                          01
+                        </span>
+                        <span className="text-[var(--p-line-strong)]">/</span>
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] text-[11.5px] font-medium">
+                          <LivePulseDot tone="amber" active={false} />
+                          <span>诊断节点暂离线</span>
+                        </span>
+                      </div>
+                      <h2 className="text-[28px] sm:text-[36px] font-semibold tracking-[-0.035em] leading-[1.14] text-[var(--p-ink)] text-balance">
+                        反馈诊断助手暂时离线，你仍可直接留言
+                      </h2>
+                      <p className="text-[14.5px] leading-relaxed text-[var(--p-ink-2)] max-w-[540px]">
+                        项目维护者的本地诊断节点暂时未在线。你可以稍后重新检测，或直接填写反馈进入处理队列。
+                      </p>
+                    </div>
+
+                    <div className="rd-portal-dots rounded-[20px] bg-[var(--p-canvas)] p-6 sm:p-8 shadow-[var(--p-shadow-hairline)] flex flex-wrap items-center justify-between gap-4">
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        <div className="w-11 h-11 rounded-[12px] bg-[var(--p-surface)] text-[var(--p-vermilion)] shadow-[var(--p-shadow-card)] flex items-center justify-center shrink-0">
+                          <Icon name="wifi-off" size={20} />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[14px] font-semibold text-[var(--p-ink)]">
+                            直接提交反馈单
+                          </div>
+                          <p className="text-[12.5px] text-[var(--p-ink-3)]">
+                            填写现象并附带截图，提交后即可实时追踪处理进度
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          icon="refresh-cw"
+                          loading={recheckingConfig}
+                          onClick={() => void handleRecheckAvailability()}
+                        >
+                          重新检测状态
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="primary"
+                          size="sm"
+                          icon="pen-line"
+                          data-testid="portal-offline-to-manual"
+                          onClick={() => setSubmitMode("manual")}
+                        >
+                          直接填写反馈单
+                        </Button>
+                      </div>
+                    </div>
+                  </section>
+                ) : (
+                  <div className="space-y-8 animate-rd-portal-in">
+                    {/* Bold Editorial Hero for Direct Feedback */}
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-2.5 text-[12px]">
+                          <span className="font-mono text-[11.5px] font-medium text-[var(--p-ink-3)] tabular-nums">
+                            01
+                          </span>
+                          <span className="text-[var(--p-line-strong)]">/</span>
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] text-[11.5px] font-medium">
+                            <span>直接提单模式 · 提交即建单</span>
+                          </span>
+                          {config.release_window && (
+                            <span className="hidden sm:inline-flex items-center gap-1 text-[11.5px] text-[var(--p-ink-3)]">
+                              <Icon name="calendar-clock" size={12} />
+                              <span>发布窗口 {config.release_window}</span>
+                            </span>
+                          )}
+                        </div>
+
+                        {agentOnline && (
+                          <button
+                            type="button"
+                            data-testid="portal-switch-agent"
+                            onClick={() => setSubmitMode("agent")}
+                            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-[var(--p-field)] text-[12px] font-medium text-[var(--p-ink)] shadow-[var(--p-shadow-btn)] hover:bg-[var(--p-hover)] transition-all active:scale-[0.97] cursor-pointer"
+                          >
+                            <Icon name="sparkles" size={13} className="text-[var(--p-cobalt)]" />
+                            <span>返回 AI 诊断对话</span>
+                          </button>
+                        )}
+                        {agentOffline && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            icon="refresh-cw"
+                            loading={recheckingConfig}
+                            onClick={() => {
+                              setSubmitMode("agent");
+                              void handleRecheckAvailability();
+                            }}
+                          >
+                            检测助手是否上线
+                          </Button>
+                        )}
+                      </div>
+
+                      <h2 className="text-[30px] sm:text-[40px] font-semibold tracking-[-0.035em] leading-[1.12] text-[var(--p-ink)] text-balance">
+                        {agentEnabled
+                          ? "直接写下你的反馈"
+                          : `有什么想告诉 ${config.project_name} 的？`}
+                      </h2>
+                      <p className="text-[14.5px] sm:text-[15.5px] leading-relaxed text-[var(--p-ink-2)] max-w-[560px]">
+                        {agentEnabled
+                          ? "跳过对话排查，直接提交工单进入项目处理队列，支持粘贴或拖入截图。"
+                          : "描述你遇到的问题、建议或使用疑问，提交后将进入处理队列并可随时回来查看进度。"}
+                      </p>
+                    </div>
+
+                    {/* Recessed Dotted Showcase Well wrapping the Form */}
+                    <div className="rd-portal-dots rounded-[20px] bg-[var(--p-canvas)] p-2.5 sm:p-4 shadow-[var(--p-shadow-hairline)]">
+                      <form
+                        data-testid="portal-manual-form"
+                        onSubmit={(e) => void handleSubmitFeedback(e)}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          setDragOver(true);
+                        }}
+                        onDragLeave={() => setDragOver(false)}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          setDragOver(false);
+                          if (e.dataTransfer?.files?.length) {
+                            void uploadFiles(e.dataTransfer.files);
+                          }
+                        }}
+                        className={cn(
+                          "rounded-[14px] bg-[var(--p-surface)] overflow-hidden transition-all duration-200",
+                          dragOver
+                            ? "shadow-[0_0_0_2px_var(--p-cobalt),var(--p-shadow-composer)]"
+                            : "shadow-[var(--p-shadow-composer)]",
+                        )}
+                      >
+                        <div className="p-5 sm:p-6 space-y-5">
+                          {/* Type selector pills */}
+                          <div className="space-y-2">
+                            <span className="block text-[12px] font-medium text-[var(--p-ink-2)]">
+                              反馈类型
+                            </span>
+                            <div className="grid grid-cols-3 gap-2.5">
+                              {FEEDBACK_TYPES.map((item) => {
+                                const active = feedbackType === item.id;
+                                const activeTone =
+                                  item.tone === "rose"
+                                    ? "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] shadow-[0_0_0_1.5px_var(--p-vermilion)]"
+                                    : item.tone === "amber"
+                                      ? "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] shadow-[0_0_0_1.5px_var(--p-cobalt)]"
+                                      : "bg-[var(--p-forest-tint)] text-[var(--p-forest)] shadow-[0_0_0_1.5px_var(--p-forest)]";
+                                return (
+                                  <button
+                                    key={item.id}
+                                    type="button"
+                                    aria-pressed={active}
+                                    onClick={() => setFeedbackType(item.id)}
+                                    className={cn(
+                                      "flex items-center justify-center gap-1.5 h-10 px-3 rounded-[10px] text-[13px] font-medium transition-all duration-150 cursor-pointer",
+                                      active
+                                        ? activeTone
+                                        : "bg-[var(--p-page)] text-[var(--p-ink-2)] shadow-[var(--p-shadow-hairline)] hover:bg-[var(--p-hover)] hover:text-[var(--p-ink)]",
+                                    )}
+                                  >
+                                    <Icon name={item.icon} size={14} />
+                                    <span>{item.label}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          {/* Title input */}
+                          <label className="block space-y-1.5">
+                            <span className="text-[12px] font-medium text-[var(--p-ink-2)]">
+                              简要标题（可选）
+                            </span>
+                            <input
+                              type="text"
+                              maxLength={180}
+                              value={title}
+                              onChange={(e) => setTitle(e.target.value)}
+                              placeholder="一句话概括现象或建议，留空将自动从正文首行提取"
+                              className="w-full h-10.5 px-3.5 rounded-[10px] bg-[var(--p-page)] shadow-[var(--p-shadow-hairline)] text-[14px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)] transition-all"
+                            />
+                          </label>
+
+                          {/* Body textarea */}
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[12px] font-medium text-[var(--p-ink-2)]">
+                                详细描述 <span className="text-[var(--p-vermilion)]">*</span>
+                              </span>
+                              <span className="text-[11px] font-mono text-[var(--p-ink-3)] tabular-nums">
+                                {body.length} / 20000
+                              </span>
+                            </div>
+                            <textarea
+                              required
+                              rows={5}
+                              maxLength={20000}
+                              value={body}
+                              onChange={(e) => setBody(e.target.value)}
+                              onPaste={(e) => {
+                                const files = e.clipboardData?.files;
+                                if (files && files.length > 0) {
+                                  const hasImg = Array.from(files).some((f) =>
+                                    f.type.startsWith("image/"),
+                                  );
+                                  if (hasImg) {
+                                    e.preventDefault();
+                                    void uploadFiles(files);
+                                  }
+                                }
+                              }}
+                              placeholder="请描述具体现象、复现步骤或期望效果（支持直接粘贴或拖入截图）…"
+                              className="w-full rounded-[10px] bg-[var(--p-page)] shadow-[var(--p-shadow-hairline)] p-3.5 text-[14px] leading-relaxed text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)] transition-all resize-y"
+                            />
+
+                            {/* Toolbar: Upload */}
+                            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                              <div className="flex items-center gap-2">
+                                <input
+                                  ref={fileInputRef}
+                                  type="file"
+                                  accept="image/*"
+                                  multiple
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    if (e.target.files?.length) {
+                                      void uploadFiles(e.target.files);
+                                      e.target.value = "";
+                                    }
+                                  }}
+                                />
+                                <button
+                                  type="button"
+                                  disabled={!config.upload_enabled || images.length >= 6}
+                                  onClick={() => fileInputRef.current?.click()}
+                                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-[var(--p-field)] text-[12px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors disabled:opacity-45 cursor-pointer"
+                                >
+                                  <Icon name="image" size={13.5} />
+                                  <span>
+                                    {config.upload_enabled
+                                      ? `上传截图 (${images.length}/6)`
+                                      : "图床未配置"}
+                                  </span>
+                                </button>
+                              </div>
+                              <span className="text-[11.5px] text-[var(--p-ink-3)]">
+                                支持 Ctrl/⌘+V 直接粘贴截图
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Uploaded image thumbnails */}
+                          {images.length > 0 && (
+                            <div className="flex flex-wrap gap-2.5">
+                              {images.map((img) => (
+                                <div
+                                  key={img.id}
+                                  className="group relative w-20 h-16 rounded-[10px] overflow-hidden shadow-[var(--p-shadow-hairline)] bg-[var(--p-canvas)] animate-rd-step-pop"
+                                >
+                                  <img
+                                    src={img.remoteUrl || img.previewUrl}
+                                    alt="上传截图"
+                                    onClick={() =>
+                                      setLightboxSrc(img.remoteUrl || img.previewUrl)
+                                    }
+                                    className="w-full h-full object-cover cursor-zoom-in transition-transform duration-150 group-hover:scale-105"
+                                  />
+                                  {img.uploading && (
+                                    <div className="absolute inset-0 bg-black/40 flex items-center justify-center text-white">
+                                      <Icon name="loader-2" size={16} className="animate-spin" />
+                                    </div>
+                                  )}
+                                  <button
+                                    type="button"
+                                    aria-label="移除截图"
+                                    onClick={() => removeImage(img.id)}
+                                    className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/70 text-white flex items-center justify-center hover:bg-black cursor-pointer"
+                                  >
+                                    <Icon name="x" size={11} />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Optional Release Preference Card */}
+                          {config.can_request_deploy && (
+                            <div className="rounded-[12px] bg-[var(--p-cobalt-tint)] p-3.5">
+                              <Switch
+                                checked={releasePref === "request_immediate"}
+                                onChange={(checked) =>
+                                  setReleasePref(checked ? "request_immediate" : "default")
+                                }
+                                label="修复完成后，若线上空闲请 AI 评估即时发布"
+                                description={
+                                  config.release_window
+                                    ? `当前默认发布窗口为 ${config.release_window}；勾选后，修复完成将自动触发一次只读 AI 门禁评估，低风险且无活跃影响时立即上线。`
+                                    : "勾选后，修复完成将自动触发一次只读 AI 门禁评估，满足安全条件时立即触发上线。"
+                                }
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="px-5 sm:px-6 py-4 bg-[var(--p-page)]/80 border-t border-dashed border-[var(--p-line)] flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-[12px] text-[var(--p-ink-3)]">
+                            以「{config.label}」身份提交
+                          </span>
+                          <button
+                            type="submit"
+                            disabled={submitting || !body.trim() || images.some((i) => i.uploading)}
+                            className="inline-flex items-center justify-center gap-1.5 h-9 px-5 rounded-full bg-[var(--p-ink)] text-[var(--p-page)] text-[13px] font-medium hover:opacity-90 active:scale-[0.97] transition-all disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer shadow-xs"
+                          >
+                            {submitting ? (
+                              <Icon name="loader-2" size={14} className="animate-spin" />
+                            ) : (
+                              <Icon name="send" size={13.5} />
+                            )}
+                            <span>提交反馈</span>
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ── RETURNING USER PROGRESS DOCK (Right on Home, below dashed divider) ── */}
+              {!conversationActive && !submittedDetail && returningPreviewTasks.length > 0 && (
+                <section className="border-t border-dashed border-[var(--p-line)] px-5 sm:px-9 py-8 sm:py-10 space-y-5">
+                  <div className="flex flex-wrap items-baseline justify-between gap-3">
+                    <div className="flex items-baseline gap-2.5">
+                      <span className="font-mono text-[11.5px] font-medium text-[var(--p-ink-3)] tabular-nums">
+                        02
+                      </span>
+                      <h3 className="text-[15.5px] font-semibold tracking-[-0.015em] text-[var(--p-ink)]">
+                        你最近的反馈进度
+                      </h3>
+                      {actionCount > 0 && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] text-[11px] font-medium">
+                          {actionCount} 条待你确认
+                        </span>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTab("mine");
+                        setSelectedTaskId(null);
+                      }}
+                      className="inline-flex items-center gap-1 text-[12.5px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] transition-colors cursor-pointer"
+                    >
+                      <span>查看全部 {mineTasks.length} 条</span>
+                      <Icon name="arrow-right" size={13.5} />
+                    </button>
+                  </div>
+
+                  <div className="space-y-2.5">
+                    {returningPreviewTasks.map((t) => {
+                      const vis = resolveStatusVisual(t.status_label);
+                      const actionHint = t.can_reply
+                        ? "需要你补充说明"
+                        : t.can_accept
+                          ? "已上线 · 请确认是否解决"
+                          : t.can_request_deploy
+                            ? "修复就绪 · 可申请提前发布"
+                            : null;
+                      return (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() => openTaskStory(t.id, "mine")}
+                          className="group w-full text-left rounded-[12px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] hover:shadow-[var(--p-shadow-card)] hover:-translate-y-0.5 px-4 sm:px-5 py-4 transition-all duration-150 cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                        >
+                          <div className="min-w-0 space-y-1.5">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-mono text-[11.5px] text-[var(--p-ink-3)] tabular-nums">
+                                {t.code}
+                              </span>
+                              <span
+                                className={cn(
+                                  "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium border",
+                                  vis.badgeClass,
+                                )}
+                              >
+                                <LivePulseDot tone={vis.dotTone} active={vis.pulse} />
+                                <span>{t.status_label}</span>
+                              </span>
+                              {actionHint && (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]">
+                                  {actionHint}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--p-ink)] truncate">
+                              {t.title}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-3 shrink-0">
+                            <div className="flex items-center gap-1" aria-hidden="true">
+                              {LIFECYCLE_STEPS.map((s, idx) => (
+                                <span
+                                  key={s.key}
+                                  className={cn(
+                                    "h-1.5 w-4 rounded-full transition-colors",
+                                    idx < vis.stepIndex
+                                      ? "bg-[var(--p-forest)]"
+                                      : idx === vis.stepIndex
+                                        ? vis.dotTone === "amber"
+                                          ? "bg-[var(--p-vermilion)]"
+                                          : vis.dotTone === "emerald"
+                                            ? "bg-[var(--p-forest)]"
+                                            : "bg-[var(--p-cobalt)]"
+                                        : "bg-[var(--p-field)]",
+                                  )}
+                                />
+                              ))}
+                            </div>
+                            <Icon
+                              name="chevron-right"
+                              size={15}
+                              className="text-[var(--p-ink-3)] group-hover:text-[var(--p-ink)] group-hover:translate-x-0.5 transition-all"
+                            />
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+            </div>
+          )}
+
+          {/* ── TAB 2 & 3: EDITORIAL PROGRESS FEED -> FOCUSED DETAIL STORY (NO ADMIN SPLIT PANE) ── */}
+          {tab !== "submit" && (
+            <div className="px-5 sm:px-9 py-8 sm:py-11 animate-rd-portal-in">
+              {!selectedTaskId ? (
+                /* ── FEED VIEW ── */
+                <div className="space-y-7">
+                  {/* Editorial Section Header */}
+                  <div className="pb-6 border-b border-dashed border-[var(--p-line)] flex flex-wrap items-end justify-between gap-4">
+                    <div className="space-y-2.5">
+                      <div className="flex items-center gap-2 text-[12px]">
+                        <span className="font-mono text-[11.5px] font-medium text-[var(--p-ink-3)] tabular-nums">
+                          {tab === "mine" ? "02" : "03"}
+                        </span>
+                        <span className="text-[var(--p-line-strong)]">/</span>
+                        <span className="font-mono text-[11.5px] text-[var(--p-ink-3)]">
+                          {tab === "mine" ? "MY FEEDBACK" : "TEAM STREAM"}
+                        </span>
+                      </div>
+                      <h2 className="text-[26px] sm:text-[34px] font-semibold tracking-[-0.03em] leading-[1.12] text-[var(--p-ink)]">
+                        {tab === "mine" ? "我的反馈进度" : "团队反馈动态"}
+                      </h2>
+                      <p className="text-[14px] text-[var(--p-ink-2)]">
+                        {currentList.length === 0
+                          ? "提交反馈后，排查修复与发布上线进度会实时同步在这里。"
+                          : `共 ${currentList.length} 条记录${pendingActionInList > 0 ? ` · ${pendingActionInList} 条需要你确认或补充` : " · 全部进度实时同步"}`}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void loadTasks(tab === "team" ? "team" : "mine", false)}
+                        aria-label="刷新进度"
+                        className="inline-flex items-center gap-1.5 h-9 px-3.5 rounded-full bg-[var(--p-field)] text-[12.5px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors cursor-pointer"
+                      >
+                        <Icon name="refresh-cw" size={13.5} />
+                        <span>刷新</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTab("submit");
+                          setSelectedTaskId(null);
+                        }}
+                        className="inline-flex items-center gap-1.5 h-9 px-4 rounded-full bg-[var(--p-ink)] text-[var(--p-page)] text-[12.5px] font-medium hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-xs"
+                      >
+                        <Icon name="plus" size={14} />
+                        <span>写一条反馈</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Lightweight Filter Pills + Quiet Search (only when items exist) */}
+                  {currentList.length > 0 && (
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {(
+                          [
+                            { id: "all", label: "全部" },
+                            { id: "action", label: "待我操作" },
+                            { id: "active", label: "处理中" },
+                            { id: "deployed", label: "已上线" },
+                          ] as Array<{ id: TaskFilter; label: string }>
+                        ).map((f) => {
+                          const active = taskFilter === f.id;
+                          return (
+                            <button
+                              key={f.id}
+                              type="button"
+                              onClick={() => setTaskFilter(f.id)}
+                              className={cn(
+                                "h-8 px-3.5 rounded-full text-[12.5px] font-medium transition-all cursor-pointer",
+                                active
+                                  ? "bg-[var(--p-surface)] text-[var(--p-ink)] shadow-[var(--p-shadow-btn)]"
+                                  : "text-[var(--p-ink-3)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)]",
+                              )}
+                            >
+                              {f.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="relative w-full sm:w-56">
+                        <Icon
+                          name="search"
+                          size={13.5}
+                          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--p-ink-3)]"
+                        />
+                        <input
+                          type="search"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder="快速查找标题或编号…"
+                          className="w-full h-8.5 pl-8.5 pr-3 rounded-full bg-[var(--p-field)] text-[12.5px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:bg-[var(--p-surface)] focus:shadow-[0_0_0_1.5px_var(--p-cobalt)] transition-all"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Single-Column Progress Cards */}
+                  {loadingList && currentList.length === 0 ? (
+                    <div className="space-y-3">
+                      {[0, 1, 2].map((i) => (
+                        <div
+                          key={i}
+                          className="h-28 rounded-[14px] bg-[var(--p-canvas)] animate-pulse"
+                        />
+                      ))}
+                    </div>
+                  ) : filteredTasks.length === 0 ? (
+                    <div className="rd-portal-dots rounded-[20px] bg-[var(--p-canvas)] p-10 sm:p-14 text-center shadow-[var(--p-shadow-hairline)] space-y-4">
+                      <div className="w-11 h-11 rounded-[12px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] text-[var(--p-ink-3)] flex items-center justify-center mx-auto">
+                        <Icon name="inbox" size={20} />
+                      </div>
+                      <div className="space-y-1.5 max-w-sm mx-auto">
+                        <p className="text-[15.5px] font-semibold text-[var(--p-ink)]">
+                          {currentList.length === 0
+                            ? tab === "team"
+                              ? "还没有团队反馈动态"
+                              : "还没有提交过反馈"
+                            : "没有符合当前筛选的记录"}
+                        </p>
+                        <p className="text-[13px] text-[var(--p-ink-2)]">
+                          {currentList.length === 0
+                            ? "遇到问题或有产品想法？写下来后，这里会持续同步每一阶段的处理进度。"
+                            : "试试切换筛选标签或清空搜索词。"}
+                        </p>
+                      </div>
+                      {currentList.length === 0 && (
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setTab("submit")}
+                            className="inline-flex items-center gap-1.5 h-9 px-4.5 rounded-full bg-[var(--p-ink)] text-[var(--p-page)] text-[13px] font-medium hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer"
+                          >
+                            <Icon name="pen-line" size={14} />
+                            <span>去表达第一条反馈</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-3.5">
+                      {filteredTasks.map((t) => {
+                        const vis = resolveStatusVisual(t.status_label);
+                        const actionBanner = t.can_reply
+                          ? {
+                              label: "团队邀请你补充更多信息，点击回复后自动继续处理",
+                              icon: "message-square-plus",
+                              tone: "vermilion" as const,
+                            }
+                          : t.can_accept
+                            ? {
+                                label: "修复已发布上线，点击确认问题是否已解决",
+                                icon: "rocket",
+                                tone: "forest" as const,
+                              }
+                            : t.can_request_deploy
+                              ? {
+                                  label: "修复已就绪，点击可申请 AI 评估提前发布上线",
+                                  icon: "zap",
+                                  tone: "cobalt" as const,
+                                }
+                              : null;
+
                         return (
                           <button
-                            key={item.id}
+                            key={t.id}
                             type="button"
-                            aria-pressed={active}
-                            onClick={() => setFeedbackType(item.id)}
-                            className={cn(
-                              "flex items-center justify-center gap-1.5 h-9.5 px-3 rounded-xl border text-[12.5px] font-medium transition-all duration-150 cursor-pointer",
-                              active
-                                ? "border-indigo-500/60 bg-indigo-500/[0.08] text-[var(--text-primary)] ring-1 ring-indigo-500/20 shadow-2xs"
-                                : "border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]",
-                            )}
+                            onClick={() => setSelectedTaskId(t.id)}
+                            className="group w-full text-left rounded-[14px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] hover:-translate-y-0.5 transition-all duration-150 cursor-pointer overflow-hidden"
                           >
-                            <Icon
-                              name={item.icon}
-                              size={14}
-                              className={
-                                active
-                                  ? "text-indigo-600 dark:text-indigo-400"
-                                  : "text-[var(--text-muted)]"
-                              }
-                            />
-                            <span>{item.label}</span>
+                            <div className="p-5 sm:p-6 space-y-4">
+                              {/* Meta row */}
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="font-mono text-[12px] font-medium text-[var(--p-ink-3)] tabular-nums">
+                                    {t.code}
+                                  </span>
+                                  {tab === "team" && t.owned && (
+                                    <span className="px-2 py-0.5 rounded-full text-[10.5px] font-medium bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)]">
+                                      我提交的
+                                    </span>
+                                  )}
+                                  <span className="text-[var(--p-line-strong)]">·</span>
+                                  <span className="text-[12px] text-[var(--p-ink-3)] tabular-nums">
+                                    {formatRelativeTime(t.created_at)}
+                                  </span>
+                                </div>
+
+                                <span
+                                  className={cn(
+                                    "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11.5px] font-medium border",
+                                    vis.badgeClass,
+                                  )}
+                                >
+                                  <LivePulseDot tone={vis.dotTone} active={vis.pulse} />
+                                  <span>{t.status_label}</span>
+                                </span>
+                              </div>
+
+                              {/* Title */}
+                              <div className="flex items-start justify-between gap-4">
+                                <h3 className="text-[15.5px] sm:text-[16.5px] font-semibold tracking-[-0.015em] text-[var(--p-ink)] leading-snug group-hover:text-[var(--p-cobalt)] transition-colors">
+                                  {t.title}
+                                </h3>
+                                <Icon
+                                  name="arrow-right"
+                                  size={16}
+                                  className="text-[var(--p-ink-3)] group-hover:text-[var(--p-ink)] group-hover:translate-x-0.5 transition-all shrink-0 mt-1"
+                                />
+                              </div>
+
+                              {/* Inline 5-step visual progress bar */}
+                              <div className="grid grid-cols-5 gap-1.5 pt-0.5">
+                                {LIFECYCLE_STEPS.map((step, idx) => {
+                                  const done = idx < vis.stepIndex;
+                                  const current = idx === vis.stepIndex;
+                                  return (
+                                    <div key={step.key} className="space-y-1">
+                                      <div className="h-1.5 rounded-full overflow-hidden bg-[var(--p-field)]">
+                                        <div
+                                          className={cn(
+                                            "h-full rounded-full transition-all duration-500",
+                                            done
+                                              ? "w-full bg-[var(--p-forest)]"
+                                              : current
+                                                ? vis.dotTone === "amber"
+                                                  ? "w-full bg-[var(--p-vermilion)]"
+                                                  : vis.dotTone === "emerald"
+                                                    ? "w-full bg-[var(--p-forest)]"
+                                                    : "w-full bg-[var(--p-cobalt)]"
+                                                : "w-0",
+                                          )}
+                                        />
+                                      </div>
+                                      <span
+                                        className={cn(
+                                          "block text-[10.5px] truncate",
+                                          current
+                                            ? "font-medium text-[var(--p-ink)]"
+                                            : done
+                                              ? "text-[var(--p-forest)]"
+                                              : "text-[var(--p-ink-3)]",
+                                        )}
+                                      >
+                                        {step.label}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            {actionBanner && (
+                              <div
+                                className={cn(
+                                  "px-5 sm:px-6 py-2.5 border-t border-dashed border-[var(--p-line)] flex items-center justify-between gap-2 text-[12px] font-medium",
+                                  actionBanner.tone === "vermilion"
+                                    ? "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]"
+                                    : actionBanner.tone === "forest"
+                                      ? "bg-[var(--p-forest-tint)] text-[var(--p-forest)]"
+                                      : "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)]",
+                                )}
+                              >
+                                <span className="inline-flex items-center gap-1.5 min-w-0 truncate">
+                                  <Icon name={actionBanner.icon} size={13.5} className="shrink-0" />
+                                  <span className="truncate">{actionBanner.label}</span>
+                                </span>
+                                <span className="shrink-0">去处理 →</span>
+                              </div>
+                            )}
                           </button>
                         );
                       })}
                     </div>
-                  </div>
-
-                  {/* Title input */}
-                  <label className="block space-y-1.5">
-                    <span className="text-[12px] font-medium text-[var(--text-secondary)]">
-                      简要标题（可选）
-                    </span>
-                    <input
-                      type="text"
-                      maxLength={180}
-                      value={title}
-                      onChange={(e) => setTitle(e.target.value)}
-                      placeholder="一句话概括现象或建议，留空将自动从正文首行提取"
-                      className="w-full h-10 px-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13.5px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15 transition-all"
-                    />
-                  </label>
-
-                  {/* Body textarea */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[12px] font-medium text-[var(--text-secondary)]">
-                        详细描述 <span className="text-rose-500">*</span>
-                      </span>
-                      <span className="text-[11px] font-mono text-[var(--text-muted)] tabular-nums">
-                        {body.length} / 20000
-                      </span>
-                    </div>
-                    <textarea
-                      required
-                      rows={5}
-                      maxLength={20000}
-                      value={body}
-                      onChange={(e) => setBody(e.target.value)}
-                      onPaste={(e) => {
-                        const files = e.clipboardData?.files;
-                        if (files && files.length > 0) {
-                          const hasImg = Array.from(files).some((f) =>
-                            f.type.startsWith("image/"),
-                          );
-                          if (hasImg) {
-                            e.preventDefault();
-                            void uploadFiles(files);
-                          }
-                        }
-                      }}
-                      placeholder="请描述具体现象、复现步骤或期望效果（支持直接粘贴或拖入截图）…"
-                      className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-3.5 text-[13.5px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15 transition-all resize-y"
-                    />
-
-                    {/* Toolbar: Upload + AI Clarify */}
-                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                      <div className="flex items-center gap-2">
-                        <input
-                          ref={fileInputRef}
-                          type="file"
-                          accept="image/*"
-                          multiple
-                          className="hidden"
-                          onChange={(e) => {
-                            if (e.target.files?.length) {
-                              void uploadFiles(e.target.files);
-                              e.target.value = "";
-                            }
-                          }}
-                        />
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="xs"
-                          icon="image"
-                          disabled={!config.upload_enabled || images.length >= 6}
-                          onClick={() => fileInputRef.current?.click()}
-                        >
-                          {config.upload_enabled
-                            ? `上传截图 (${images.length}/6)`
-                            : "图床未配置"}
-                        </Button>
-                      </div>
-                      <span className="text-[11px] text-[var(--text-muted)]">
-                        支持 Ctrl/⌘+V 直接粘贴截图
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Uploaded image thumbnails */}
-                  {images.length > 0 && (
-                    <div className="flex flex-wrap gap-2.5">
-                      {images.map((img) => (
-                        <div
-                          key={img.id}
-                          className="group relative w-20 h-16 rounded-xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-subtle)] animate-rd-step-pop"
-                        >
-                          <img
-                            src={img.remoteUrl || img.previewUrl}
-                            alt="上传截图"
-                            onClick={() =>
-                              setLightboxSrc(img.remoteUrl || img.previewUrl)
-                            }
-                            className="w-full h-full object-cover cursor-zoom-in transition-transform duration-150 group-hover:scale-105"
-                          />
-                          {img.uploading && (
-                            <div className="absolute inset-0 bg-black/40 flex items-center justify-center text-white">
-                              <Icon name="loader-2" size={16} className="animate-spin" />
-                            </div>
-                          )}
-                          <button
-                            type="button"
-                            aria-label="移除截图"
-                            onClick={() => removeImage(img.id)}
-                            className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/70 text-white flex items-center justify-center hover:bg-black cursor-pointer"
-                          >
-                            <Icon name="x" size={11} />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Optional Release Preference Card */}
-                  {config.can_request_deploy && (
-                    <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/[0.04] p-3.5 space-y-1.5">
-                      <Switch
-                        checked={releasePref === "request_immediate"}
-                        onChange={(checked) =>
-                          setReleasePref(checked ? "request_immediate" : "default")
-                        }
-                        label="修复完成后，若线上空闲请 AI 评估即时发布"
-                        description={
-                          config.release_window
-                            ? `当前默认发布窗口为 ${config.release_window}；勾选后，修复完成将自动触发一次只读 AI 门禁评估，低风险且无活跃影响时立即上线。`
-                            : "勾选后，修复完成将自动触发一次只读 AI 门禁评估，满足安全条件时立即触发上线。"
-                        }
-                      />
-                    </div>
                   )}
                 </div>
-
-                <div className="px-5 py-3.5 bg-[var(--surface-subtle)] border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-[11.5px] text-[var(--text-muted)]">
-                    以「{config.label}」身份提交
-                  </span>
-                  <Button
-                    type="submit"
-                    variant="primary"
-                    size="sm"
-                    icon="send"
-                    loading={submitting}
-                    disabled={!body.trim() || images.some((i) => i.uploading)}
-                  >
-                    提交反馈
-                  </Button>
-                </div>
-              </form>
-            )}
-          </div>
-        )}
-
-        {/* TAB 2 & 3: MY FEEDBACK / TEAM ACTIVITY */}
-        {tab !== "submit" && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start animate-rd-portal-in">
-            {/* Left column: Ticket List */}
-            <section
-              className={cn(
-                "lg:col-span-5 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs",
-                selectedTaskId ? "hidden lg:block" : "block",
-              )}
-            >
-              {/* Filter + Search bar */}
-              <div className="p-3 border-b border-[var(--border-subtle)] space-y-2.5">
-                <div className="relative">
-                  <Icon
-                    name="search"
-                    size={14}
-                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]"
-                  />
-                  <input
-                    type="search"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="搜索标题或工单编号（如 RD-21）…"
-                    className="w-full h-8.5 pl-8.5 pr-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-                <div className="flex flex-wrap items-center gap-1">
-                  {(
-                    [
-                      { id: "all", label: "全部" },
-                      { id: "action", label: "待我操作" },
-                      { id: "active", label: "处理中" },
-                      { id: "deployed", label: "已上线" },
-                    ] as Array<{ id: TaskFilter; label: string }>
-                  ).map((f) => (
+              ) : (
+                /* ── FOCUSED STORY / DETAIL VIEW (SINGLE COLUMN) ── */
+                <div className="space-y-6 animate-rd-portal-in">
+                  {/* Top Breadcrumb Bar */}
+                  <div className="flex items-center justify-between gap-3">
                     <button
-                      key={f.id}
                       type="button"
-                      onClick={() => setTaskFilter(f.id)}
-                      className={cn(
-                        "px-2.5 py-1 rounded-lg text-[11.5px] font-medium transition-colors cursor-pointer",
-                        taskFilter === f.id
-                          ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300"
-                          : "text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
-                      )}
+                      onClick={() => setSelectedTaskId(null)}
+                      className="inline-flex items-center gap-1.5 h-8.5 px-3.5 rounded-full bg-[var(--p-field)] text-[12.5px] font-medium text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors cursor-pointer"
                     >
-                      {f.label}
+                      <Icon name="arrow-left" size={14} />
+                      <span>{tab === "team" ? "返回团队动态" : "返回我的反馈"}</span>
                     </button>
-                  ))}
-                </div>
-              </div>
 
-              {/* Ticket rows */}
-              <div className="divide-y divide-[var(--border-subtle)] max-h-[calc(100dvh-250px)] overflow-y-auto rd-scroll">
-                {loadingList && currentList.length === 0 ? (
-                  <div className="p-4 space-y-2.5">
-                    {[0, 1, 2].map((i) => (
-                      <div
-                        key={i}
-                        className="h-16 rounded-xl bg-[var(--surface-subtle)] animate-pulse"
-                      />
-                    ))}
-                  </div>
-                ) : filteredTasks.length === 0 ? (
-                  <div className="px-5 py-10 text-center space-y-2.5">
-                    <div className="w-10 h-10 rounded-xl bg-[var(--surface-subtle)] text-[var(--text-muted)] flex items-center justify-center mx-auto">
-                      <Icon name="inbox" size={18} />
-                    </div>
-                    <p className="text-[13px] font-medium text-[var(--text-primary)]">
-                      {currentList.length === 0
-                        ? tab === "team"
-                          ? "暂无团队反馈记录"
-                          : "还没有提交过反馈"
-                        : "没有符合筛选条件的工单"}
-                    </p>
-                    <p className="text-[12px] text-[var(--text-muted)]">
-                      {currentList.length === 0
-                        ? "提交反馈后可在此实时查看处理进度与发布状态。"
-                        : "尝试切换筛选条件或清空搜索关键词。"}
-                    </p>
-                    {currentList.length === 0 && (
-                      <div className="pt-1">
-                        <Button
-                          type="button"
-                          variant="primary"
-                          size="xs"
-                          icon="pen-line"
-                          onClick={() => setTab("submit")}
-                        >
-                          立即提交反馈
-                        </Button>
-                      </div>
+                    {detail && (
+                      <button
+                        type="button"
+                        onClick={() => void loadTaskDetail(detail.task.id, false)}
+                        className="inline-flex items-center gap-1.5 h-8.5 px-3 rounded-full text-[12.5px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors cursor-pointer"
+                      >
+                        <Icon name="refresh-cw" size={13} />
+                        <span>刷新进度</span>
+                      </button>
                     )}
                   </div>
-                ) : (
-                  filteredTasks.map((t) => {
-                    const selected = selectedTaskId === t.id;
-                    const vis = resolveStatusVisual(t.status_label);
-                    const needsAction = t.can_reply || t.can_accept || t.can_request_deploy;
-                    return (
-                      <button
-                        key={t.id}
-                        type="button"
-                        onClick={() => setSelectedTaskId(t.id)}
-                        className={cn(
-                          "w-full text-left px-4 py-3.5 transition-colors cursor-pointer space-y-1.5",
-                          selected
-                            ? "bg-indigo-500/[0.07]"
-                            : "hover:bg-[var(--surface-hover)]",
-                        )}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-1.5 min-w-0">
-                            <span className="font-mono text-[11px] font-medium text-[var(--text-muted)]">
-                              {t.code}
+
+                  {loadingDetail && !detail ? (
+                    <div className="rounded-[16px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] p-6 sm:p-8 space-y-5">
+                      <div className="h-7 w-2/3 rounded-lg bg-[var(--p-canvas)] animate-pulse" />
+                      <div className="h-14 rounded-xl bg-[var(--p-canvas)] animate-pulse" />
+                      <div className="h-36 rounded-xl bg-[var(--p-canvas)] animate-pulse" />
+                    </div>
+                  ) : detail ? (
+                    <article className="space-y-7">
+                      {/* Story Header & Progress Track */}
+                      <div className="rounded-[16px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] p-5 sm:p-7 space-y-6">
+                        <div className="space-y-3">
+                          <div className="flex flex-wrap items-center gap-2.5">
+                            <CopyButton
+                              value={detail.task.code}
+                              label={detail.task.code}
+                              copiedLabel="已复制"
+                              size="xs"
+                              variant="secondary"
+                            />
+                            <span
+                              title={formatDateTime(detail.task.created_at)}
+                              className="text-[12px] text-[var(--p-ink-3)] tabular-nums"
+                            >
+                              提交于 {formatDateTime(detail.task.created_at)}
                             </span>
-                            {tab === "team" && t.owned && (
-                              <span className="px-1.5 py-0.2 rounded text-[10px] font-medium bg-indigo-500/12 text-indigo-700 dark:text-indigo-300">
-                                我的
-                              </span>
-                            )}
                           </div>
-                          <span className="text-[11px] text-[var(--text-muted)] tabular-nums shrink-0">
-                            {formatRelativeTime(t.created_at)}
-                          </span>
+
+                          <h2 className="text-[22px] sm:text-[26px] font-semibold tracking-[-0.025em] leading-snug text-[var(--p-ink)]">
+                            {detail.task.title}
+                          </h2>
+
+                          {(() => {
+                            const vis = resolveStatusVisual(detail.task.status_label);
+                            return (
+                              <div className="flex flex-wrap items-center gap-2.5">
+                                <span
+                                  className={cn(
+                                    "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[12px] font-medium border",
+                                    vis.badgeClass,
+                                  )}
+                                >
+                                  <LivePulseDot tone={vis.dotTone} active={vis.pulse} />
+                                  <span>{detail.task.status_label}</span>
+                                </span>
+                                {vis.specialNote && (
+                                  <span className="text-[12.5px] text-[var(--p-ink-2)]">
+                                    {vis.specialNote}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </div>
 
-                        <p className="text-[13px] font-medium text-[var(--text-primary)] line-clamp-2 leading-snug">
-                          {t.title}
-                        </p>
+                        {/* Numbered 5-Step Lifecycle Progress Track */}
+                        {(() => {
+                          const vis = resolveStatusVisual(detail.task.status_label);
+                          return (
+                            <div className="pt-5 border-t border-dashed border-[var(--p-line)]">
+                              <div className="grid grid-cols-5 gap-2">
+                                {LIFECYCLE_STEPS.map((step, idx) => {
+                                  const done = idx < vis.stepIndex;
+                                  const current = idx === vis.stepIndex;
+                                  return (
+                                    <div key={step.key} className="space-y-2">
+                                      <div className="h-2 rounded-full overflow-hidden bg-[var(--p-field)]">
+                                        <div
+                                          className={cn(
+                                            "h-full rounded-full transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
+                                            done
+                                              ? "w-full bg-[var(--p-forest)]"
+                                              : current
+                                                ? vis.dotTone === "amber"
+                                                  ? "w-full bg-[var(--p-vermilion)]"
+                                                  : vis.dotTone === "emerald"
+                                                    ? "w-full bg-[var(--p-forest)]"
+                                                    : "w-full bg-[var(--p-cobalt)]"
+                                                : "w-0",
+                                          )}
+                                        />
+                                      </div>
+                                      <div className="space-y-0.5">
+                                        <span className="hidden sm:block font-mono text-[10px] text-[var(--p-ink-3)] tabular-nums">
+                                          0{idx + 1}
+                                        </span>
+                                        <div
+                                          className={cn(
+                                            "text-[11.5px] font-medium truncate",
+                                            current
+                                              ? "text-[var(--p-ink)]"
+                                              : done
+                                                ? "text-[var(--p-forest)]"
+                                                : "text-[var(--p-ink-3)]",
+                                          )}
+                                        >
+                                          {step.label}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
 
-                        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                          <span
-                            className={cn(
-                              "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium border",
-                              vis.badgeClass,
+                      {/* Online Acceptance Action Card */}
+                      {detail.task.can_accept && (
+                        <div className="rounded-[14px] bg-[var(--p-forest-tint)] p-5 space-y-3.5 animate-rd-portal-in">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2 text-[14px] font-semibold text-[var(--p-ink)]">
+                                <Icon
+                                  name="rocket"
+                                  size={15}
+                                  className="text-[var(--p-forest)]"
+                                />
+                                <span>修复已发布上线，请确认问题是否已解决</span>
+                              </div>
+                              <p className="text-[12.5px] text-[var(--p-ink-2)]">
+                                若问题仍存在，点击「仍有问题」并补充现象即可自动重新进入处理队列。
+                              </p>
+                            </div>
+                            {acceptMode === "idle" && (
+                              <div className="flex items-center gap-2 shrink-0">
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  size="xs"
+                                  icon="alert-circle"
+                                  disabled={submittingAccept}
+                                  onClick={() => setAcceptMode("broken")}
+                                >
+                                  仍有问题
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="primary"
+                                  size="xs"
+                                  icon="check-circle-2"
+                                  loading={submittingAccept}
+                                  onClick={() => void handleAccept(true)}
+                                >
+                                  确认已解决
+                                </Button>
+                              </div>
                             )}
-                          >
-                            <LivePulseDot tone={vis.dotTone} active={vis.pulse} />
-                            <span>{t.status_label}</span>
-                          </span>
+                          </div>
 
-                          {needsAction && (
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10.5px] font-medium bg-amber-500/12 text-amber-700 dark:text-amber-300">
-                              {t.can_reply
-                                ? "待补充回复"
-                                : t.can_accept
-                                  ? "待验收"
-                                  : "可申请即时发布"}
-                            </span>
+                          {acceptMode === "broken" && (
+                            <div className="space-y-2.5 pt-3 border-t border-dashed border-[var(--p-line)] animate-rd-portal-in">
+                              <textarea
+                                rows={2}
+                                maxLength={4000}
+                                value={brokenNote}
+                                onChange={(e) => setBrokenNote(e.target.value)}
+                                placeholder="请简单说明仍然存在的问题或新的现象（可选）…"
+                                className="w-full rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] px-3.5 py-2.5 text-[13px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)]"
+                              />
+                              <div className="flex justify-end gap-1.5">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="xs"
+                                  disabled={submittingAccept}
+                                  onClick={() => setAcceptMode("idle")}
+                                >
+                                  取消
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="danger"
+                                  size="xs"
+                                  loading={submittingAccept}
+                                  onClick={() => void handleAccept(false)}
+                                >
+                                  提交「仍有问题」并重开
+                                </Button>
+                              </div>
+                            </div>
                           )}
                         </div>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-            </section>
+                      )}
 
-            {/* Right column: Ticket Detail */}
-            <section
-              className={cn(
-                "lg:col-span-7 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden shadow-2xs min-h-[420px]",
-                selectedTaskId ? "block" : "hidden lg:flex lg:items-center lg:justify-center",
-              )}
-            >
-              {!selectedTaskId ? (
-                <div className="p-8 text-center space-y-2">
-                  <div className="w-10 h-10 rounded-xl bg-[var(--surface-subtle)] text-[var(--text-muted)] flex items-center justify-center mx-auto">
-                    <Icon name="message-square" size={18} />
-                  </div>
-                  <p className="text-[13.5px] font-medium text-[var(--text-primary)]">
-                    选择左侧工单查看详情与实时进度
-                  </p>
-                  <p className="text-[12px] text-[var(--text-muted)]">
-                    可查看脱敏后的生命周期阶段、回复团队追问、申请即时发布或在线确认解决。
-                  </p>
-                </div>
-              ) : loadingDetail && !detail ? (
-                <div className="p-6 space-y-4">
-                  <div className="h-6 w-2/3 rounded-lg bg-[var(--surface-subtle)] animate-pulse" />
-                  <div className="h-14 rounded-xl bg-[var(--surface-subtle)] animate-pulse" />
-                  <div className="h-32 rounded-xl bg-[var(--surface-subtle)] animate-pulse" />
-                </div>
-              ) : detail ? (
-                <div className="flex flex-col h-full animate-rd-portal-in">
-                  {/* Detail Header */}
-                  <div className="px-4 sm:px-5 py-4 border-b border-[var(--border-subtle)] space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedTaskId(null)}
-                          className="lg:hidden inline-flex items-center gap-1 h-7 px-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-xs text-[var(--text-secondary)] cursor-pointer"
-                        >
-                          <Icon name="arrow-left" size={13} />
-                          <span>返回列表</span>
-                        </button>
-                        <CopyButton
-                          value={detail.task.code}
-                          label={detail.task.code}
-                          copiedLabel="已复制"
-                          size="xs"
-                          variant="secondary"
-                        />
-                        <span
-                          title={formatDateTime(detail.task.created_at)}
-                          className="text-[11.5px] text-[var(--text-muted)] tabular-nums"
-                        >
-                          提交于 {formatDateTime(detail.task.created_at)}
-                        </span>
-                      </div>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="xs"
-                        icon="refresh-cw"
-                        onClick={() => void loadTaskDetail(detail.task.id, false)}
-                      >
-                        刷新
-                      </Button>
-                    </div>
+                      {/* AI Deploy Gate Status + Request Card */}
+                      <PortalDeployGateCard
+                        gate={detail.gate}
+                        canRequestDeploy={detail.task.can_request_deploy}
+                        releaseWindow={config.release_window}
+                        onRequestDeploy={handleRequestDeploy}
+                        requesting={requestingDeploy}
+                      />
 
-                    <div className="space-y-2">
-                      <h2 className="text-[16px] font-semibold tracking-tight text-[var(--text-primary)] leading-snug">
-                        {detail.task.title}
-                      </h2>
-                      {(() => {
-                        const vis = resolveStatusVisual(detail.task.status_label);
-                        return (
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span
-                              className={cn(
-                                "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[12px] font-medium border",
-                                vis.badgeClass,
-                              )}
-                            >
-                              <LivePulseDot tone={vis.dotTone} active={vis.pulse} />
-                              <span>{detail.task.status_label}</span>
-                            </span>
-                            {vis.specialNote && (
-                              <span className="text-[12px] text-[var(--text-muted)]">
-                                {vis.specialNote}
-                              </span>
-                            )}
+                      {/* Reply composer when team requested clarification */}
+                      {detail.task.can_reply && (
+                        <form
+                          onSubmit={(e) => void handleReplySubmit(e)}
+                          className="rounded-[14px] bg-[var(--p-vermilion-tint)] p-5 space-y-3 animate-rd-portal-in"
+                        >
+                          <div className="flex items-center gap-2 text-[13.5px] font-semibold text-[var(--p-ink)]">
+                            <Icon
+                              name="message-square-plus"
+                              size={15}
+                              className="text-[var(--p-vermilion)]"
+                            />
+                            <span>请补充更多信息，回复后将自动继续处理</span>
                           </div>
-                        );
-                      })()}
-                    </div>
+                          <textarea
+                            required
+                            rows={3}
+                            maxLength={8000}
+                            value={replyText}
+                            onChange={(e) => setReplyText(e.target.value)}
+                            placeholder="输入补充说明、复现环境或操作步骤…"
+                            className="w-full rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] p-3 text-[13.5px] text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)]"
+                          />
+                          <div className="flex justify-end">
+                            <button
+                              type="submit"
+                              disabled={sendingReply || !replyText.trim()}
+                              className="inline-flex items-center gap-1.5 h-8.5 px-4 rounded-full bg-[var(--p-ink)] text-[var(--p-page)] text-[12.5px] font-medium hover:opacity-90 active:scale-[0.97] transition-all disabled:opacity-45 cursor-pointer"
+                            >
+                              {sendingReply ? (
+                                <Icon name="loader-2" size={13} className="animate-spin" />
+                              ) : (
+                                <Icon name="send" size={13} />
+                              )}
+                              <span>发送补充说明</span>
+                            </button>
+                          </div>
+                        </form>
+                      )}
 
-                    {/* 5-Step Lifecycle Progress Bar */}
-                    {(() => {
-                      const vis = resolveStatusVisual(detail.task.status_label);
-                      return (
-                        <div className="pt-1">
-                          <div className="grid grid-cols-5 gap-1.5">
-                            {LIFECYCLE_STEPS.map((step, idx) => {
-                              const done = idx < vis.stepIndex;
-                              const current = idx === vis.stepIndex;
+                      {/* Editorial Public Message Timeline */}
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2 text-[12px]">
+                          <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-[var(--p-ink-3)]">
+                            沟通与进度记录
+                          </span>
+                          <span className="h-px flex-1 border-b border-dashed border-[var(--p-line)]" />
+                        </div>
+
+                        {detail.messages.length === 0 ? (
+                          <p className="text-[13px] text-[var(--p-ink-3)] py-4">
+                            暂无公开留言记录。
+                          </p>
+                        ) : (
+                          <div className="space-y-3">
+                            {detail.messages.map((msg) => {
+                              const isReporter = msg.author === "reporter";
                               return (
-                                <div key={step.key} className="space-y-1.5">
-                                  <div className="h-1.5 rounded-full overflow-hidden bg-[var(--surface-subtle)]">
-                                    <div
-                                      className={cn(
-                                        "h-full rounded-full transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
-                                        done
-                                          ? "w-full bg-emerald-500"
-                                          : current
-                                            ? vis.dotTone === "amber"
-                                              ? "w-full bg-amber-500"
-                                              : vis.dotTone === "emerald"
-                                                ? "w-full bg-emerald-500"
-                                                : "w-full bg-indigo-500"
-                                            : "w-0",
-                                      )}
-                                    />
+                                <div
+                                  key={msg.id}
+                                  className={cn(
+                                    "rounded-[14px] p-4 sm:p-5 space-y-2.5",
+                                    isReporter
+                                      ? "bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)]"
+                                      : "bg-[var(--p-cobalt-tint)]/65 shadow-[var(--p-shadow-hairline)]",
+                                  )}
+                                >
+                                  <div className="flex items-center justify-between gap-2 text-[12px]">
+                                    <span className="inline-flex items-center gap-2 font-semibold text-[var(--p-ink)]">
+                                      <span
+                                        className={cn(
+                                          "w-6 h-6 rounded-[7px] inline-flex items-center justify-center",
+                                          isReporter
+                                            ? "bg-[var(--p-field)] text-[var(--p-ink-2)]"
+                                            : "bg-[var(--p-surface)] text-[var(--p-cobalt)] shadow-2xs",
+                                        )}
+                                      >
+                                        <Icon
+                                          name={isReporter ? "user" : "sparkles"}
+                                          size={12.5}
+                                        />
+                                      </span>
+                                      <span>
+                                        {isReporter
+                                          ? detail.task.owned
+                                            ? "我"
+                                            : "反馈者"
+                                          : "项目团队"}
+                                      </span>
+                                    </span>
+                                    <span
+                                      title={formatDateTime(msg.created_at)}
+                                      className="font-mono text-[11px] text-[var(--p-ink-3)] tabular-nums"
+                                    >
+                                      {formatDateTime(msg.created_at)}
+                                    </span>
                                   </div>
-                                  <div
-                                    className={cn(
-                                      "text-[10.5px] font-medium truncate",
-                                      current
-                                        ? "text-[var(--text-primary)]"
-                                        : done
-                                          ? "text-emerald-600 dark:text-emerald-400"
-                                          : "text-[var(--text-muted)]",
-                                    )}
-                                  >
-                                    {step.label}
+                                  <div className="text-[13.5px] leading-relaxed text-[var(--p-ink-2)]">
+                                    <MarkdownContent content={msg.body} />
                                   </div>
                                 </div>
                               );
                             })}
                           </div>
-                        </div>
-                      );
-                    })()}
-                  </div>
-
-                  {/* Action Banners + Timeline Body */}
-                  <div className="p-4 sm:p-5 space-y-4">
-                    {/* Online Acceptance Action Card */}
-                    {detail.task.can_accept && (
-                      <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] p-4 space-y-3 animate-rd-portal-in">
-                        <div className="flex flex-wrap items-start justify-between gap-2.5">
-                          <div className="space-y-0.5">
-                            <div className="flex items-center gap-1.5 text-[13px] font-semibold text-[var(--text-primary)]">
-                              <Icon
-                                name="rocket"
-                                size={14}
-                                className="text-emerald-600 dark:text-emerald-400"
-                              />
-                              <span>修复已发布上线，请确认问题是否已解决</span>
-                            </div>
-                            <p className="text-[12px] text-[var(--text-secondary)]">
-                              若问题仍存在，点击「仍有问题」并补充现象即可自动重新进入处理队列。
-                            </p>
-                          </div>
-                          {acceptMode === "idle" && (
-                            <div className="flex items-center gap-2 shrink-0">
-                              <Button
-                                type="button"
-                                variant="secondary"
-                                size="xs"
-                                icon="alert-circle"
-                                disabled={submittingAccept}
-                                onClick={() => setAcceptMode("broken")}
-                              >
-                                仍有问题
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="primary"
-                                size="xs"
-                                icon="check-circle-2"
-                                loading={submittingAccept}
-                                onClick={() => void handleAccept(true)}
-                              >
-                                确认已解决
-                              </Button>
-                            </div>
-                          )}
-                        </div>
-
-                        {acceptMode === "broken" && (
-                          <div className="space-y-2 pt-2 border-t border-emerald-500/20 animate-rd-portal-in">
-                            <textarea
-                              rows={2}
-                              maxLength={4000}
-                              value={brokenNote}
-                              onChange={(e) => setBrokenNote(e.target.value)}
-                              placeholder="请简单说明仍然存在的问题或新的现象（可选）…"
-                              className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] px-3 py-2 text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500"
-                            />
-                            <div className="flex justify-end gap-1.5">
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="xs"
-                                disabled={submittingAccept}
-                                onClick={() => setAcceptMode("idle")}
-                              >
-                                取消
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="danger"
-                                size="xs"
-                                loading={submittingAccept}
-                                onClick={() => void handleAccept(false)}
-                              >
-                                提交「仍有问题」并重开
-                              </Button>
-                            </div>
-                          </div>
                         )}
                       </div>
-                    )}
-
-                    {/* AI Deploy Gate Status + Request Card */}
-                    <PortalDeployGateCard
-                      gate={detail.gate}
-                      canRequestDeploy={detail.task.can_request_deploy}
-                      releaseWindow={config.release_window}
-                      onRequestDeploy={handleRequestDeploy}
-                      requesting={requestingDeploy}
-                    />
-
-                    {/* Public Message Timeline */}
-                    <div className="space-y-3">
-                      <div className="text-[11.5px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                        沟通与进度记录
-                      </div>
-                      {detail.messages.length === 0 ? (
-                        <p className="text-[12.5px] text-[var(--text-muted)] py-3">
-                          暂无公开留言记录。
-                        </p>
-                      ) : (
-                        <div className="space-y-2.5">
-                          {detail.messages.map((msg) => {
-                            const isReporter = msg.author === "reporter";
-                            return (
-                              <div
-                                key={msg.id}
-                                className={cn(
-                                  "rounded-xl border px-3.5 py-3 space-y-1.5",
-                                  isReporter
-                                    ? "border-[var(--border-subtle)] bg-[var(--surface-elevated)]"
-                                    : "border-indigo-500/20 bg-indigo-500/[0.04]",
-                                )}
-                              >
-                                <div className="flex items-center justify-between gap-2 text-[11.5px]">
-                                  <span className="inline-flex items-center gap-1.5 font-semibold text-[var(--text-primary)]">
-                                    <Icon
-                                      name={isReporter ? "user" : "sparkles"}
-                                      size={12}
-                                      className={
-                                        isReporter
-                                          ? "text-[var(--text-muted)]"
-                                          : "text-indigo-600 dark:text-indigo-400"
-                                      }
-                                    />
-                                    <span>
-                                      {isReporter
-                                        ? detail.task.owned
-                                          ? "我"
-                                          : "反馈者"
-                                        : "项目团队"}
-                                    </span>
-                                  </span>
-                                  <span
-                                    title={formatDateTime(msg.created_at)}
-                                    className="text-[11px] text-[var(--text-muted)] tabular-nums"
-                                  >
-                                    {formatDateTime(msg.created_at)}
-                                  </span>
-                                </div>
-                                <div className="text-[13px] leading-relaxed text-[var(--text-secondary)]">
-                                  <MarkdownContent content={msg.body} />
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Reply composer when team requested clarification */}
-                    {detail.task.can_reply && (
-                      <form
-                        onSubmit={(e) => void handleReplySubmit(e)}
-                        className="rounded-xl border border-amber-500/30 bg-amber-500/[0.05] p-3.5 space-y-2.5 animate-rd-portal-in"
-                      >
-                        <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-amber-800 dark:text-amber-300">
-                          <Icon name="message-square-plus" size={14} />
-                          <span>请补充更多信息，回复后将自动继续处理</span>
-                        </div>
-                        <textarea
-                          required
-                          rows={3}
-                          maxLength={8000}
-                          value={replyText}
-                          onChange={(e) => setReplyText(e.target.value)}
-                          placeholder="输入补充说明、复现环境或操作步骤…"
-                          className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] p-2.5 text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500"
-                        />
-                        <div className="flex justify-end">
-                          <Button
-                            type="submit"
-                            variant="primary"
-                            size="xs"
-                            icon="send"
-                            loading={sendingReply}
-                            disabled={!replyText.trim()}
-                          >
-                            发送补充说明
-                          </Button>
-                        </div>
-                      </form>
-                    )}
-                  </div>
+                    </article>
+                  ) : null}
                 </div>
-              ) : null}
-            </section>
-          </div>
-        )}
-      </main>
+              )}
+            </div>
+          )}
+        </main>
+
+        {/* Minimal Editorial Footer */}
+        <footer className="mt-auto border-t border-dashed border-[var(--p-line)] px-5 sm:px-9 py-4 flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-[var(--p-ink-3)]">
+          <span className="font-mono">{config.project_name} · Feedback Portal</span>
+          <span>由 Relaydesk 驱动</span>
+        </footer>
+      </div>
 
       {/* Lightbox Modal for uploaded image preview */}
       {lightboxSrc && (

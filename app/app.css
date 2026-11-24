@@ -625,6 +625,90 @@
   }
 }
 
+/* ── Public Feedback Portal Design System (Beautiful UI-inspired editorial tokens) ── */
+.rd-portal-shell {
+  --p-page: oklch(98.5% 0.002 260);
+  --p-canvas: oklch(96.1% 0.003 252);
+  --p-surface: oklch(100% 0 0);
+  --p-field: oklch(94.4% 0.004 258);
+  --p-hover: oklch(96.4% 0.003 258);
+  --p-ink: oklch(21.5% 0.008 260);
+  --p-ink-2: oklch(43.5% 0.008 260);
+  --p-ink-3: oklch(57.5% 0.008 260);
+  --p-line: oklch(91.5% 0.004 260);
+  --p-line-strong: oklch(84.5% 0.006 260);
+
+  --p-cobalt: #2f6fec;
+  --p-cobalt-tint: rgba(47, 111, 236, 0.09);
+  --p-forest: #1f7a5f;
+  --p-forest-tint: rgba(31, 122, 95, 0.09);
+  --p-vermilion: #e56d24;
+  --p-vermilion-tint: rgba(229, 109, 36, 0.1);
+
+  --p-shadow-hairline: 0 0 0 1px var(--p-line);
+  --p-shadow-btn: 0 0 0 1px var(--p-line-strong), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --p-shadow-card:
+    0 0 0 1px var(--p-line),
+    0 18px 42px -12px rgba(15, 23, 42, 0.055),
+    0 4px 12px -2px rgba(15, 23, 42, 0.03),
+    0 1px 2px rgba(15, 23, 42, 0.025);
+  --p-shadow-composer:
+    0 0 0 1px var(--p-line-strong),
+    0 24px 48px -16px rgba(15, 23, 42, 0.085),
+    0 8px 18px -6px rgba(15, 23, 42, 0.045),
+    0 1px 3px rgba(15, 23, 42, 0.035);
+}
+
+.dark .rd-portal-shell {
+  --p-page: oklch(17.5% 0.005 264);
+  --p-canvas: oklch(20.6% 0.005 264);
+  --p-surface: oklch(24.2% 0.006 268);
+  --p-field: oklch(27.5% 0.006 266);
+  --p-hover: oklch(28.8% 0.007 266);
+  --p-ink: oklch(96.4% 0.002 248);
+  --p-ink-2: oklch(76.5% 0.006 258);
+  --p-ink-3: oklch(60.5% 0.006 258);
+  --p-line: oklch(30.2% 0.007 260);
+  --p-line-strong: oklch(37.5% 0.008 260);
+
+  --p-cobalt: #6096ff;
+  --p-cobalt-tint: rgba(96, 150, 255, 0.14);
+  --p-forest: #3cc499;
+  --p-forest-tint: rgba(60, 196, 153, 0.14);
+  --p-vermilion: #f28c4b;
+  --p-vermilion-tint: rgba(242, 140, 75, 0.14);
+
+  --p-shadow-hairline: 0 0 0 1px var(--p-line);
+  --p-shadow-btn:
+    0 0 0 1px oklch(100% 0 0 / 0.1),
+    0 1px 2px oklch(0% 0 0 / 0.35);
+  --p-shadow-card:
+    0 0 0 1px oklch(100% 0 0 / 0.09),
+    0 14px 36px -10px oklch(0% 0 0 / 0.45),
+    0 2px 6px oklch(0% 0 0 / 0.28);
+  --p-shadow-composer:
+    0 0 0 1px oklch(100% 0 0 / 0.12),
+    0 24px 52px -12px oklch(0% 0 0 / 0.6),
+    0 4px 12px oklch(0% 0 0 / 0.35);
+}
+
+.rd-portal-dots {
+  background-image: radial-gradient(
+    circle at 1px 1px,
+    color-mix(in oklab, var(--p-ink) 11%, transparent) 1px,
+    transparent 0
+  );
+  background-size: 16px 16px;
+}
+
+.dark .rd-portal-dots {
+  background-image: radial-gradient(
+    circle at 1px 1px,
+    color-mix(in oklab, var(--p-ink) 13%, transparent) 1px,
+    transparent 0
+  );
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-in,
   .animate-fade-up,

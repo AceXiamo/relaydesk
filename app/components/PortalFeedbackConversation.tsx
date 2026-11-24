@@ -76,26 +76,33 @@ interface PortalFeedbackConversationProps {
   }) => void;
   onRefreshConfig?: () => Promise<void> | void;
   onPossibleAuthError: (err: unknown) => boolean;
+  onConversationActiveChange?: (active: boolean) => void;
 }
 
 const STARTERS = [
   {
     id: "bug",
+    num: "01",
     icon: "alert-circle",
+    tone: "vermilion",
     label: "页面或功能异常",
     hint: "描述操作步骤与异常表现",
     prompt: "我在这个页面遇到了一个异常：",
   },
   {
     id: "usage",
+    num: "02",
     icon: "book-open",
+    tone: "cobalt",
     label: "这个功能怎么用",
     hint: "不确定配置方式或操作入口",
     prompt: "请问这个功能应该怎么操作或配置：",
   },
   {
     id: "check",
+    num: "03",
     icon: "search",
+    tone: "forest",
     label: "结果与预期不符",
     hint: "附带截图一起定位原因",
     prompt: "我按常规步骤操作但结果和预期不符：",
@@ -130,6 +137,7 @@ export function PortalFeedbackConversation({
   onSwitchToManual,
   onRefreshConfig,
   onPossibleAuthError,
+  onConversationActiveChange,
 }: PortalFeedbackConversationProps) {
   const toast = useToast();
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
@@ -479,6 +487,190 @@ export function PortalFeedbackConversation({
   const hasConversation = turns.length > 0;
   const activeStreamingTurn = turns.find((t) => t.streaming);
 
+  useEffect(() => {
+    onConversationActiveChange?.(hasConversation);
+  }, [hasConversation, onConversationActiveChange]);
+
+  const composerForm = (
+    <form
+      onSubmit={(e) => void handleSend(e)}
+      className={cn("w-full", hasConversation ? "max-w-2xl mx-auto" : "")}
+    >
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files?.length) void onUploadFiles(e.target.files);
+          e.target.value = "";
+        }}
+      />
+
+      <div
+        className={cn(
+          "rounded-[14px] bg-[var(--p-surface)] transition-all duration-200",
+          dragOver
+            ? "shadow-[0_0_0_2px_var(--p-cobalt),var(--p-shadow-composer)]"
+            : "shadow-[var(--p-shadow-composer)] focus-within:shadow-[0_0_0_1.5px_var(--p-cobalt),var(--p-shadow-composer)]",
+        )}
+      >
+        {/* Staged image chips inside composer */}
+        {stagedImages.length > 0 && (
+          <div className="px-4 pt-3.5 flex flex-wrap gap-2">
+            {stagedImages.map((img) => (
+              <div
+                key={img.id}
+                className="relative group w-15 h-12 rounded-[10px] overflow-hidden shadow-[var(--p-shadow-hairline)] bg-[var(--p-canvas)] animate-rd-chip-pop"
+              >
+                <img
+                  src={img.previewUrl}
+                  alt="待发送截图"
+                  onClick={() => img.remoteUrl && onOpenLightbox(img.remoteUrl)}
+                  className={cn(
+                    "w-full h-full object-cover",
+                    img.remoteUrl && "cursor-zoom-in",
+                  )}
+                />
+                {img.uploading && (
+                  <div className="absolute inset-0 bg-zinc-950/60 flex items-center justify-center">
+                    <Icon
+                      name="loader-2"
+                      size={12}
+                      className="animate-spin text-white"
+                    />
+                  </div>
+                )}
+                <button
+                  type="button"
+                  aria-label="移除截图"
+                  onClick={() => onRemoveStagedImage(img.id)}
+                  className="absolute top-1 right-1 w-4.5 h-4.5 rounded-full bg-zinc-950/80 text-white inline-flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                >
+                  <Icon name="x" size={10} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <textarea
+          ref={inputRef}
+          data-testid="portal-agent-input"
+          rows={hasConversation ? 2 : 3}
+          maxLength={DIAGNOSE_MAX_MESSAGE_CHARS}
+          disabled={confirming}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleComposerKeyDown}
+          onPaste={(e) => {
+            if (!config.upload_enabled) return;
+            const files = Array.from(e.clipboardData?.files ?? []).filter((f) =>
+              f.type.startsWith("image/"),
+            );
+            if (files.length > 0) {
+              e.preventDefault();
+              void onUploadFiles(files);
+            }
+          }}
+          placeholder={
+            hasConversation
+              ? "继续补充细节或追问…（Enter 发送，Shift+Enter 换行）"
+              : "把你遇到的问题、操作步骤或使用疑问写在这里，支持直接粘贴截图…"
+          }
+          className={cn(
+            "w-full resize-none bg-transparent px-4 sm:px-5 pt-4 pb-2.5 leading-relaxed text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none disabled:opacity-60",
+            hasConversation ? "text-[13.5px]" : "text-[14.5px]",
+          )}
+        />
+
+        <div className="px-3.5 sm:px-4 pb-3 pt-1 flex items-center justify-between gap-2 border-t border-dashed border-[var(--p-line)]/80">
+          <div className="flex items-center gap-1.5 min-w-0">
+            {config.upload_enabled && (
+              <button
+                type="button"
+                disabled={stagedImages.length >= 6 || confirming}
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full text-[12px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors disabled:opacity-45 cursor-pointer"
+              >
+                <Icon name="image-plus" size={14} />
+                <span>附带截图</span>
+                {stagedImages.length > 0 && (
+                  <span className="font-mono text-[11px] tabular-nums text-[var(--p-ink-3)]">
+                    {stagedImages.length}/6
+                  </span>
+                )}
+              </button>
+            )}
+
+            {!hasConversation && (
+              <button
+                type="button"
+                data-testid="portal-switch-manual"
+                onClick={handleSwitchManualClick}
+                className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full text-[12px] font-medium text-[var(--p-ink-3)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors cursor-pointer"
+              >
+                <Icon name="pen-line" size={12.5} />
+                <span>跳过对话，直接提单</span>
+              </button>
+            )}
+
+            {historyTrimmedHint && (
+              <span className="hidden sm:inline text-[11px] text-[var(--p-ink-3)]">
+                已自动保留最近对话上下文
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {nearCharLimit && (
+              <span
+                className={cn(
+                  "text-[11px] font-mono tabular-nums",
+                  input.length >= DIAGNOSE_MAX_MESSAGE_CHARS
+                    ? "text-[var(--p-vermilion)] font-medium"
+                    : "text-[var(--p-ink-3)]",
+                )}
+              >
+                {input.length}/{DIAGNOSE_MAX_MESSAGE_CHARS}
+              </span>
+            )}
+            {diagnosing ? (
+              <button
+                type="button"
+                data-testid="portal-agent-stop"
+                onClick={handleStop}
+                aria-label="停止排查"
+                className="inline-flex items-center gap-1.5 h-8.5 px-3.5 rounded-full bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)] hover:opacity-90 text-[12px] font-medium transition-all active:scale-[0.97] cursor-pointer"
+              >
+                <Icon name="square" size={10.5} />
+                <span>停止</span>
+              </button>
+            ) : (
+              <button
+                type="submit"
+                data-testid="portal-agent-send"
+                disabled={!canSend}
+                aria-label="发送消息"
+                className={cn(
+                  "inline-flex items-center justify-center gap-1.5 h-8.5 rounded-full font-medium text-[12.5px] transition-all duration-150",
+                  hasConversation ? "w-8.5 px-0" : "px-4",
+                  canSend
+                    ? "bg-[var(--p-ink)] text-[var(--p-page)] hover:opacity-90 active:scale-[0.96] cursor-pointer shadow-xs"
+                    : "bg-[var(--p-field)] text-[var(--p-ink-3)] opacity-60 cursor-not-allowed",
+                )}
+              >
+                {!hasConversation && <span>开始诊断</span>}
+                <Icon name="arrow-up" size={14} />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </form>
+  );
+
   return (
     <section
       data-testid="portal-agent-conversation"
@@ -496,678 +688,558 @@ export function PortalFeedbackConversation({
           void onUploadFiles(e.dataTransfer.files);
         }
       }}
-      className={cn(
-        "relative flex flex-col min-h-[calc(100dvh-10.5rem)] rounded-2xl border bg-[var(--surface-card)]/90 shadow-[var(--rd-shadow-sm)] rd-hairline-glow transition-all duration-200 overflow-hidden",
-        dragOver
-          ? "border-indigo-500 ring-2 ring-indigo-500/20"
-          : "border-[var(--border-subtle)]",
-      )}
+      className="w-full"
     >
-      {/* Subtle Top Status Bar (only visible once chatting, keeps welcome ultra-clean) */}
-      {hasConversation && (
-        <div className="px-5 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)]/75 backdrop-blur-sm flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-[12px] text-[var(--text-secondary)] min-w-0">
-            <LivePulseDot tone="emerald" active={diagnosing} />
-            <span className="font-medium text-[var(--text-primary)] truncate">
-              {config.project_name} · 诊断对话
-            </span>
-            <span className="hidden sm:inline text-[11px] text-[var(--text-muted)]">
-              确认前不建单
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              icon="rotate-ccw"
-              onClick={handleResetConversation}
-              disabled={confirming}
-            >
-              新对话
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              size="xs"
-              icon="pen-line"
-              data-testid="portal-switch-manual"
-              onClick={handleSwitchManualClick}
-              disabled={confirming}
-            >
-              直接提单
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* Conversation Thread / Empty Welcome Canvas */}
-      <div
-        className={cn(
-          "flex-1 overflow-y-auto px-4 sm:px-7 py-6 sm:py-8 rd-scroll",
-          !hasConversation && "flex flex-col",
-        )}
-      >
-        {!hasConversation ? (
-          <div className="w-full max-w-xl mx-auto my-auto py-6 sm:py-10 flex flex-col items-center text-center space-y-6 animate-rd-portal-in">
-            <div className="relative">
-              <div
-                aria-hidden="true"
-                className="absolute -inset-3 rounded-3xl bg-indigo-500/12 blur-xl pointer-events-none"
-              />
-              <div className="relative w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500/15 via-violet-500/10 to-transparent border border-indigo-500/25 flex items-center justify-center text-indigo-600 dark:text-indigo-400 shadow-2xs">
-                <Icon name="sparkles" size={22} />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border border-emerald-500/25 bg-emerald-500/8 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
+      {!hasConversation ? (
+        <div className="space-y-8 animate-rd-portal-in">
+          {/* Bold Editorial Hero */}
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2.5 text-[12px]">
+              <span className="font-mono text-[11.5px] font-medium text-[var(--p-ink-3)] tabular-nums">
+                01
+              </span>
+              <span className="text-[var(--p-line-strong)]">/</span>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[var(--p-forest-tint)] text-[var(--p-forest)] text-[11.5px] font-medium">
                 <LivePulseDot tone="emerald" active />
                 <span>诊断助手在线 · 确认后再建工单</span>
-              </div>
-              <h2 className="text-[20px] sm:text-[22px] font-semibold tracking-tight text-[var(--text-primary)]">
-                遇到问题或疑问？先聊聊看
-              </h2>
-              <p className="text-[13px] leading-relaxed text-[var(--text-muted)] max-w-md mx-auto">
-                直接描述现象或粘贴报错截图，我会结合「{config.project_name}」的实现帮你判断是使用问题还是产品故障。
-              </p>
+              </span>
+              {config.release_window && (
+                <span className="hidden sm:inline-flex items-center gap-1 text-[11.5px] text-[var(--p-ink-3)]">
+                  <Icon name="calendar-clock" size={12} />
+                  <span>发布窗口 {config.release_window}</span>
+                </span>
+              )}
             </div>
 
-            <div className="w-full grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 text-left">
-              {STARTERS.map((s, idx) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  style={{ animationDelay: `${idx * 45}ms` }}
-                  onClick={() => {
-                    setInput(s.prompt);
-                    requestAnimationFrame(() => inputRef.current?.focus());
-                  }}
-                  className="animate-rd-chip-pop group rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/80 hover:bg-[var(--surface-hover)] hover:border-indigo-500/40 p-3.5 transition-all duration-150 cursor-pointer space-y-1.5"
-                >
-                  <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-[var(--text-primary)]">
-                    <Icon
-                      name={s.icon}
-                      size={13.5}
-                      className="text-indigo-500 group-hover:scale-105 transition-transform shrink-0"
-                    />
-                    <span>{s.label}</span>
-                  </div>
-                  <p className="text-[11.5px] leading-snug text-[var(--text-muted)]">
-                    {s.hint}
-                  </p>
-                </button>
-              ))}
+            <h2 className="text-[30px] sm:text-[40px] font-semibold tracking-[-0.035em] leading-[1.12] text-[var(--p-ink)] text-balance">
+              有什么想告诉 {config.project_name} 的？
+            </h2>
+
+            <p className="text-[14.5px] sm:text-[15.5px] leading-relaxed text-[var(--p-ink-2)] max-w-[560px] text-pretty">
+              直接描述你遇到的问题、想法或粘贴报错截图。助手会结合项目实现先帮你定位原因，确认属于产品故障后再一键生成工单。
+            </p>
+          </div>
+
+          {/* Recessed Dotted Specimen Well holding the tactile composer */}
+          <div className="rd-portal-dots rounded-[20px] bg-[var(--p-canvas)] p-2.5 sm:p-4 shadow-[var(--p-shadow-hairline)]">
+            {composerForm}
+          </div>
+
+          {/* 3 Crafted Numbered Starter Primitives */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-[11.5px] text-[var(--p-ink-3)]">
+              <span className="font-mono uppercase tracking-[0.06em]">
+                快速开始 · 选一个常见场景
+              </span>
+              <span className="hidden sm:inline">支持直接粘贴截图</span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {STARTERS.map((s, idx) => {
+                const badgeStyle =
+                  s.tone === "vermilion"
+                    ? "bg-[var(--p-vermilion-tint)] text-[var(--p-vermilion)]"
+                    : s.tone === "cobalt"
+                      ? "bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)]"
+                      : "bg-[var(--p-forest-tint)] text-[var(--p-forest)]";
+
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    style={{ animationDelay: `${idx * 45}ms` }}
+                    onClick={() => {
+                      setInput(s.prompt);
+                      requestAnimationFrame(() => inputRef.current?.focus());
+                    }}
+                    className="animate-rd-chip-pop group text-left rounded-[12px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] hover:shadow-[var(--p-shadow-card)] hover:-translate-y-0.5 p-4 transition-all duration-150 cursor-pointer space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={cn(
+                          "w-7 h-7 rounded-[8px] inline-flex items-center justify-center shrink-0 transition-transform duration-150 group-hover:scale-105",
+                          badgeStyle,
+                        )}
+                      >
+                        <Icon name={s.icon} size={14} />
+                      </span>
+                      <span className="font-mono text-[11px] text-[var(--p-ink-3)] tabular-nums">
+                        {s.num}
+                      </span>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-[13.5px] font-semibold tracking-[-0.01em] text-[var(--p-ink)]">
+                        {s.label}
+                      </div>
+                      <p className="text-[12px] leading-snug text-[var(--p-ink-3)]">
+                        {s.hint}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
-        ) : (
-          <div className="max-w-2xl mx-auto space-y-6 pb-4">
-            {turns.map((turn) => {
-              if (turn.role === "user") {
+        </div>
+      ) : (
+        <div
+          className={cn(
+            "relative flex flex-col min-h-[calc(100dvh-14rem)] rounded-[18px] bg-[var(--p-surface)] shadow-[var(--p-shadow-card)] transition-all duration-200 overflow-hidden animate-rd-portal-in",
+            dragOver && "shadow-[0_0_0_2px_var(--p-cobalt),var(--p-shadow-card)]",
+          )}
+        >
+          {/* Compact Editorial Conversation Top Bar */}
+          <div className="px-5 py-3 border-b border-dashed border-[var(--p-line)] bg-[var(--p-page)]/70 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-[12.5px] text-[var(--p-ink-2)] min-w-0">
+              <LivePulseDot tone="emerald" active={diagnosing} />
+              <span className="font-semibold text-[var(--p-ink)] truncate">
+                {config.project_name} · 诊断对话
+              </span>
+              <span className="hidden sm:inline text-[11.5px] text-[var(--p-ink-3)]">
+                确认前不建单
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleResetConversation}
+                disabled={confirming}
+                className="inline-flex items-center gap-1 h-7.5 px-2.5 rounded-full text-[12px] font-medium text-[var(--p-ink-2)] hover:text-[var(--p-ink)] hover:bg-[var(--p-hover)] transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                <Icon name="rotate-ccw" size={12.5} />
+                <span>新对话</span>
+              </button>
+              <button
+                type="button"
+                data-testid="portal-switch-manual"
+                onClick={handleSwitchManualClick}
+                disabled={confirming}
+                className="inline-flex items-center gap-1 h-7.5 px-3 rounded-full bg-[var(--p-field)] text-[12px] font-medium text-[var(--p-ink)] shadow-[var(--p-shadow-btn)] hover:bg-[var(--p-hover)] transition-all active:scale-[0.97] disabled:opacity-50 cursor-pointer"
+              >
+                <Icon name="pen-line" size={12.5} />
+                <span>直接提单</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Conversation Thread */}
+          <div className="flex-1 overflow-y-auto px-4 sm:px-7 py-6 sm:py-7 rd-scroll">
+            <div className="max-w-2xl mx-auto space-y-6 pb-4">
+              {turns.map((turn) => {
+                if (turn.role === "user") {
+                  return (
+                    <div
+                      key={turn.id}
+                      data-testid="portal-turn-user"
+                      className="flex flex-col items-end gap-2 animate-rd-msg-in"
+                    >
+                      {turn.images && turn.images.length > 0 && (
+                        <div className="flex flex-wrap justify-end gap-2 max-w-[85%]">
+                          {turn.images.map((url) => (
+                            <button
+                              key={url}
+                              type="button"
+                              onClick={() => onOpenLightbox(url)}
+                              className="w-24 h-18 rounded-[10px] overflow-hidden shadow-[var(--p-shadow-hairline)] bg-[var(--p-canvas)] hover:opacity-90 transition-opacity cursor-zoom-in"
+                            >
+                              <img
+                                src={url}
+                                alt="附带截图"
+                                className="w-full h-full object-cover"
+                              />
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="max-w-[85%] rounded-[16px] rounded-br-[5px] bg-[var(--p-ink)] text-[var(--p-page)] px-4 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words shadow-xs">
+                        {turn.text}
+                      </div>
+                    </div>
+                  );
+                }
+
+                const isActiveDraftTurn =
+                  draft && !draft.dismissed && draft.turnId === turn.id;
+
                 return (
                   <div
                     key={turn.id}
-                    data-testid="portal-turn-user"
-                    className="flex flex-col items-end gap-2 animate-rd-msg-in"
+                    data-testid="portal-turn-assistant"
+                    data-outcome={turn.outcome || ""}
+                    className="space-y-3 animate-rd-msg-in"
                   >
-                    {turn.images && turn.images.length > 0 && (
-                      <div className="flex flex-wrap justify-end gap-2 max-w-[85%]">
-                        {turn.images.map((url) => (
-                          <button
-                            key={url}
-                            type="button"
-                            onClick={() => onOpenLightbox(url)}
-                            className="w-24 h-18 rounded-xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-elevated)] hover:border-indigo-500/60 transition-colors cursor-zoom-in shadow-2xs"
-                          >
-                            <img
-                              src={url}
-                              alt="附带截图"
-                              className="w-full h-full object-cover"
+                    <div className="flex items-start gap-3">
+                      <div className="w-7 h-7 rounded-[8px] bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] flex items-center justify-center shrink-0 mt-0.5">
+                        <Icon name="sparkles" size={13.5} />
+                      </div>
+                      <div className="flex-1 min-w-0 space-y-2.5">
+                        <div className="text-[14px] leading-relaxed text-[var(--p-ink)]">
+                          <MarkdownContent content={turn.text} />
+                          {turn.streaming && (
+                            <span
+                              aria-hidden="true"
+                              className="inline-block w-1.5 h-4 ml-0.5 align-middle rounded-xs bg-[var(--p-cobalt)] animate-[rd-caret-blink_1s_ease-in-out_infinite]"
                             />
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    <div className="max-w-[85%] rounded-2xl rounded-br-md bg-zinc-900 text-zinc-50 dark:bg-zinc-100 dark:text-zinc-950 px-4 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words shadow-2xs">
-                      {turn.text}
-                    </div>
-                  </div>
-                );
-              }
-
-              const isActiveDraftTurn =
-                draft && !draft.dismissed && draft.turnId === turn.id;
-
-              return (
-                <div
-                  key={turn.id}
-                  data-testid="portal-turn-assistant"
-                  data-outcome={turn.outcome || ""}
-                  className="space-y-3 animate-rd-msg-in"
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="w-7 h-7 rounded-lg bg-indigo-500/12 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0 mt-0.5">
-                      <Icon name="sparkles" size={13} />
-                    </div>
-                    <div className="flex-1 min-w-0 space-y-2.5">
-                      <div className="text-[13.5px] leading-relaxed text-[var(--text-primary)]">
-                        <MarkdownContent content={turn.text} />
-                        {turn.streaming && (
-                          <span
-                            aria-hidden="true"
-                            className="inline-block w-1.5 h-4 ml-0.5 align-middle rounded-xs bg-indigo-500/80 animate-[rd-caret-blink_1s_ease-in-out_infinite]"
-                          />
-                        )}
-                      </div>
-
-                      {/* Usage resolved subtle strip */}
-                      {turn.outcome === "usage" && !turn.streaming && (
-                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.06] px-3.5 py-2 text-[12px]">
-                          <span className="inline-flex items-center gap-1.5 font-medium text-emerald-700 dark:text-emerald-300">
-                            <Icon name="check-circle-2" size={13.5} />
-                            <span>已识别为使用/配置问题 · 无需建单</span>
-                          </span>
-                          <button
-                            type="button"
-                            onClick={handleResetConversation}
-                            className="text-[11.5px] font-medium text-emerald-700 dark:text-emerald-300 hover:underline cursor-pointer"
-                          >
-                            已解决，开启新对话
-                          </button>
+                          )}
                         </div>
-                      )}
 
-                      {/* Compact Tool-Approval Suspected Bug Draft Card */}
-                      {isActiveDraftTurn && (
-                        <div
-                          data-testid="portal-bug-draft-card"
-                          className="rounded-2xl border border-amber-500/30 bg-[var(--surface-elevated)]/95 shadow-[var(--rd-shadow-sm)] overflow-hidden animate-rd-draft-reveal scroll-mb-28"
-                        >
-                          {/* Header */}
-                          <div className="px-4 py-3 border-b border-amber-500/15 bg-amber-500/[0.05] flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className="w-6 h-6 rounded-lg bg-amber-500/15 text-amber-700 dark:text-amber-300 inline-flex items-center justify-center shrink-0">
-                                <Icon name="file-check-2" size={13.5} />
-                              </span>
-                              <span className="text-[12.5px] font-semibold text-[var(--text-primary)] truncate">
-                                疑似产品故障 · 待确认提交工单
+                        {/* Usage resolved subtle strip */}
+                        {turn.outcome === "usage" && !turn.streaming && (
+                          <div className="flex flex-wrap items-center justify-between gap-2 rounded-[12px] bg-[var(--p-forest-tint)] px-3.5 py-2.5 text-[12px]">
+                            <span className="inline-flex items-center gap-1.5 font-medium text-[var(--p-forest)]">
+                              <Icon name="check-circle-2" size={14} />
+                              <span>已识别为使用/配置问题 · 无需建单</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleResetConversation}
+                              className="text-[12px] font-medium text-[var(--p-forest)] hover:underline cursor-pointer"
+                            >
+                              已解决，开启新对话
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Compact Tool-Approval Suspected Bug Draft Card */}
+                        {isActiveDraftTurn && (
+                          <div
+                            data-testid="portal-bug-draft-card"
+                            className="rounded-[14px] bg-[var(--p-page)] shadow-[0_0_0_1px_color-mix(in_oklab,var(--p-vermilion)_35%,transparent),var(--p-shadow-card)] overflow-hidden animate-rd-draft-reveal scroll-mb-28"
+                          >
+                            {/* Header */}
+                            <div className="px-4 py-3 border-b border-dashed border-[var(--p-line)] bg-[var(--p-vermilion-tint)] flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="w-6 h-6 rounded-[7px] bg-[var(--p-surface)] text-[var(--p-vermilion)] shadow-2xs inline-flex items-center justify-center shrink-0">
+                                  <Icon name="file-check-2" size={13.5} />
+                                </span>
+                                <span className="text-[12.5px] font-semibold text-[var(--p-ink)] truncate">
+                                  疑似产品故障 · 待确认提交工单
+                                </span>
+                              </div>
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10.5px] font-medium bg-[var(--p-surface)] text-[var(--p-vermilion)] shadow-2xs">
+                                尚未建单
                               </span>
                             </div>
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10.5px] font-medium border border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-300">
-                              尚未建单
-                            </span>
-                          </div>
 
-                          {/* Compact Preview vs Expanded Editor */}
-                          <div className="p-4 space-y-3">
-                            {!draft.expanded ? (
-                              <div className="space-y-2">
-                                <p
-                                  data-testid="portal-draft-title-preview"
-                                  className="text-[13.5px] font-semibold text-[var(--text-primary)]"
-                                >
-                                  {draft.title}
-                                </p>
-                                <p className="text-[12.5px] leading-relaxed text-[var(--text-secondary)] line-clamp-3 whitespace-pre-wrap">
-                                  {draft.body}
-                                </p>
-                                {draft.images.length > 0 && (
-                                  <div className="flex items-center gap-1.5 pt-1">
-                                    {draft.images.map((url) => (
-                                      <button
-                                        key={url}
-                                        type="button"
-                                        onClick={() => onOpenLightbox(url)}
-                                        className="w-11 h-9 rounded-lg overflow-hidden border border-[var(--border-subtle)] cursor-zoom-in"
-                                      >
-                                        <img
-                                          src={url}
-                                          alt="工单附图"
-                                          className="w-full h-full object-cover"
-                                        />
-                                      </button>
-                                    ))}
-                                    <span className="text-[11px] text-[var(--text-muted)] ml-1">
-                                      将随工单附带 {draft.images.length} 张截图
-                                    </span>
-                                  </div>
-                                )}
-                              </div>
-                            ) : (
-                              <div className="space-y-3 animate-rd-msg-in">
-                                <label className="block space-y-1">
-                                  <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                                    工单标题
-                                  </span>
-                                  <input
-                                    type="text"
-                                    data-testid="portal-draft-title"
-                                    maxLength={180}
-                                    required
-                                    value={draft.title}
-                                    onChange={(e) =>
-                                      setDraft((prev) =>
-                                        prev
-                                          ? { ...prev, title: e.target.value }
-                                          : prev,
-                                      )
-                                    }
-                                    placeholder="简明概括故障现象"
-                                    className="w-full h-9 px-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[13px] font-medium text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
-                                  />
-                                </label>
-
-                                <label className="block space-y-1">
-                                  <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                                    故障详情与复现步骤
-                                  </span>
-                                  <textarea
-                                    data-testid="portal-draft-body"
-                                    rows={5}
-                                    maxLength={20000}
-                                    required
-                                    value={draft.body}
-                                    onChange={(e) =>
-                                      setDraft((prev) =>
-                                        prev
-                                          ? { ...prev, body: e.target.value }
-                                          : prev,
-                                      )
-                                    }
-                                    className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-3 text-[12.5px] leading-relaxed text-[var(--text-primary)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
-                                  />
-                                </label>
-
-                                {(draft.images.length > 0 || config.upload_enabled) && (
-                                  <div className="space-y-1.5">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                                        附图（{draft.images.length} / 6）
-                                      </span>
-                                      {config.upload_enabled && draft.images.length < 6 && (
+                            {/* Compact Preview vs Expanded Editor */}
+                            <div className="p-4 space-y-3">
+                              {!draft.expanded ? (
+                                <div className="space-y-2">
+                                  <p
+                                    data-testid="portal-draft-title-preview"
+                                    className="text-[14px] font-semibold text-[var(--p-ink)]"
+                                  >
+                                    {draft.title}
+                                  </p>
+                                  <p className="text-[12.5px] leading-relaxed text-[var(--p-ink-2)] line-clamp-3 whitespace-pre-wrap">
+                                    {draft.body}
+                                  </p>
+                                  {draft.images.length > 0 && (
+                                    <div className="flex items-center gap-1.5 pt-1">
+                                      {draft.images.map((url) => (
                                         <button
+                                          key={url}
                                           type="button"
-                                          onClick={() => fileInputRef.current?.click()}
-                                          className="inline-flex items-center gap-1 text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                                          onClick={() => onOpenLightbox(url)}
+                                          className="w-11 h-9 rounded-[8px] overflow-hidden shadow-[var(--p-shadow-hairline)] cursor-zoom-in"
                                         >
-                                          <Icon name="image-plus" size={12} />
-                                          <span>补充截图</span>
+                                          <img
+                                            src={url}
+                                            alt="工单附图"
+                                            className="w-full h-full object-cover"
+                                          />
                                         </button>
-                                      )}
+                                      ))}
+                                      <span className="text-[11px] text-[var(--p-ink-3)] ml-1">
+                                        将随工单附带 {draft.images.length} 张截图
+                                      </span>
                                     </div>
-                                    {draft.images.length > 0 && (
-                                      <div className="flex flex-wrap gap-2">
-                                        {draft.images.map((url) => (
-                                          <div
-                                            key={url}
-                                            className="relative group w-14 h-12 rounded-lg overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-card)]"
-                                          >
-                                            <img
-                                              src={url}
-                                              alt="工单附图"
-                                              onClick={() => onOpenLightbox(url)}
-                                              className="w-full h-full object-cover cursor-zoom-in"
-                                            />
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="space-y-3 animate-rd-msg-in">
+                                  <label className="block space-y-1">
+                                    <span className="text-[11.5px] font-medium text-[var(--p-ink-2)]">
+                                      工单标题
+                                    </span>
+                                    <input
+                                      type="text"
+                                      data-testid="portal-draft-title"
+                                      maxLength={180}
+                                      required
+                                      value={draft.title}
+                                      onChange={(e) =>
+                                        setDraft((prev) =>
+                                          prev
+                                            ? { ...prev, title: e.target.value }
+                                            : prev,
+                                        )
+                                      }
+                                      placeholder="简明概括故障现象"
+                                      className="w-full h-9 px-3 rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] text-[13px] font-medium text-[var(--p-ink)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)]"
+                                    />
+                                  </label>
+
+                                  <label className="block space-y-1">
+                                    <span className="text-[11.5px] font-medium text-[var(--p-ink-2)]">
+                                      故障详情与复现步骤
+                                    </span>
+                                    <textarea
+                                      data-testid="portal-draft-body"
+                                      rows={5}
+                                      maxLength={20000}
+                                      required
+                                      value={draft.body}
+                                      onChange={(e) =>
+                                        setDraft((prev) =>
+                                          prev
+                                            ? { ...prev, body: e.target.value }
+                                            : prev,
+                                        )
+                                      }
+                                      className="w-full p-3 rounded-[10px] bg-[var(--p-surface)] shadow-[var(--p-shadow-hairline)] text-[12.5px] leading-relaxed text-[var(--p-ink)] focus:outline-none focus:shadow-[0_0_0_1.5px_var(--p-cobalt)]"
+                                    />
+                                  </label>
+
+                                  {(draft.images.length > 0 ||
+                                    config.upload_enabled) && (
+                                    <div className="space-y-1.5">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <span className="text-[11.5px] font-medium text-[var(--p-ink-2)]">
+                                          附图（{draft.images.length} / 6）
+                                        </span>
+                                        {config.upload_enabled &&
+                                          draft.images.length < 6 && (
                                             <button
                                               type="button"
-                                              aria-label="移除该截图"
                                               onClick={() =>
-                                                setDraft((prev) =>
-                                                  prev
-                                                    ? {
-                                                        ...prev,
-                                                        images: prev.images.filter(
-                                                          (u) => u !== url,
-                                                        ),
-                                                      }
-                                                    : prev,
-                                                )
+                                                fileInputRef.current?.click()
                                               }
-                                              className="absolute top-0.5 right-0.5 w-4.5 h-4.5 rounded-full bg-zinc-950/75 text-white inline-flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                                              className="inline-flex items-center gap-1 text-[11.5px] font-medium text-[var(--p-cobalt)] hover:underline cursor-pointer"
                                             >
-                                              <Icon name="x" size={10} />
+                                              <Icon name="image-plus" size={12} />
+                                              <span>补充截图</span>
                                             </button>
-                                          </div>
-                                        ))}
+                                          )}
                                       </div>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            )}
+                                      {draft.images.length > 0 && (
+                                        <div className="flex flex-wrap gap-2">
+                                          {draft.images.map((url) => (
+                                            <div
+                                              key={url}
+                                              className="relative group w-14 h-12 rounded-[8px] overflow-hidden shadow-[var(--p-shadow-hairline)] bg-[var(--p-surface)]"
+                                            >
+                                              <img
+                                                src={url}
+                                                alt="工单附图"
+                                                onClick={() => onOpenLightbox(url)}
+                                                className="w-full h-full object-cover cursor-zoom-in"
+                                              />
+                                              <button
+                                                type="button"
+                                                aria-label="移除该截图"
+                                                onClick={() =>
+                                                  setDraft((prev) =>
+                                                    prev
+                                                      ? {
+                                                          ...prev,
+                                                          images:
+                                                            prev.images.filter(
+                                                              (u) => u !== url,
+                                                            ),
+                                                        }
+                                                      : prev,
+                                                  )
+                                                }
+                                                className="absolute top-0.5 right-0.5 w-4.5 h-4.5 rounded-full bg-zinc-950/75 text-white inline-flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                                              >
+                                                <Icon name="x" size={10} />
+                                              </button>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
 
-                            {config.can_request_deploy && (
-                              <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/[0.04] px-3 py-2.5">
-                                <Switch
-                                  checked={draft.releasePreference === "request_immediate"}
-                                  onChange={(checked) =>
-                                    setDraft((prev) =>
-                                      prev
-                                        ? {
-                                            ...prev,
-                                            releasePreference: checked
-                                              ? "request_immediate"
-                                              : "default",
-                                          }
-                                        : prev,
-                                    )
-                                  }
-                                  label="修复完成后由 AI 评估是否立即发布"
-                                  description={
-                                    config.release_window
-                                      ? `当前默认发布窗口：${config.release_window}`
-                                      : "修复待发时自动进入只读发布门禁评估"
-                                  }
-                                />
-                              </div>
-                            )}
+                              {config.can_request_deploy && (
+                                <div className="rounded-[10px] bg-[var(--p-cobalt-tint)] px-3 py-2.5">
+                                  <Switch
+                                    checked={
+                                      draft.releasePreference ===
+                                      "request_immediate"
+                                    }
+                                    onChange={(checked) =>
+                                      setDraft((prev) =>
+                                        prev
+                                          ? {
+                                              ...prev,
+                                              releasePreference: checked
+                                                ? "request_immediate"
+                                                : "default",
+                                            }
+                                          : prev,
+                                      )
+                                    }
+                                    label="修复完成后由 AI 评估是否立即发布"
+                                    description={
+                                      config.release_window
+                                        ? `当前默认发布窗口：${config.release_window}`
+                                        : "修复待发时自动进入只读发布门禁评估"
+                                    }
+                                  />
+                                </div>
+                              )}
 
-                            {/* Approval Action Row */}
-                            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--border-subtle)]">
-                              <div className="flex items-center gap-1.5">
+                              {/* Approval Action Row */}
+                              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-dashed border-[var(--p-line)]">
+                                <div className="flex items-center gap-1.5">
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="xs"
+                                    icon={
+                                      draft.expanded ? "chevron-up" : "pen-line"
+                                    }
+                                    data-testid="portal-draft-toggle-edit"
+                                    disabled={confirming}
+                                    onClick={() =>
+                                      setDraft((prev) =>
+                                        prev
+                                          ? { ...prev, expanded: !prev.expanded }
+                                          : prev,
+                                      )
+                                    }
+                                  >
+                                    {draft.expanded ? "收起编辑" : "编辑草稿"}
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="xs"
+                                    disabled={confirming}
+                                    onClick={() => {
+                                      setDraft((prev) =>
+                                        prev ? { ...prev, dismissed: true } : prev,
+                                      );
+                                      requestAnimationFrame(() =>
+                                        inputRef.current?.focus(),
+                                      );
+                                    }}
+                                  >
+                                    继续补充
+                                  </Button>
+                                </div>
                                 <Button
                                   type="button"
-                                  variant="ghost"
-                                  size="xs"
-                                  icon={draft.expanded ? "chevron-up" : "pen-line"}
-                                  data-testid="portal-draft-toggle-edit"
-                                  disabled={confirming}
-                                  onClick={() =>
-                                    setDraft((prev) =>
-                                      prev
-                                        ? { ...prev, expanded: !prev.expanded }
-                                        : prev,
-                                    )
+                                  variant="primary"
+                                  size="sm"
+                                  icon="send"
+                                  data-testid="portal-draft-confirm"
+                                  loading={confirming}
+                                  disabled={
+                                    !draft.title.trim() ||
+                                    !draft.body.trim() ||
+                                    diagnosing ||
+                                    uploadingCount > 0
                                   }
+                                  onClick={() => void handleConfirmDraft()}
                                 >
-                                  {draft.expanded ? "收起编辑" : "编辑草稿"}
-                                </Button>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="xs"
-                                  disabled={confirming}
-                                  onClick={() => {
-                                    setDraft((prev) =>
-                                      prev ? { ...prev, dismissed: true } : prev,
-                                    );
-                                    requestAnimationFrame(() =>
-                                      inputRef.current?.focus(),
-                                    );
-                                  }}
-                                >
-                                  继续补充
+                                  确认提交工单
                                 </Button>
                               </div>
-                              <Button
-                                type="button"
-                                variant="primary"
-                                size="sm"
-                                icon="send"
-                                data-testid="portal-draft-confirm"
-                                loading={confirming}
-                                disabled={
-                                  !draft.title.trim() ||
-                                  !draft.body.trim() ||
-                                  diagnosing ||
-                                  uploadingCount > 0
-                                }
-                                onClick={() => void handleConfirmDraft()}
-                              >
-                                确认提交工单
-                              </Button>
                             </div>
                           </div>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
-
-            {/* Live Honest Status Indicator (while waiting before first text delta) */}
-            {diagnosing && !activeStreamingTurn && (
-              <div
-                data-testid="portal-diagnosing-indicator"
-                className="flex items-center gap-3 animate-rd-msg-in"
-              >
-                <div className="w-7 h-7 rounded-lg bg-indigo-500/12 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
-                  <Icon name="sparkles" size={13} className="animate-pulse" />
-                </div>
-                <div className="inline-flex items-center gap-2.5 px-3.5 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]">
-                  <span className="rd-shimmer-text text-[12.5px] font-medium">
-                    {statusLabel}
-                  </span>
-                  <span className="text-[11px] font-mono tabular-nums text-[var(--text-muted)]">
-                    {elapsedSeconds}s
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Error / Offline Recovery Banner */}
-            {diagnoseError && !diagnosing && (
-              <div
-                role="alert"
-                data-testid="portal-diagnose-error"
-                className="rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-4 py-3 flex flex-wrap items-center justify-between gap-2.5 animate-rd-msg-in"
-              >
-                <div className="flex items-center gap-2 text-[12.5px] text-amber-900 dark:text-amber-200 min-w-0">
-                  <Icon name="alert-triangle" size={14} className="shrink-0" />
-                  <span>{diagnoseError.message}</span>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {diagnoseError.offline && onRefreshConfig ? (
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="xs"
-                      icon="refresh-cw"
-                      onClick={() => void onRefreshConfig()}
-                    >
-                      重新检测状态
-                    </Button>
-                  ) : (
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="xs"
-                      icon="refresh-cw"
-                      data-testid="portal-diagnose-retry"
-                      onClick={handleRetryLast}
-                    >
-                      重试
-                    </Button>
-                  )}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    icon="pen-line"
-                    onClick={handleSwitchManualClick}
-                  >
-                    改为直接提单
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            <div ref={threadEndRef} />
-          </div>
-        )}
-      </div>
-
-      {/* Elevated Floating Prompt Composer (DesignBookmark Prompt Box) */}
-      <div className="px-4 sm:px-7 pb-5 pt-2 bg-gradient-to-t from-[var(--surface-card)] via-[var(--surface-card)]/95 to-transparent">
-        <form
-          onSubmit={(e) => void handleSend(e)}
-          className="max-w-2xl mx-auto space-y-2"
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              if (e.target.files?.length) void onUploadFiles(e.target.files);
-              e.target.value = "";
-            }}
-          />
-
-          <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] focus-within:border-indigo-500/70 focus-within:ring-2 focus-within:ring-indigo-500/15 shadow-[var(--rd-shadow-sm)] transition-all">
-            {/* Staged image chips inside dock */}
-            {stagedImages.length > 0 && (
-              <div className="px-3.5 pt-3 flex flex-wrap gap-2">
-                {stagedImages.map((img) => (
-                  <div
-                    key={img.id}
-                    className="relative group w-14 h-12 rounded-xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-card)] animate-rd-chip-pop"
-                  >
-                    <img
-                      src={img.previewUrl}
-                      alt="待发送截图"
-                      onClick={() =>
-                        img.remoteUrl && onOpenLightbox(img.remoteUrl)
-                      }
-                      className={cn(
-                        "w-full h-full object-cover",
-                        img.remoteUrl && "cursor-zoom-in",
-                      )}
-                    />
-                    {img.uploading && (
-                      <div className="absolute inset-0 bg-zinc-950/60 flex items-center justify-center">
-                        <Icon
-                          name="loader-2"
-                          size={12}
-                          className="animate-spin text-white"
-                        />
-                      </div>
-                    )}
-                    <button
-                      type="button"
-                      aria-label="移除截图"
-                      onClick={() => onRemoveStagedImage(img.id)}
-                      className="absolute top-0.5 right-0.5 w-4.5 h-4.5 rounded-full bg-zinc-950/75 text-white inline-flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
-                    >
-                      <Icon name="x" size={10} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <textarea
-              ref={inputRef}
-              data-testid="portal-agent-input"
-              rows={hasConversation ? 2 : 3}
-              maxLength={DIAGNOSE_MAX_MESSAGE_CHARS}
-              disabled={confirming}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              onPaste={(e) => {
-                if (!config.upload_enabled) return;
-                const files = Array.from(e.clipboardData?.files ?? []).filter(
-                  (f) => f.type.startsWith("image/"),
                 );
-                if (files.length > 0) {
-                  e.preventDefault();
-                  void onUploadFiles(files);
-                }
-              }}
-              placeholder={
-                hasConversation
-                  ? "继续补充细节或追问…（Enter 发送，Shift+Enter 换行）"
-                  : "描述你遇到的问题、操作步骤或使用疑问，支持直接粘贴截图…"
-              }
-              className="w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-[13.5px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none disabled:opacity-60"
-            />
+              })}
 
-            <div className="px-3 pb-2.5 pt-1 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 min-w-0">
-                {config.upload_enabled && (
-                  <button
-                    type="button"
-                    disabled={stagedImages.length >= 6 || confirming}
-                    onClick={() => fileInputRef.current?.click()}
-                    className="inline-flex items-center gap-1.5 h-7.5 px-2.5 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors disabled:opacity-45 cursor-pointer"
-                  >
-                    <Icon name="image-plus" size={14} />
-                    <span>截图</span>
-                    {stagedImages.length > 0 && (
-                      <span className="font-mono text-[11px] tabular-nums text-[var(--text-muted)]">
-                        {stagedImages.length}/6
-                      </span>
+              {/* Live Honest Status Indicator (while waiting before first text delta) */}
+              {diagnosing && !activeStreamingTurn && (
+                <div
+                  data-testid="portal-diagnosing-indicator"
+                  className="flex items-center gap-3 animate-rd-msg-in"
+                >
+                  <div className="w-7 h-7 rounded-[8px] bg-[var(--p-cobalt-tint)] text-[var(--p-cobalt)] flex items-center justify-center shrink-0">
+                    <Icon name="sparkles" size={13} className="animate-pulse" />
+                  </div>
+                  <div className="inline-flex items-center gap-2.5 px-3.5 py-2 rounded-full bg-[var(--p-canvas)] shadow-[var(--p-shadow-hairline)]">
+                    <span className="rd-shimmer-text text-[12.5px] font-medium">
+                      {statusLabel}
+                    </span>
+                    <span className="text-[11px] font-mono tabular-nums text-[var(--p-ink-3)]">
+                      {elapsedSeconds}s
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Error / Offline Recovery Banner */}
+              {diagnoseError && !diagnosing && (
+                <div
+                  role="alert"
+                  data-testid="portal-diagnose-error"
+                  className="rounded-[12px] bg-[var(--p-vermilion-tint)] px-4 py-3 flex flex-wrap items-center justify-between gap-2.5 animate-rd-msg-in"
+                >
+                  <div className="flex items-center gap-2 text-[12.5px] text-[var(--p-ink)] min-w-0">
+                    <Icon
+                      name="alert-triangle"
+                      size={14}
+                      className="text-[var(--p-vermilion)] shrink-0"
+                    />
+                    <span>{diagnoseError.message}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {diagnoseError.offline && onRefreshConfig ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="xs"
+                        icon="refresh-cw"
+                        onClick={() => void onRefreshConfig()}
+                      >
+                        重新检测状态
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="xs"
+                        icon="refresh-cw"
+                        data-testid="portal-diagnose-retry"
+                        onClick={handleRetryLast}
+                      >
+                        重试
+                      </Button>
                     )}
-                  </button>
-                )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      icon="pen-line"
+                      onClick={handleSwitchManualClick}
+                    >
+                      改为直接提单
+                    </Button>
+                  </div>
+                </div>
+              )}
 
-                {!hasConversation && (
-                  <button
-                    type="button"
-                    data-testid="portal-switch-manual"
-                    onClick={handleSwitchManualClick}
-                    className="inline-flex items-center gap-1 h-7.5 px-2.5 rounded-lg text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
-                  >
-                    <Icon name="pen-line" size={12.5} />
-                    <span>跳过对话，直接提单</span>
-                  </button>
-                )}
-
-                {historyTrimmedHint && (
-                  <span className="hidden sm:inline text-[11px] text-[var(--text-muted)]">
-                    已自动保留最近对话上下文
-                  </span>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2 shrink-0">
-                {nearCharLimit && (
-                  <span
-                    className={cn(
-                      "text-[11px] font-mono tabular-nums",
-                      input.length >= DIAGNOSE_MAX_MESSAGE_CHARS
-                        ? "text-amber-600 dark:text-amber-400 font-medium"
-                        : "text-[var(--text-muted)]",
-                    )}
-                  >
-                    {input.length}/{DIAGNOSE_MAX_MESSAGE_CHARS}
-                  </span>
-                )}
-                {diagnosing ? (
-                  <button
-                    type="button"
-                    data-testid="portal-agent-stop"
-                    onClick={handleStop}
-                    aria-label="停止排查"
-                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-xl bg-rose-500/12 border border-rose-500/30 text-rose-700 dark:text-rose-300 hover:bg-rose-500/18 text-[12px] font-medium transition-colors cursor-pointer"
-                  >
-                    <Icon name="square" size={11} />
-                    <span>停止</span>
-                  </button>
-                ) : (
-                  <button
-                    type="submit"
-                    data-testid="portal-agent-send"
-                    disabled={!canSend}
-                    aria-label="发送消息"
-                    className={cn(
-                      "inline-flex items-center justify-center w-8 h-8 rounded-xl transition-all duration-150",
-                      canSend
-                        ? "bg-indigo-600 hover:bg-indigo-500 text-white shadow-xs cursor-pointer active:scale-95"
-                        : "bg-[var(--surface-subtle)] text-[var(--text-muted)] opacity-55 cursor-not-allowed",
-                    )}
-                  >
-                    <Icon name="arrow-up" size={15} />
-                  </button>
-                )}
-              </div>
+              <div ref={threadEndRef} />
             </div>
           </div>
-        </form>
-      </div>
+
+          {/* Bottom Composer Dock */}
+          <div className="px-4 sm:px-6 pb-4 pt-2 bg-[var(--p-canvas)]/70 border-t border-dashed border-[var(--p-line)]">
+            {composerForm}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
