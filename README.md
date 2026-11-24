@@ -1,6 +1,15 @@
-# Relaydesk
+<p align="center">
+  <img src="public/logo.png" alt="Relaydesk logo" width="128" height="128">
+</p>
 
-**A self-hosted feedback desk that turns user reports into tasks your coding agents can pick up.**
+<h1 align="center">Relaydesk</h1>
+
+<p align="center"><strong>A self-hosted feedback desk that turns user reports into tasks your coding agents can pick up.</strong></p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D24-339933.svg?logo=node.js&logoColor=white" alt="Node.js 24+">
+</p>
 
 Relaydesk collects feedback from your apps and group chats, lets you triage it into a queue, and routes the work to whoever should do it — you, a cloud runner, or the Claude Code / Codex CLI on your own machine. Each project is bound to a GitHub repository, so every task carries enough context for an agent to act on it.
 
@@ -136,3 +145,7 @@ pnpm build
 ## Acknowledgements
 
 The dashboard uses self-hosted [Geist Sans and Geist Mono](https://vercel.com/geist/introduction), distributed under the [SIL Open Font License](public/fonts/OFL.txt).
+
+## License
+
+Relaydesk is licensed under the [MIT License](LICENSE). The bundled Geist fonts retain their separate license noted above.
