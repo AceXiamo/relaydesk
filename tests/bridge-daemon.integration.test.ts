@@ -1,10 +1,10 @@
-import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, readdirSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, readdirSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Duplex } from "node:stream";
 import type { ChatStreamEvent, ChatToolEvent } from "../app/lib/types.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { startBridgeDaemon, type BridgeDaemonOptions } from "../agent/bridge/index.ts";
+import { pruneStaleSessionCaches, startBridgeDaemon, type BridgeDaemonOptions } from "../agent/bridge/index.ts";
 import { syncSpace } from "../agent/bridge/space-sync.ts";
 import { buildWorkspaceManifest, getProjectFilesDir } from "../server/workspace.ts";
 import { bearer, fixture, operator, sha256, type Fixture } from "./bridge-fixture.ts";
@@ -23,12 +23,21 @@ import { DatabaseSync } from 'node:sqlite';
 const args = process.argv.slice(2);
 if (args.includes('--version') || args.includes('-v')) { console.log('codex-cli 1.0.0'); process.exit(0); }
 if (args.includes('--help')) { console.log('test codex help'); process.exit(0); }
+if (args[0] === 'models') { process.exit(0); }
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
-const prompt = Buffer.concat(chunks).toString();
+const rawPrompt = Buffer.concat(chunks).toString();
 const space = process.env.RELAYDESK_SPACE_DIR;
 const emit = obj => console.log(JSON.stringify(obj));
-const claude = args.includes('stream-json');
+const agy = args.includes('--input-format');
+const claude = args.includes('stream-json') && !agy;
+let prompt = rawPrompt;
+if (agy) {
+  try {
+    const parsed = JSON.parse(rawPrompt.trim().split(/\\r?\\n/)[0] || '{}');
+    if (typeof parsed?.message?.content === 'string') prompt = parsed.message.content;
+  } catch {}
+}
 if (prompt.includes('RETRY_FIXTURE')) {
   const resumed = args.includes('resume') || args.includes('--resume');
   appendFileSync('attempts.jsonl', JSON.stringify({ resumed, history: prompt.includes('HISTORY_MARKER') }) + '\\n');
@@ -39,7 +48,8 @@ if (prompt.includes('RETRY_FIXTURE')) {
   }
   if (prompt.includes('FRESH_FAIL')) { console.error('startup failed'); process.exit(1); }
 }
-if (claude) emit({ type: 'system', session_id: 'local-claude-thread' });
+if (agy) emit({ event: 'init', conversation_id: 'local-agy-thread' });
+else if (claude) emit({ type: 'system', session_id: 'local-claude-thread' });
 else emit({ type: 'thread.started', thread_id: 'local-fixture-thread' });
 const dbUrl = process.env.RELAYDESK_DB_FIXTURE ?? '';
 const facts = { cwd: process.cwd(), space, args, hasHistory: prompt.includes('historical-fixture'),
@@ -78,6 +88,10 @@ if (prompt.includes('BLOCK_UNTIL_CANCELLED') && !args.includes('resume')) {
   writeFileSync('pids.json', JSON.stringify([process.pid, child.pid]));
   await new Promise(() => setInterval(() => {}, 30000));
 }
+if (agy) {
+  emit({ event: 'result', result: { conversation_id: 'local-agy-thread', status: 'SUCCESS', response: 'fixture Agy reply' } });
+  process.exit(0);
+}
 if (claude) {
   emit({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'fixture reasoning' } } });
   emit({ type: 'assistant', message: { model: 'fixture-main', usage: { input_tokens: 25, cache_read_input_tokens: 75, cache_creation_input_tokens: 0 } } });
@@ -103,7 +117,7 @@ afterEach(async () => {
   try { await daemon?.close(); } finally { daemon = undefined; vi.unstubAllEnvs(); await f.close(); }
 });
 
-async function start(roots = true, concurrency = 1, timers: Pick<BridgeDaemonOptions, "accountRefreshMs" | "accountTimeoutMs"> = {}) {
+async function start(roots = true, concurrency = 1, timers: Pick<BridgeDaemonOptions, "accountRefreshMs" | "accountTimeoutMs"> = {}, includeAgy = false) {
   const p = await f.project();
   const { id, token } = await f.register();
   const homeDir = join(f.root, "home");
@@ -120,12 +134,15 @@ async function start(roots = true, concurrency = 1, timers: Pick<BridgeDaemonOpt
   const configPath = join(f.root, "config.json");
   const config = { server_url: f.wsUrl, agent_token: token, agent_name: "Fixture", auto_detect_cli_configs: true,
     allowed_roots: roots ? [allowed] : [], max_concurrency: concurrency,
-    projects: { [p]: { workdir: repo } }, runtimes: { codex: { bin }, claude: { bin } },
+    projects: { [p]: { workdir: repo } }, runtimes: { codex: { bin }, claude: { bin }, ...(includeAgy ? { agy: { bin } } : {}) },
     models: [{ id: "detected-codex", runtime: "codex", context_window: 543210, effort_levels: ["low", "high"] }] };
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
   daemon = await startBridgeDaemon({ configPath, cacheDir, homeDir, ...timers, reconnectMinMs: 30, reconnectMaxMs: 100 });
   const agent = async () => (await f.ok("/bridge/agents")).agents.find((a: { id: string }) => a.id === id);
-  await expect.poll(async () => (await agent())?.runtimes?.codex?.available, { timeout: 5000 }).toBe(true);
+  await expect.poll(async () => {
+    const runtimes = (await agent())?.runtimes;
+    return includeAgy ? runtimes?.agy?.available : runtimes?.codex?.available;
+  }, { timeout: 5000 }).toBe(true);
   return { id, p, token, configPath, cacheDir, repo, allowed, agent, bindPath: `/projects/${p}/agent-bindings/${id}` };
 }
 
@@ -665,5 +682,58 @@ describe("real bridge daemon + HTTP chat", () => {
     } finally {
       for (const pid of pids) { if (alive(pid)) process.kill(pid, "SIGKILL"); }
     }
+  });
+
+  it("keeps a session-scoped shadow space alive across resumed Agy turns while isolating parallel Agy sessions", async () => {
+    const { id, p, repo, cacheDir } = await start(true, 1, {}, true);
+    const w = `/projects/${p}/workspace`;
+    await f.ok(`${w}/handbook`, "POST", { content: "v1 handbook" });
+
+    const s1 = await f.session(p, id);
+    await f.ok(s1.path, "PATCH", { runtime: "agy" });
+    expect(await (await s1.turn("First agy turn")).text()).toContain("event: done");
+    const firstFacts = facts(repo);
+    expect(firstFacts.space.startsWith(realpathSync(join(cacheDir, "_sessions")) + "/")).toBe(true);
+    expect(existsSync(firstFacts.space)).toBe(true);
+    expect(firstFacts.handbook).toBe("v1 handbook");
+
+    await f.ok(`${w}/handbook`, "POST", { content: "v2 handbook" });
+    expect(await (await s1.turn("Resume agy turn")).text()).toContain("event: done");
+    const secondFacts = facts(repo);
+    expect(secondFacts.args).toEqual(expect.arrayContaining(["--resume", "local-agy-thread"]));
+    expect(secondFacts.space).toBe(firstFacts.space);
+    expect(secondFacts.handbook).toBe("v2 handbook");
+    expect(existsSync(firstFacts.space)).toBe(true);
+
+    const s2 = await f.session(p, id);
+    await f.ok(s2.path, "PATCH", { runtime: "agy" });
+    expect(await (await s2.turn("Second agy session")).text()).toContain("event: done");
+    const otherFacts = facts(repo);
+    expect(otherFacts.space.startsWith(realpathSync(join(cacheDir, "_sessions")) + "/")).toBe(true);
+    expect(otherFacts.space).not.toBe(firstFacts.space);
+    expect(existsSync(firstFacts.space)).toBe(true);
+    expect(existsSync(otherFacts.space)).toBe(true);
+  });
+
+  it("prunes only stale inactive session shadow spaces", () => {
+    const sessionsRoot = join(f.root, "prune-sessions");
+    const staleInactive = join(sessionsRoot, "stale-inactive");
+    const staleActive = join(sessionsRoot, "stale-active");
+    const freshInactive = join(sessionsRoot, "fresh-inactive");
+    for (const dir of [staleInactive, staleActive, freshInactive]) {
+      mkdirSync(dir, { recursive: true });
+    }
+    const now = Date.now();
+    const tenDaysAgo = new Date(now - 10 * 24 * 60 * 60 * 1000);
+    const oneHourAgo = new Date(now - 60 * 60 * 1000);
+    utimesSync(staleInactive, tenDaysAgo, tenDaysAgo);
+    utimesSync(staleActive, tenDaysAgo, tenDaysAgo);
+    utimesSync(freshInactive, oneHourAgo, oneHourAgo);
+
+    pruneStaleSessionCaches(sessionsRoot, new Set([staleActive]), 7 * 24 * 60 * 60 * 1000, now);
+
+    expect(existsSync(staleInactive)).toBe(false);
+    expect(existsSync(staleActive)).toBe(true);
+    expect(existsSync(freshInactive)).toBe(true);
   });
 });

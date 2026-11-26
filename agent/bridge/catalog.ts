@@ -112,24 +112,77 @@ async function resolveRuntimeBin(runtime: ChatRuntime, configured: string | unde
   return runtime;
 }
 
+const AGY_EFFORT_ORDER: Array<Exclude<ModelCatalogItem["default_effort"], undefined>> = ["low", "medium", "high", "max"];
+const AGY_EFFORT_SUFFIX_RE = /^(.+)-(low|medium|high|xhigh|max)$/;
+const AGY_LABEL_EFFORT_RE = /\s*\((Low|Medium|High|XHigh|Max)\)\s*$/i;
+
+function parseAgyModelVariant(id: string, label?: string): {
+  baseId: string;
+  baseLabel?: string;
+  effortLevel?: Exclude<ModelCatalogItem["default_effort"], undefined>;
+} {
+  const match = id.match(AGY_EFFORT_SUFFIX_RE);
+  if (!match) return { baseId: id, ...(label ? { baseLabel: label } : {}) };
+  const baseId = match[1];
+  const mapped = effort(match[2]);
+  const cleanedLabel = label ? label.replace(AGY_LABEL_EFFORT_RE, "").trim() : "";
+  return {
+    baseId,
+    ...(cleanedLabel ? { baseLabel: cleanedLabel } : {}),
+    ...(mapped && mapped !== "off" ? { effortLevel: mapped } : {}),
+  };
+}
+
 async function probeAgyModels(bin: string): Promise<Array<Record<string, unknown>>> {
   try {
     const { stdout } = await exec(bin, ["models"], { timeout: 5000, killSignal: "SIGKILL", maxBuffer: 65536 });
-    const rows: Array<Record<string, unknown>> = [];
+    const grouped = new Map<string, {
+      id: string;
+      label?: string;
+      provider: string;
+      efforts: Set<Exclude<ModelCatalogItem["default_effort"], undefined>>;
+    }>();
     for (const rawLine of stdout.split(/\r?\n/)) {
       const line = rawLine.trim();
       if (!line || !line.includes("\t")) continue;
       const [id, label] = line.split("\t").map(part => part.trim());
       if (!id || id.startsWith("-")) continue;
-      const provider = id.startsWith("claude-") ? "Anthropic" : id.startsWith("gpt-") ? "OpenAI" : "Google";
-      rows.push({
-        runtime: "agy",
-        id,
-        ...(label ? { label } : {}),
-        provider,
-        supports_effort: true,
-        effort_levels: ["low", "medium", "high", "max"],
-      });
+      const parsed = parseAgyModelVariant(id, label);
+      const provider = parsed.baseId.startsWith("claude-")
+        ? "Anthropic"
+        : parsed.baseId.startsWith("gpt-")
+          ? "OpenAI"
+          : "Google";
+      let entry = grouped.get(parsed.baseId);
+      if (!entry) {
+        entry = { id: parsed.baseId, label: parsed.baseLabel, provider, efforts: new Set() };
+        grouped.set(parsed.baseId, entry);
+      } else if (!entry.label && parsed.baseLabel) {
+        entry.label = parsed.baseLabel;
+      }
+      if (parsed.effortLevel) entry.efforts.add(parsed.effortLevel);
+    }
+    const rows: Array<Record<string, unknown>> = [];
+    for (const entry of grouped.values()) {
+      const effortLevels = AGY_EFFORT_ORDER.filter(level => entry.efforts.has(level));
+      if (effortLevels.length >= 2) {
+        rows.push({
+          runtime: "agy",
+          id: entry.id,
+          ...(entry.label ? { label: entry.label } : {}),
+          provider: entry.provider,
+          supports_effort: true,
+          effort_levels: effortLevels,
+        });
+      } else {
+        rows.push({
+          runtime: "agy",
+          id: entry.id,
+          ...(entry.label ? { label: entry.label } : {}),
+          provider: entry.provider,
+          supports_effort: false,
+        });
+      }
     }
     return rows;
   } catch {
@@ -235,7 +288,14 @@ export async function detectBridgeCatalog(config: BridgeCatalogConfig, options: 
   }
   for (const value of agy) {
     const settings = record(value);
-    add([{ id: settings.model, runtime: "agy", default_effort: effort(settings.effort ?? settings.effortLevel), is_default: true }], "cli_config");
+    const rawModel = typeof settings.model === "string" ? settings.model.trim() : "";
+    const parsed = rawModel ? parseAgyModelVariant(rawModel) : null;
+    add([{
+      id: parsed ? parsed.baseId : settings.model,
+      runtime: "agy",
+      default_effort: effort(settings.effort ?? settings.effortLevel) ?? parsed?.effortLevel,
+      is_default: true,
+    }], "cli_config");
   }
   if (agyDetectedModels.length > 0) {
     add(agyDetectedModels, "detected");

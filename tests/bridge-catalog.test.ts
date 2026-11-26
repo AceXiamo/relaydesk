@@ -83,7 +83,7 @@ describe("local bridge model discovery", () => {
     expect(JSON.stringify(configured)).not.toContain(marker(1));
   });
 
-  it("discovers Antigravity CLI (agy) from ~/.local/bin/agy and parses `agy models`", async () => {
+  it("discovers Antigravity CLI (agy) from ~/.local/bin/agy and groups effort variants", async () => {
     const localBinDir = join(homeDir, ".local", "bin");
     await mkdir(localBinDir, { recursive: true });
     const fakeAgy = join(localBinDir, "agy");
@@ -94,24 +94,54 @@ describe("local bridge model discovery", () => {
         'if [ "$1" = "--version" ]; then echo "agy 1.5.18"; exit 0; fi',
         'if [ "$1" = "models" ]; then',
         '  echo "Fetching available models..."',
+        '  printf "gemini-4-neon-high\\tGemini 4 Neon (High)\\n"',
+        '  printf "gemini-4-neon-xhigh\\tGemini 4 Neon (XHigh)\\n"',
         '  printf "gemini-4-neon-medium\\tGemini 4 Neon (Medium)\\n"',
+        '  printf "gemini-4-neon-low\\tGemini 4 Neon (Low)\\n"',
+        '  printf "gemini-pro-orchestrator-neon\\tOrchestrator (Neon)\\n"',
+        '  printf "claude-opus-5-5-low\\tClaude Opus 5.5 (Low)\\n"',
         '  printf "claude-opus-5-5-high\\tClaude Opus 5.5 (High)\\n"',
+        '  printf "gpt-oss-120b-medium\\tGPT-OSS 120B (Medium)\\n"',
         "  exit 0",
         "fi",
         "exit 1",
       ].join("\n"),
       { mode: 0o755 },
     );
+    await mkdir(join(homeDir, ".gemini/antigravity-cli"), { recursive: true });
+    await json(join(homeDir, ".gemini/antigravity-cli/settings.json"), {
+      model: "gemini-4-neon-high",
+    });
     const result = await detectBridgeCatalog({}, { homeDir, configDir });
     expect(result.runtimes.agy).toEqual({ available: true, version: "1.5.18" });
-    expect(result.models.find(m => m.runtime === "agy" && m.id === "gemini-4-neon-medium")).toMatchObject({
-      label: "Gemini 4 Neon (Medium)",
+    const agyModels = result.models.filter(m => m.runtime === "agy");
+    expect(agyModels).toHaveLength(4);
+    expect(agyModels.find(m => m.id === "gemini-4-neon")).toMatchObject({
+      label: "Gemini 4 Neon",
       provider: "Google",
+      is_default: true,
+      default_effort: "high",
+      supports_effort: true,
+      effort_levels: ["low", "medium", "high", "max"],
+      source: "cli_config",
+    });
+    expect(agyModels.find(m => m.id === "gemini-pro-orchestrator-neon")).toMatchObject({
+      label: "Orchestrator (Neon)",
+      provider: "Google",
+      supports_effort: false,
       source: "detected",
     });
-    expect(result.models.find(m => m.runtime === "agy" && m.id === "claude-opus-5-5-high")).toMatchObject({
-      label: "Claude Opus 5.5 (High)",
+    expect(agyModels.find(m => m.id === "claude-opus-5-5")).toMatchObject({
+      label: "Claude Opus 5.5",
       provider: "Anthropic",
+      supports_effort: true,
+      effort_levels: ["low", "high"],
+      source: "detected",
+    });
+    expect(agyModels.find(m => m.id === "gpt-oss-120b")).toMatchObject({
+      label: "GPT-OSS 120B",
+      provider: "OpenAI",
+      supports_effort: false,
       source: "detected",
     });
   });

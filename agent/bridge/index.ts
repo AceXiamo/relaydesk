@@ -8,12 +8,14 @@ import {
   fchmodSync,
   fstatSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
   rmSync,
   statSync,
   unlinkSync,
+  utimesSync,
   watch,
   writeFileSync,
   type FSWatcher,
@@ -153,6 +155,33 @@ function projectWorkdir(project: Project, config: Config, home: string) {
 function safeRunDir(runId: string) {
   return runId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || randomUUID();
 }
+export function pruneStaleSessionCaches(
+  sessionsRoot: string,
+  activeDirs: ReadonlySet<string>,
+  maxAgeMs = 7 * 24 * 60 * 60 * 1000,
+  now = Date.now(),
+): void {
+  if (!existsSync(sessionsRoot)) return;
+  let entries;
+  try {
+    entries = readdirSync(sessionsRoot, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const dir = join(sessionsRoot, entry.name);
+    if (activeDirs.has(dir)) continue;
+    try {
+      const st = statSync(dir);
+      if (now - st.mtimeMs > maxAgeMs) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    } catch {
+      // Ignore concurrent deletion or inaccessible cache entries.
+    }
+  }
+}
 async function waitForJobs(jobs: Promise<void>[], signal: AbortSignal): Promise<void> {
   if (!jobs.length) return;
   signal.throwIfAborted();
@@ -262,8 +291,27 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
   let instance = randomUUID();
   const active = new Map<
     string,
-    { abort: AbortController; socket: WebSocket; project: string; session: string; job: Promise<void>; link?: ChatLink }
+    {
+      abort: AbortController;
+      socket: WebSocket;
+      project: string;
+      session: string;
+      job: Promise<void>;
+      link?: ChatLink;
+      sessionCacheDir?: string;
+    }
   >();
+  let lastSessionPruneAt = 0;
+  const maybePruneSessionCaches = (baseCacheDir: string) => {
+    const now = Date.now();
+    if (now - lastSessionPruneAt < 60 * 60 * 1000) return;
+    lastSessionPruneAt = now;
+    const activeDirs = new Set<string>();
+    for (const run of active.values()) {
+      if (run.sessionCacheDir) activeDirs.add(run.sessionCacheDir);
+    }
+    pruneStaleSessionCaches(join(baseCacheDir, "_sessions"), activeDirs, undefined, now);
+  };
   const report = (c: Config, cat: BridgeCatalog) => ({
     hostname: hostname(),
     platform: process.platform,
@@ -515,9 +563,17 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
             public_feedback: true,
           }
         : p;
+      const persistentSessionSpace = !isPublicFeedback && effectiveP.runtime === "agy";
+      const baseCacheDir =
+        o.cacheDir ?? (c.cache_dir ? expand(c.cache_dir, home) : join(home, ".cache/relaydesk-bridge/spaces"));
+      const safeRunDirName = safeRunDir(effectiveP.run_id);
+      const runCacheDir = isPublicFeedback
+        ? join(baseCacheDir, "_public_feedback", safeRunDirName)
+        : persistentSessionSpace
+          ? join(baseCacheDir, "_sessions", safeRunDir(effectiveP.session_id))
+          : join(baseCacheDir, "_runs", safeRunDirName);
       const job = (async () => {
         let result: RunChatTurnResult = { status: "aborted", content: "", events: [], externalSessionId: "" };
-        let runCacheDir: string | undefined;
         try {
           checkChat(effectiveP);
           if (!validProjectId(effectiveP.project_id) || !Object.hasOwn(c.projects ?? {}, effectiveP.project_id))
@@ -537,12 +593,9 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
             if (link) link.event(event);
             else if (event.type !== "context_usage" || acceptsUsage) send(socket, "chat.event", { ...ids, event });
           };
-          const baseCacheDir =
-            o.cacheDir ?? (c.cache_dir ? expand(c.cache_dir, home) : join(home, ".cache/relaydesk-bridge/spaces"));
-          const safeRunDirName = safeRunDir(effectiveP.run_id);
-          runCacheDir = isPublicFeedback
-            ? join(baseCacheDir, "_public_feedback", safeRunDirName)
-            : join(baseCacheDir, "_runs", safeRunDirName);
+          if (persistentSessionSpace) {
+            maybePruneSessionCaches(baseCacheDir);
+          }
           const opts = {
             workdir: cwd,
             onFileSynced: () => {
@@ -559,6 +612,14 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
           };
           if (!isPublicFeedback) onEvent({ type: "status", message: "正在同步本机项目空间…" });
           const mirror = await syncSpace(opts, effectiveP.workspace_manifest);
+          if (persistentSessionSpace) {
+            try {
+              const now = new Date();
+              utimesSync(runCacheDir, now, now);
+            } catch {
+              // Non-fatal mtime refresh failure
+            }
+          }
           const before = !isPublicFeedback && effectiveP.sandbox_mode === "workspace-write" ? snapshotShadowFiles(mirror) : null;
           const promptFor = (resumeId: string) => {
             if (isPublicFeedback) {
@@ -574,8 +635,9 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
             const mcpFallbackNote = hasMcpContext
               ? ""
               : "You have access to the `relaydesk` MCP server for project tasks and read-only database inspection/queries.";
+            const agyCwdHint = effectiveP.runtime === "agy" ? `Local project workdir: ${cwd}. ` : "";
             return [
-              "./ is the bound local project workdir. $RELAYDESK_SPACE_DIR/HANDBOOK.md is the project handbook; $RELAYDESK_SPACE_DIR/DEPLOY.md is the project deployment runbook; $RELAYDESK_SPACE_DIR/files/ contains cloud workspace files and SQLite databases. Never disclose credentials or database connection strings.",
+              `${agyCwdHint}./ is the bound local project workdir. $RELAYDESK_SPACE_DIR/HANDBOOK.md is the project handbook; $RELAYDESK_SPACE_DIR/DEPLOY.md is the project deployment runbook; $RELAYDESK_SPACE_DIR/files/ contains cloud workspace files and SQLite databases. Never disclose credentials or database connection strings.`,
               [modeNote, mcpFallbackNote].filter(Boolean).join(" "),
               mirror.handbook,
               hasDbContext ? "" : databaseContext(effectiveP.workspace_manifest.databases),
@@ -652,7 +714,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         } catch (e) {
           result = { ...result, status: "error", error: message(e) };
         } finally {
-          if (runCacheDir) {
+          if (runCacheDir && !persistentSessionSpace) {
             try {
               rmSync(runCacheDir, { recursive: true, force: true });
             } catch {
@@ -671,7 +733,15 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         clock.close();
         active.delete(p.run_id);
       });
-      active.set(p.run_id, { abort, socket, project: p.project_id, session: p.session_id, job, link });
+      active.set(p.run_id, {
+        abort,
+        socket,
+        project: p.project_id,
+        session: p.session_id,
+        job,
+        link,
+        ...(persistentSessionSpace ? { sessionCacheDir: runCacheDir } : {}),
+      });
     }
     function startCliRun(p: {
       run_id: string;
