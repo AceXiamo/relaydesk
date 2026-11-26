@@ -1,12 +1,13 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { chatImageAttachments } from "./chat-image-attachments.ts";
 import {
   buildCliInvocation,
   createCliStreamParser,
+  formatCliStdinPrompt,
   redactSecrets,
   type CliStreamImageHandler,
   type StreamParseState,
@@ -48,13 +49,14 @@ interface CliDetectionCache {
   checkedAt: number;
   codex: string | null;
   claude: string | null;
+  agy: string | null;
 }
 
 let cliCache: CliDetectionCache | null = null;
 const activeSessionProcesses = new Map<string, { abort: () => void }>();
 
-function resolveExecutable(name: "codex" | "claude"): string | null {
-  const envKey = name === "codex" ? "RELAYDESK_CODEX_BIN" : "RELAYDESK_CLAUDE_BIN";
+function resolveExecutable(name: ChatRuntime): string | null {
+  const envKey = name === "codex" ? "RELAYDESK_CODEX_BIN" : name === "agy" ? "RELAYDESK_AGY_BIN" : "RELAYDESK_CLAUDE_BIN";
   const override = process.env[envKey]?.trim();
   if (override) {
     return existsSync(override) ? override : null;
@@ -64,32 +66,43 @@ function resolveExecutable(name: "codex" | "claude"): string | null {
     const found = res.stdout.trim().split(/\r?\n/)[0]?.trim();
     if (found && existsSync(found)) return found;
   }
+  if (name === "agy") {
+    const localInstall = join(homedir(), ".local", "bin", "agy");
+    if (existsSync(localInstall)) return localInstall;
+  }
   return null;
 }
 
 export function detectLocalClis(forceRefresh = false): {
   codex: boolean;
   claude: boolean;
+  agy: boolean;
   codexBin: string | null;
   claudeBin: string | null;
+  agyBin: string | null;
 } {
   const now = Date.now();
-  if (!forceRefresh && cliCache && now - cliCache.checkedAt < CLI_DETECT_TTL_MS && !process.env.RELAYDESK_CODEX_BIN && !process.env.RELAYDESK_CLAUDE_BIN) {
+  if (!forceRefresh && cliCache && now - cliCache.checkedAt < CLI_DETECT_TTL_MS && !process.env.RELAYDESK_CODEX_BIN && !process.env.RELAYDESK_CLAUDE_BIN && !process.env.RELAYDESK_AGY_BIN) {
     return {
       codex: Boolean(cliCache.codex),
       claude: Boolean(cliCache.claude),
+      agy: Boolean(cliCache.agy),
       codexBin: cliCache.codex,
       claudeBin: cliCache.claude,
+      agyBin: cliCache.agy,
     };
   }
   const codexBin = resolveExecutable("codex");
   const claudeBin = resolveExecutable("claude");
-  cliCache = { checkedAt: now, codex: codexBin, claude: claudeBin };
+  const agyBin = resolveExecutable("agy");
+  cliCache = { checkedAt: now, codex: codexBin, claude: claudeBin, agy: agyBin };
   return {
     codex: Boolean(codexBin),
     claude: Boolean(claudeBin),
+    agy: Boolean(agyBin),
     codexBin,
     claudeBin,
+    agyBin,
   };
 }
 
@@ -112,9 +125,10 @@ export function getChatRuntimeInfo(dbPath: string, projectId: string): ChatRunti
     : settings?.runtime === "claude" && settings.api_key
       ? "project_key"
       : "local_cli";
+  const agyAuth = !clis.agy ? "unavailable" : "local_cli";
 
   return {
-    local_clis: { codex: clis.codex, claude: clis.claude },
+    local_clis: { codex: clis.codex, claude: clis.claude, agy: clis.agy },
     project_cli: {
       runtime: settings?.runtime ?? "codex",
       configured: Boolean(settings?.api_key),
@@ -126,6 +140,7 @@ export function getChatRuntimeInfo(dbPath: string, projectId: string): ChatRunti
     auth_mode: {
       codex: codexAuth,
       claude: claudeAuth,
+      agy: agyAuth,
     },
   };
 }
@@ -533,7 +548,7 @@ function runSingleCliAttempt(params: {
 
     proc.stdin?.on("error", () => { /* The CLI may exit before reading stdin. */ });
     try {
-      proc.stdin?.end(stdinPrompt, "utf8");
+      proc.stdin?.end(formatCliStdinPrompt(runtime, stdinPrompt), "utf8");
     } catch {
       // ignore EPIPE if process exited immediately
     }
@@ -547,9 +562,9 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
   const interrupted: RunChatTurnResult = { status: "aborted", content: "", events: [], externalSessionId: priorId };
   if (options.signal.aborted) return interrupted;
   const clis = detectLocalClis();
-  const bin = session.runtime === "codex" ? clis.codexBin : clis.claudeBin;
+  const bin = session.runtime === "codex" ? clis.codexBin : session.runtime === "agy" ? clis.agyBin : clis.claudeBin;
   if (!bin) {
-    const label = session.runtime === "codex" ? "Codex CLI (`codex`)" : "Claude Code (`claude`)";
+    const label = session.runtime === "codex" ? "Codex CLI (`codex`)" : session.runtime === "agy" ? "Antigravity CLI (`agy`)" : "Claude Code (`claude`)";
     return {
       content: "",
       events: [],
@@ -729,11 +744,12 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
   try {
     if (signal.aborted) return interrupted;
     clock.progress();
+    const runtimeLabel = session.runtime === "codex" ? "Codex" : session.runtime === "agy" ? "Antigravity CLI" : "Claude";
     onEvent({
       type: "status",
       message: runWithResume
-        ? `正在续接 ${session.runtime === "codex" ? "Codex" : "Claude"} 会话…`
-        : `正在启动 ${session.runtime === "codex" ? "Codex" : "Claude"}（工作区已挂载项目文件与手册）…`,
+        ? `正在续接 ${runtimeLabel} 会话…`
+        : `正在启动 ${runtimeLabel}（工作区已挂载项目文件与手册）…`,
     });
 
     let resumeId = priorId;

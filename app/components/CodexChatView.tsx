@@ -926,7 +926,7 @@ export function CodexChatView({
                         ) : (
                           <span
                             className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                              s.runtime === "codex" ? "bg-emerald-500" : "bg-amber-500"
+                              s.runtime === "codex" ? "bg-emerald-500" : s.runtime === "agy" ? "bg-sky-500" : "bg-amber-500"
                             }`}
                           />
                         )}

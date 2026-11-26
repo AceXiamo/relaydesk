@@ -1912,7 +1912,7 @@ export function prepareProjectChatWorkspace(
 export function getWorkspaceSummary(
   dbPath: string,
   project: AgentProjectInfo,
-  localClis: { codex: boolean; claude: boolean },
+  localClis: { codex: boolean; claude: boolean; agy?: boolean },
 ): WorkspaceSummary {
   const { total_bytes, file_count } = listWorkspaceFiles(dbPath, project.id);
   const handbook = readWorkspaceHandbook(dbPath, project.id);

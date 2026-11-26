@@ -118,7 +118,7 @@ const configPatchSchema = z
   .strictObject({
     enabled: z.boolean(),
     execution_target: executionTargetSchema,
-    runtime: z.enum(["codex", "claude"]),
+    runtime: z.enum(["codex", "claude", "agy"]),
     model: modelSchema,
     reasoning_effort: z.enum(["default", "off", "low", "medium", "high", "max"]),
     system_prompt: z.string().trim().max(12000),
@@ -186,7 +186,7 @@ function normalizeStoredConfig(row: {
     (row.execution_target === "auto" || EXECUTION_TARGET_RE.test(row.execution_target))
       ? row.execution_target
       : "auto";
-  const runtime: ChatRuntime = row.runtime === "claude" ? "claude" : "codex";
+  const runtime: ChatRuntime = row.runtime === "claude" || row.runtime === "agy" ? row.runtime : "codex";
   const model = modelSchema.catch("").parse(row.model);
   const reasoning_effort: ChatReasoningEffort =
     typeof row.reasoning_effort === "string" &&

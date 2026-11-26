@@ -160,7 +160,7 @@ function chatModelSelection(data: Record<string, unknown>) {
     fields.fast_mode = data.fast_mode;
   }
   if ("runtime" in data) {
-    if (data.runtime !== "codex" && data.runtime !== "claude") throw new ApiError(400, "运行工具无效");
+    if (data.runtime !== "codex" && data.runtime !== "claude" && data.runtime !== "agy") throw new ApiError(400, "运行工具无效");
     fields.runtime = data.runtime;
   }
   if ("model" in data) {
@@ -870,7 +870,7 @@ export class ApiRouter {
         const project = this.store.getProjectRow(parts[1]);
         this.checkBearer(req, project.agent_key);
         if (method === "POST" && parts.length === 5 && parts[4] === "claim") {
-          if (data.protocol !== 2 || data.managed !== true || !["codex", "claude"].includes(String(data.runtime)) || typeof data.ready !== "boolean") {
+          if (data.protocol !== 2 || data.managed !== true || !["codex", "claude", "agy"].includes(String(data.runtime)) || typeof data.ready !== "boolean") {
             throw new ApiError(400, "Expected a managed project CLI runner (protocol 2)");
           }
           const config = projectCliConfiguration(this.store.dbPath, project.id);
@@ -1329,7 +1329,7 @@ export class ApiRouter {
       if ("task_runtime" in data) {
         if (data.task_runtime === "" || data.task_runtime === null || data.task_runtime === undefined) {
           patch.task_runtime = undefined;
-        } else if (data.task_runtime === "codex" || data.task_runtime === "claude") {
+        } else if (data.task_runtime === "codex" || data.task_runtime === "claude" || data.task_runtime === "agy") {
           patch.task_runtime = data.task_runtime as ChatRuntime;
         } else {
           throw new ApiError(400, "task_runtime 无效");
@@ -3236,7 +3236,7 @@ export class ApiRouter {
     runId: string;
     agentId: string;
     agentName: string;
-    runtime: "codex" | "claude";
+    runtime: ChatRuntime;
     model: string;
     reasoningEffort: ChatReasoningEffort;
     cloudFallbackAllowed: boolean;

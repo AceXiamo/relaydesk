@@ -524,6 +524,7 @@ export interface WorkspaceSummary {
   local_clis: {
     codex: boolean;
     claude: boolean;
+    agy?: boolean;
   };
 }
 
@@ -547,7 +548,7 @@ export interface WorkspaceRepoFileContent {
 /* ── Web Codex / CLI Chat ──────────────────────────────────────────────── */
 
 export type ChatFastMode = "default" | "on" | "off";
-export type ChatRuntime = "codex" | "claude";
+export type ChatRuntime = "codex" | "claude" | "agy";
 export type ChatSandboxMode = "read-only" | "workspace-write";
 export type ChatReasoningEffort = "default" | "off" | "low" | "medium" | "high" | "max";
 
@@ -758,6 +759,7 @@ export interface ChatRuntimeInfo {
   local_clis: {
     codex: boolean;
     claude: boolean;
+    agy?: boolean;
   };
   project_cli: {
     runtime: ChatRuntime;
@@ -770,6 +772,7 @@ export interface ChatRuntimeInfo {
   auth_mode: {
     codex: "project_key" | "local_cli" | "unavailable";
     claude: "project_key" | "local_cli" | "unavailable";
+    agy?: "project_key" | "local_cli" | "unavailable";
   };
   routing?: ProjectRoutingConfig;
   effective_priority?: string[];

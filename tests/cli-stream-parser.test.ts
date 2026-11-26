@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatReasoningEffort, ChatRuntime, ChatStreamEvent } from "../app/lib/types.ts";
 import { chatImageAttachments } from "../server/chat-image-attachments.ts";
-import { buildCliInvocation, createCliStreamParser, detectClaudeSupportsEffort, redactSecrets } from "../server/cli-stream-parser.ts";
+import { buildCliInvocation, createCliStreamParser, detectClaudeSupportsEffort, formatCliStdinPrompt, redactSecrets } from "../server/cli-stream-parser.ts";
 import { getChatRuntimeInfo, runWebCliChatTurn } from "../server/codex-chat.ts";
 import { projectCliConfiguration } from "../server/project-cli-config.ts";
 import { Store, toAgentProject } from "../server/store.ts";
@@ -361,5 +361,83 @@ describe("shared CLI stream parser", () => {
     const toolsIdx = claudeWrite.args.indexOf("--tools");
     expect(toolsIdx).toBeGreaterThan(-1);
     expect(claudeWrite.args[toolsIdx + 1]).toContain("Agent");
+  });
+
+  it("builds Antigravity CLI (agy) invocations and formats stream-json stdin", () => {
+    const fresh = buildCliInvocation({
+      ...base,
+      runtime: "agy",
+      bin: "agy",
+      model: "gemini-4-neon-medium",
+      reasoningEffort: "high",
+      sandboxMode: "workspace-write",
+      extraAddDirs: ["/space"],
+    });
+    expect(fresh.args).toEqual([
+      "--input-format", "stream-json",
+      "--output-format", "stream-json",
+      "--mode", "auto",
+      "--add-dir", "/repos",
+      "--add-dir", "/space",
+      "--model", "gemini-4-neon-medium",
+      "--effort", "high",
+    ]);
+
+    const fullAccess = buildCliInvocation({
+      ...base,
+      runtime: "agy",
+      bin: "agy",
+      localAccess: "full",
+      networkAccess: true,
+      sandboxMode: "workspace-write",
+      resumeSessionId: "conv-123",
+    });
+    expect(fullAccess.args).toContain("--dangerously-skip-permissions");
+    expect(fullAccess.args).toContain("--resume");
+    expect(fullAccess.args).toContain("conv-123");
+
+    const readOnly = buildCliInvocation({
+      ...base,
+      runtime: "agy",
+      bin: "agy",
+      sandboxMode: "read-only",
+    });
+    expect(readOnly.args).toContain("--sandbox");
+    expect(readOnly.args).not.toContain("--mode");
+
+    expect(formatCliStdinPrompt("agy", "hello")).toBe('{"event":"user","message":{"content":"hello"}}\n');
+    expect(formatCliStdinPrompt("codex", "hello")).toBe("hello");
+    expect(formatCliStdinPrompt("claude", "hello")).toBe("hello");
+  });
+
+  it("parses Antigravity CLI (agy) stream-json events, tools, usage, and errors", () => {
+    const events: ChatStreamEvent[] = [];
+    const parser = createCliStreamParser("agy", ["secret-token"], (ev) => events.push(ev));
+    parser.write([
+      JSON.stringify({ event: "init", conversation_id: "agy-conv-1", init: { model: "gemini-4-neon-medium" } }),
+      JSON.stringify({ event: "step_update", step_update: { conversation_id: "agy-conv-1", step_index: 1, state: "ACTIVE", step_type: "tool", tool_name: "read_file", tool_info: { name: "read_file", parameters: { Path: "/repo/package.json" } } } }),
+      JSON.stringify({ event: "step_update", step_update: { conversation_id: "agy-conv-1", step_index: 1, state: "DONE", step_type: "tool", tool_name: "read_file", tool_info: { name: "read_file", parameters: { Path: "/repo/package.json" }, output: "ok secret-token" } } }),
+      JSON.stringify({ event: "step_update", step_update: { conversation_id: "agy-conv-1", step_index: 2, state: "ACTIVE", step_type: "agent_response", text_delta: "Hello " } }),
+      JSON.stringify({ event: "step_update", step_update: { conversation_id: "agy-conv-1", step_index: 2, state: "DONE", step_type: "agent_response", text_delta: "world", usage: { input_tokens: 1200, cache_read_tokens: 800, output_tokens: 5 } } }),
+      JSON.stringify({ event: "result", result: { conversation_id: "agy-conv-1", status: "SUCCESS", response: "Hello world" } }),
+    ].join("\n") + "\n");
+    parser.finish(true);
+
+    expect(parser.state.externalSessionId).toBe("agy-conv-1");
+    expect(parser.state.text).toBe("Hello world");
+    expect(parser.state.errorMessage).toBe("");
+    expect(parser.state.toolEvents.get("agy-step-1")).toMatchObject({
+      tool: "read_file",
+      summary: "read_file: /repo/package.json",
+      status: "done",
+      output: "ok [redacted]",
+    });
+    expect(events).toContainEqual({ type: "context_usage", usage: { used_tokens: 2000 } });
+
+    const errEvents: ChatStreamEvent[] = [];
+    const errParser = createCliStreamParser("agy", [], (ev) => errEvents.push(ev));
+    errParser.write(JSON.stringify({ event: "result", result: { conversation_id: "agy-conv-2", status: "ERROR", error: "Authentication required" } }) + "\n");
+    errParser.finish(false);
+    expect(errParser.state.errorMessage).toBe("Authentication required");
   });
 });

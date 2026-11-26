@@ -82,6 +82,13 @@ export function detectClaudeSupportsEffort(bin: string): boolean {
 
 const codexEffort = { off: "minimal", low: "low", medium: "medium", high: "high", max: "xhigh" } as const;
 
+export function formatCliStdinPrompt(runtime: ChatRuntime, prompt: string): string {
+  if (runtime === "agy") {
+    return `${JSON.stringify({ event: "user", message: { content: prompt } })}\n`;
+  }
+  return prompt;
+}
+
 export function buildCliInvocation(params: {
   dbPath: string;
   runtime: ChatRuntime;
@@ -255,6 +262,26 @@ export function buildCliInvocation(params: {
       ...overrides,
       ...imageArgs,
       "-",
+    ];
+    return { args, env, secrets };
+  }
+
+  if (runtime === "agy") {
+    const permissionArgs = fullAccess
+      ? ["--dangerously-skip-permissions"]
+      : sandboxMode === "workspace-write"
+        ? ["--mode", "auto"]
+        : ["--sandbox"];
+    const args = [
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      ...permissionArgs,
+      ...addDirArgs,
+      ...(effectiveModel ? ["--model", effectiveModel] : []),
+      ...(effort !== "default" && effort !== "off" ? ["--effort", effort] : []),
+      ...(resumeSessionId ? ["--resume", resumeSessionId] : []),
     ];
     return { args, env, secrets };
   }
@@ -920,6 +947,129 @@ export function handleClaudeJsonLine(
   }
 }
 
+function summarizeAgyTool(toolName: string, params: Record<string, unknown> | null): string {
+  if (params) {
+    for (const key of ["CommandLine", "command", "Path", "TargetFile", "AbsolutePath", "DirectoryPath", "Query", "Pattern", "Url", "SearchPath"]) {
+      const val = params[key];
+      if (typeof val === "string" && val.trim()) {
+        return `${toolName}: ${val.trim()}`.slice(0, 200);
+      }
+    }
+  }
+  return toolName;
+}
+
+function handleAgyJsonLine(
+  obj: Record<string, unknown>,
+  state: StreamParseState,
+  secrets: string[],
+  emit: (event: ChatStreamEvent) => void,
+  publishUsage: (usage: ChatContextUsage) => void,
+): void {
+  const eventType = typeof obj.event === "string" ? obj.event : "";
+  const topConvId = typeof obj.conversation_id === "string" ? obj.conversation_id.trim() : "";
+  if (topConvId && !state.externalSessionId) {
+    state.externalSessionId = topConvId;
+    emit({ type: "status", message: "Antigravity CLI 会话已就绪", external_session_id: state.externalSessionId });
+  }
+
+  if (eventType === "init") {
+    return;
+  }
+
+  if (eventType === "step_update") {
+    const step = obj.step_update && typeof obj.step_update === "object"
+      ? (obj.step_update as Record<string, unknown>)
+      : null;
+    if (!step) return;
+    const stepConvId = typeof step.conversation_id === "string" ? step.conversation_id.trim() : "";
+    if (stepConvId && !state.externalSessionId) {
+      state.externalSessionId = stepConvId;
+      emit({ type: "status", message: "Antigravity CLI 会话已就绪", external_session_id: state.externalSessionId });
+    }
+    const stepType = typeof step.step_type === "string" ? step.step_type : "";
+    const stepState = typeof step.state === "string" ? step.state.toUpperCase() : "";
+
+    if (stepType === "agent_response") {
+      if (typeof step.thinking_delta === "string" && step.thinking_delta) {
+        emit({ type: "reasoning", text: redactSecrets(step.thinking_delta, secrets) });
+      }
+      if (typeof step.text_delta === "string" && step.text_delta) {
+        const delta = redactSecrets(step.text_delta, secrets);
+        const remaining = MAX_OUTPUT_CHARS - state.text.length;
+        if (remaining > 0) {
+          const piece = delta.slice(0, remaining);
+          state.text += piece;
+          state.hadIncrementalDelta = true;
+          emit({ type: "text_delta", delta: piece });
+        }
+      }
+      const usage = step.usage && typeof step.usage === "object" ? (step.usage as Record<string, unknown>) : null;
+      if (usage) {
+        const input = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+        const cacheRead = typeof usage.cache_read_tokens === "number" ? usage.cache_read_tokens : 0;
+        const used = input + cacheRead;
+        if (Number.isSafeInteger(used) && used > 0) {
+          publishUsage({ used_tokens: used });
+        }
+      }
+      return;
+    }
+
+    if (stepType === "tool") {
+      const idx = typeof step.step_index === "number" ? step.step_index : state.toolEvents.size;
+      const id = `agy-step-${idx}`;
+      const toolInfo = step.tool_info && typeof step.tool_info === "object"
+        ? (step.tool_info as Record<string, unknown>)
+        : null;
+      const toolName = (typeof step.tool_name === "string" && step.tool_name)
+        || (typeof toolInfo?.name === "string" && toolInfo.name)
+        || "tool";
+      const params = toolInfo?.parameters && typeof toolInfo.parameters === "object"
+        ? (toolInfo.parameters as Record<string, unknown>)
+        : null;
+      const summary = redactSecrets(summarizeAgyTool(toolName, params), secrets);
+      const status: ChatToolEvent["status"] = stepState === "DONE"
+        ? "done"
+        : stepState === "ERROR" || stepState === "FAILED" || stepState === "CANCELED" || stepState === "CANCELLED"
+          ? "error"
+          : "running";
+      const rawOutput = typeof toolInfo?.output === "string" ? toolInfo.output : "";
+      const output = rawOutput ? redactSecrets(rawOutput, secrets).slice(0, MAX_TOOL_OUTPUT_CHARS) : undefined;
+      upsertToolEvent(state, { id, tool: toolName, summary, status, ...(output ? { output } : {}) }, emit);
+      return;
+    }
+    return;
+  }
+
+  if (eventType === "result") {
+    const res = obj.result && typeof obj.result === "object"
+      ? (obj.result as Record<string, unknown>)
+      : null;
+    if (!res) return;
+    const resConvId = typeof res.conversation_id === "string" ? res.conversation_id.trim() : "";
+    if (resConvId && !state.externalSessionId) {
+      state.externalSessionId = resConvId;
+      emit({ type: "status", message: "Antigravity CLI 会话已就绪", external_session_id: state.externalSessionId });
+    }
+    const resStatus = typeof res.status === "string" ? res.status.toUpperCase() : "";
+    const isError = resStatus === "ERROR" || (typeof res.error === "string" && res.error.length > 0);
+    if (isError) {
+      const msg = typeof res.error === "string" && res.error ? res.error : "Antigravity CLI 执行失败";
+      state.errorMessage = redactSecrets(msg, secrets);
+    } else if (typeof res.response === "string" && res.response && !state.text) {
+      const clean = redactSecrets(res.response, secrets).slice(0, MAX_OUTPUT_CHARS);
+      state.text = clean;
+      emit({ type: "text_delta", delta: clean });
+    }
+    for (const ev of state.toolEvents.values()) {
+      if (ev.status === "running") {
+        upsertToolEvent(state, { ...ev, status: isError ? "error" : "done" }, emit);
+      }
+    }
+  }
+}
+
 export function createCliStreamParser(
   runtime: ChatRuntime,
   secrets: string[],
@@ -977,6 +1127,8 @@ export function createCliStreamParser(
             const usage = codexContextUsage(obj.info);
             if (usage) { nativeCodexSnapshot = true; publish(usage); }
           }
+        } else if (runtime === "agy") {
+          handleAgyJsonLine(obj, state, secrets, onEvent, publish);
         } else {
           trackClaude(obj);
           handleClaudeJsonLine(obj, state, secrets, onEvent, onImage, lookupAttachment);

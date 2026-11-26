@@ -677,7 +677,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       run_id: string;
       project_id: string;
       mode?: string;
-      runtime: "codex" | "claude";
+      runtime: "codex" | "claude" | "agy";
       model?: string;
       reasoning_effort?: ChatStart["reasoning_effort"];
       prompt: string;
@@ -711,7 +711,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         try {
           if (!validProjectId(p.project_id) || !Object.hasOwn(c.projects ?? {}, p.project_id))
             throw new Error("Project is not locally bound");
-          if (p.runtime !== "codex" && p.runtime !== "claude") throw new Error("Invalid CLI runtime");
+          if (p.runtime !== "codex" && p.runtime !== "claude" && p.runtime !== "agy") throw new Error("Invalid CLI runtime");
           if (typeof p.prompt !== "string" || !p.prompt.trim()) throw new Error("Empty CLI prompt");
           abort.signal.throwIfAborted();
           const project = config.projects?.[p.project_id];

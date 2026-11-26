@@ -4,7 +4,7 @@ import { accessSync, constants, existsSync, mkdirSync, statSync, unlinkSync, wri
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { chatImageAttachments } from "../../server/chat-image-attachments.ts";
-import { buildCliInvocation, createCliStreamParser, redactSecrets } from "../../server/cli-stream-parser.ts";
+import { buildCliInvocation, createCliStreamParser, formatCliStdinPrompt, redactSecrets } from "../../server/cli-stream-parser.ts";
 import type { RunChatTurnResult } from "../../server/codex-chat.ts";
 import {
   startRelaydeskMcpServer,
@@ -60,7 +60,7 @@ export function datasourceValues(input: ChatStart["datasource_env"]) {
 }
 export function checkChat(p: ChatStart) {
   if (
-    !["codex", "claude"].includes(p.runtime) ||
+    !["codex", "claude", "agy"].includes(p.runtime) ||
     !["workspace-write", "read-only"].includes(p.sandbox_mode) ||
     typeof p.prompt !== "string"
   )
@@ -152,10 +152,13 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   const candidates =
     configured.includes("/") || isAbsolute(configured)
       ? [resolve(configured)]
-      : (process.env.PATH ?? "")
-          .split(delimiter)
-          .filter(isAbsolute)
-          .map((dir) => join(dir, configured));
+      : [
+          ...(process.env.PATH ?? "")
+            .split(delimiter)
+            .filter(isAbsolute)
+            .map((dir) => join(dir, configured)),
+          ...(!cfg?.bin && runtime === "agy" ? [join(o.homeDir, ".local", "bin", "agy")] : []),
+        ];
   const bin = candidates.find((candidate) => {
     try {
       accessSync(candidate, constants.X_OK);
@@ -186,7 +189,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   const secrets = [...datasource.secrets, String(o.config.agent_token || "")].filter(Boolean);
   const fullAccess = isPublicFeedback
     ? false
-    : (runtime === "codex" ? o.config.codex_full_access : o.config.claude_full_access);
+    : (runtime === "codex" ? o.config.codex_full_access : runtime === "agy" ? o.config.agy_full_access : o.config.claude_full_access);
   let mcpHandle: RelaydeskMcpHandle | null = null;
   let claudeMcpConfigPath: string | null = null;
   if (effectiveEnableMcp) {
@@ -223,8 +226,8 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     networkAccess: effectiveNetworkAccess,
     localAccess: !isPublicFeedback && fullAccess === true ? "full" : "restricted",
     workspaceDir: o.cwd,
-    // Fresh turns mount the shadow dir; Claude also accepts --add-dir on resume.
-    reposDir: runtime === "claude" && effectiveResumeSessionId ? o.spaceDir : null,
+    // Fresh turns mount the shadow dir; Claude and Agy also accept --add-dir on resume.
+    reposDir: (runtime === "claude" || runtime === "agy") && effectiveResumeSessionId ? o.spaceDir : null,
     extraAddDirs: [o.spaceDir],
     imagePaths: attachedImages.paths,
     resumeSessionId: effectiveResumeSessionId,
@@ -388,7 +391,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     child.once("error", reject);
     child.once("close", resolve);
   });
-  child.stdin.end(clean(o.prompt), "utf8");
+  child.stdin.end(formatCliStdinPrompt(runtime, clean(o.prompt)), "utf8");
   try {
     const code = await closed;
     await stopGroup();

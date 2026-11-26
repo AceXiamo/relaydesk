@@ -114,7 +114,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
         executionTarget: activeTarget,
         runtime: rt,
       }).ready;
-    return { codex: check("codex"), claude: check("claude") };
+    return { codex: check("codex"), claude: check("claude"), agy: check("agy") };
   }, [agents, effectivePriority, task.project_id, activeTarget]);
 
   const load = useCallback(async () => {
@@ -360,7 +360,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
             className="max-w-full truncate rounded-md bg-[var(--surface-subtle)] px-2 py-1 font-mono text-[11px] text-[var(--text-secondary)]"
             title={`${runtimeLabel(session.runtime)} · ${session.model || "节点默认"} · ${nodeName || target || "本机"}`}
           >
-            {session.runtime === "claude" ? "Claude" : "Codex"}
+            {session.runtime === "claude" ? "Claude" : session.runtime === "agy" ? "Agy" : "Codex"}
             {" · "}
             {session.model || "节点默认"}
             {session.reasoning_effort && session.reasoning_effort !== "default"
@@ -400,8 +400,8 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
             <div className="space-y-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-4 text-left shadow-xs">
               <div className="space-y-1.5">
                 <p className="text-[11.5px] font-medium text-[var(--text-secondary)]">Harness（运行工具）</p>
-                <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="选择任务 Harness">
-                  {(["codex", "claude"] as const).map((rt) => {
+                <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="选择任务 Harness">
+                  {(["codex", "claude", "agy"] as const).map((rt) => {
                     const selected = activeRuntime === rt;
                     const ready = runtimeAvailability[rt];
                     return (
@@ -559,7 +559,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                 onChange={handleSelectTarget}
               />
               <div className="inline-flex h-7 items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/60 p-0.5" role="group" aria-label="切换会话 Harness">
-                {(["codex", "claude"] as const).map((rt) => (
+                {(["codex", "claude", "agy"] as const).map((rt) => (
                   <button
                     key={rt}
                     type="button"
@@ -572,7 +572,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                         : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
                     }`}
                   >
-                    {rt === "claude" ? "Claude" : "Codex"}
+                    {rt === "claude" ? "Claude" : rt === "agy" ? "Agy" : "Codex"}
                   </button>
                 ))}
               </div>

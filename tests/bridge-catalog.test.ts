@@ -50,7 +50,11 @@ describe("local bridge model discovery", () => {
       model_catalog_files: ["models.json"], models: [{ id: "gpt-5.4", runtime: "codex", label: "explicit" }, { id: "gpt-5.4", runtime: "claude" },
         { id: marker(5), runtime: "claude" }, { id: marker(1), runtime: "codex" }],
     }, { homeDir, configDir });
-    expect(result.runtimes).toEqual({ codex: { available: true, version: "1.2.3", default_model: "gpt-5.4", default_effort: "high" }, claude: { available: false, version: "" } });
+    expect(result.runtimes).toEqual({
+      codex: { available: true, version: "1.2.3", default_model: "gpt-5.4", default_effort: "high" },
+      claude: { available: false, version: "" },
+      agy: { available: false, version: "" },
+    });
     expect(result.db_clients).toEqual(["psql"]);
     const get = (id: string, runtime = "claude") => result.models.find(m => m.id === id && m.runtime === runtime);
     expect(get("gpt-5.4", "codex")).toMatchObject({ label: "explicit", context_window: 12345, effort_levels: ["low", "medium", "high", "max"], source: "bridge_config", default_effort: "high" });
@@ -77,6 +81,39 @@ describe("local bridge model discovery", () => {
     const configured = await detectBridgeCatalog(config, { homeDir, configDir });
     expect(configured.runtimes.codex.default_fast_mode).toBe("on");
     expect(JSON.stringify(configured)).not.toContain(marker(1));
+  });
+
+  it("discovers Antigravity CLI (agy) from ~/.local/bin/agy and parses `agy models`", async () => {
+    const localBinDir = join(homeDir, ".local", "bin");
+    await mkdir(localBinDir, { recursive: true });
+    const fakeAgy = join(localBinDir, "agy");
+    await writeFile(
+      fakeAgy,
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "--version" ]; then echo "agy 1.5.18"; exit 0; fi',
+        'if [ "$1" = "models" ]; then',
+        '  echo "Fetching available models..."',
+        '  printf "gemini-4-neon-medium\\tGemini 4 Neon (Medium)\\n"',
+        '  printf "claude-opus-5-5-high\\tClaude Opus 5.5 (High)\\n"',
+        "  exit 0",
+        "fi",
+        "exit 1",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const result = await detectBridgeCatalog({}, { homeDir, configDir });
+    expect(result.runtimes.agy).toEqual({ available: true, version: "1.5.18" });
+    expect(result.models.find(m => m.runtime === "agy" && m.id === "gemini-4-neon-medium")).toMatchObject({
+      label: "Gemini 4 Neon (Medium)",
+      provider: "Google",
+      source: "detected",
+    });
+    expect(result.models.find(m => m.runtime === "agy" && m.id === "claude-opus-5-5-high")).toMatchObject({
+      label: "Claude Opus 5.5 (High)",
+      provider: "Anthropic",
+      source: "detected",
+    });
   });
 
   it("discovers all Claude picker options and merges the default without exporting option metadata", async () => {
@@ -132,7 +169,7 @@ describe("local bridge model discovery", () => {
     const config = { auto_detect_cli_configs: false, model_catalog_files: ["~/manual.json", "missing.json", "~/manual.json"] };
     expect(bridgeCatalogPaths(config, { homeDir, configDir })).toEqual([join(homeDir, "manual.json"), join(configDir, "missing.json")]);
     expect(bridgeCatalogPaths({}, { homeDir })).toEqual([
-      ".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml", ".codex/models_cache.json", ".claude/cache/model-capabilities.json",
+      ".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml", ".gemini/antigravity-cli/settings.json", ".codex/models_cache.json", ".claude/cache/model-capabilities.json",
     ].map(path => join(homeDir, path)));
     expect((await detectBridgeCatalog(config, { homeDir, configDir })).models).toEqual([{ id: "declared", runtime: "codex", source: "bridge_config" }]);
   });

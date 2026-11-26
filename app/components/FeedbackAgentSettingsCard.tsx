@@ -66,7 +66,7 @@ export function FeedbackAgentSettingsCard({
       setSaved(settings);
       setEnabled(Boolean(settings.enabled));
       setExecutionTarget(settings.execution_target || "auto");
-      setRuntime(settings.runtime === "claude" ? "claude" : "codex");
+      setRuntime(settings.runtime === "claude" || settings.runtime === "agy" ? settings.runtime : "codex");
       setModel(settings.model || "");
       setReasoningEffort(settings.reasoning_effort || "default");
       setSystemPrompt(settings.system_prompt || "");
@@ -167,7 +167,7 @@ export function FeedbackAgentSettingsCard({
   }, [agents, localOnlyPriority, project.id, runtime, executionTarget]);
 
   const runtimeOptions = useMemo<Array<SelectOption<ChatRuntime>>>(() => {
-    const list: ChatRuntime[] = ["codex", "claude"];
+    const list: ChatRuntime[] = ["codex", "claude", "agy"];
     return list.map((rt) => {
       const info = activeAgent?.runtimes?.[rt];
       let badge: string | undefined;
@@ -181,9 +181,7 @@ export function FeedbackAgentSettingsCard({
         description:
           info?.default_model
             ? `默认模型：${info.default_model}`
-            : rt === "codex"
-              ? "本机 Codex CLI"
-              : "本机 Claude Code",
+            : `本机 ${runtimeLabel(rt)}`,
       };
     });
   }, [activeAgent]);
@@ -193,7 +191,7 @@ export function FeedbackAgentSettingsCard({
     return (
       enabled !== Boolean(saved.enabled) ||
       executionTarget !== (saved.execution_target || "auto") ||
-      runtime !== (saved.runtime === "claude" ? "claude" : "codex") ||
+      runtime !== (saved.runtime === "claude" || saved.runtime === "agy" ? saved.runtime : "codex") ||
       model.trim() !== (saved.model || "").trim() ||
       reasoningEffort !== (saved.reasoning_effort || "default") ||
       systemPrompt.trim() !== (saved.system_prompt || "").trim()
@@ -251,7 +249,7 @@ export function FeedbackAgentSettingsCard({
     if (!saved) return;
     setEnabled(Boolean(saved.enabled));
     setExecutionTarget(saved.execution_target || "auto");
-    setRuntime(saved.runtime === "claude" ? "claude" : "codex");
+    setRuntime(saved.runtime === "claude" || saved.runtime === "agy" ? saved.runtime : "codex");
     setModel(saved.model || "");
     setReasoningEffort(saved.reasoning_effort || "default");
     setSystemPrompt(saved.system_prompt || "");
@@ -275,7 +273,7 @@ export function FeedbackAgentSettingsCard({
       setSaved(updated);
       setEnabled(Boolean(updated.enabled));
       setExecutionTarget(updated.execution_target || "auto");
-      setRuntime(updated.runtime === "claude" ? "claude" : "codex");
+      setRuntime(updated.runtime === "claude" || updated.runtime === "agy" ? updated.runtime : "codex");
       setModel(updated.model || "");
       setReasoningEffort(updated.reasoning_effort || "default");
       setSystemPrompt(updated.system_prompt || "");

@@ -12,6 +12,7 @@ export interface BridgeCatalogConfig {
   agent_token?: unknown;
   claude_full_access?: boolean;
   codex_full_access?: boolean;
+  agy_full_access?: boolean;
   auto_detect_cli_configs?: boolean;
   model_catalog_files?: unknown;
   runtimes?: Partial<Record<ChatRuntime, { bin?: string; default_model?: string; default_effort?: ChatReasoningEffort; extra_env?: unknown }>>;
@@ -27,7 +28,7 @@ export interface BridgeCatalog {
 
 type Fields = Record<string, unknown>;
 const record = (input: unknown): Fields => input !== null && typeof input === "object" && !Array.isArray(input) ? input as Fields : {};
-const runtimes = ["codex", "claude"] as const;
+const runtimes = ["codex", "claude", "agy"] as const;
 const dbClients = ["psql", "mysql", "sqlite3", "redis-cli", "mongosh"];
 const exec = promisify(execFile);
 const maxFileBytes = 1024 * 1024;
@@ -38,9 +39,11 @@ function sources(config: BridgeCatalogConfig, { homeDir = homedir(), configDir =
     return typeof override === "string" && isAbsolute(override) ? override : join(homeDir, `.${runtime}`);
   }
   const claudeDir = harnessDir("claude", "CLAUDE_CONFIG_DIR"), codexDir = harnessDir("codex", "CODEX_HOME");
+  const agyDir = join(homeDir, ".gemini", "antigravity-cli");
   const detect = config.auto_detect_cli_configs !== false;
   const claude = detect ? ["settings.json", "settings.local.json"].map(name => join(claudeDir, name)) : [];
   const codex = detect ? [join(codexDir, "config.toml")] : [];
+  const agy = detect ? [join(agyDir, "settings.json")] : [];
   const caches = detect ? [
     { runtime: "codex" as const, path: join(codexDir, "models_cache.json") },
     { runtime: "claude" as const, path: join(claudeDir, "cache", "model-capabilities.json") },
@@ -48,13 +51,13 @@ function sources(config: BridgeCatalogConfig, { homeDir = homedir(), configDir =
   const catalogs = Array.isArray(config.model_catalog_files) ? config.model_catalog_files
     .filter((p): p is string => typeof p === "string" && p.length > 0 && p.length <= 4096 && !p.includes("\0"))
     .map(p => p.startsWith("~/") ? resolve(homeDir, p.slice(2)) : resolve(configDir, p)) : [];
-  return { claude, codex, caches, catalogs: [...new Set(catalogs)] };
+  return { claude, codex, agy, caches, catalogs: [...new Set(catalogs)] };
 }
 
 /** Includes missing files so the daemon can refresh when a config is first created. */
 export function bridgeCatalogPaths(config: BridgeCatalogConfig, options: BridgeCatalogOptions = {}): string[] {
-  const { claude, codex, caches, catalogs } = sources(config, options);
-  return [...new Set([...claude, ...codex, ...caches.map(cache => cache.path), ...catalogs])];
+  const { claude, codex, agy, caches, catalogs } = sources(config, options);
+  return [...new Set([...claude, ...codex, ...agy, ...caches.map(cache => cache.path), ...catalogs])];
 }
 
 async function load(path: string, parse: (text: string) => unknown, byteLimit = maxFileBytes): Promise<unknown> {
@@ -86,14 +89,52 @@ async function probe(bin: string): Promise<BridgeCatalogRuntime> {
   } catch { return { available: false, version: "" }; }
 }
 
+async function isExecutableFile(path: string): Promise<boolean> {
+  try {
+    if ((await stat(path)).isFile()) { await access(path, constants.X_OK); return true; }
+  } catch { /* Missing or not executable. */ }
+  return false;
+}
+
 async function onPath(name: string): Promise<boolean> {
   for (const dir of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
-    const path = join(dir, name);
-    try {
-      if ((await stat(path)).isFile()) { await access(path, constants.X_OK); return true; }
-    } catch { /* Not installed in this directory. */ }
+    if (await isExecutableFile(join(dir, name))) return true;
   }
   return false;
+}
+
+async function resolveRuntimeBin(runtime: ChatRuntime, configured: string | undefined, homeDir: string): Promise<string> {
+  if (configured) return configured;
+  if (runtime === "agy" && !(await onPath("agy"))) {
+    const localInstall = join(homeDir, ".local", "bin", "agy");
+    if (await isExecutableFile(localInstall)) return localInstall;
+  }
+  return runtime;
+}
+
+async function probeAgyModels(bin: string): Promise<Array<Record<string, unknown>>> {
+  try {
+    const { stdout } = await exec(bin, ["models"], { timeout: 5000, killSignal: "SIGKILL", maxBuffer: 65536 });
+    const rows: Array<Record<string, unknown>> = [];
+    for (const rawLine of stdout.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || !line.includes("\t")) continue;
+      const [id, label] = line.split("\t").map(part => part.trim());
+      if (!id || id.startsWith("-")) continue;
+      const provider = id.startsWith("claude-") ? "Anthropic" : id.startsWith("gpt-") ? "OpenAI" : "Google";
+      rows.push({
+        runtime: "agy",
+        id,
+        ...(label ? { label } : {}),
+        provider,
+        supports_effort: true,
+        effort_levels: ["low", "medium", "high", "max"],
+      });
+    }
+    return rows;
+  } catch {
+    return [];
+  }
 }
 
 function effort(raw: unknown): ModelCatalogItem["default_effort"] {
@@ -106,16 +147,24 @@ function effort(raw: unknown): ModelCatalogItem["default_effort"] {
 }
 
 export async function detectBridgeCatalog(config: BridgeCatalogConfig, options: BridgeCatalogOptions = {}): Promise<BridgeCatalog> {
+  const homeDir = options.homeDir ?? homedir();
   const files = sources(config, options);
-  const [claude, codex, catalogs, caches, runtimeProbes, dbProbes] = await Promise.all([
+  const resolvedBins = await Promise.all(
+    runtimes.map(runtime => resolveRuntimeBin(runtime, config.runtimes?.[runtime]?.bin, homeDir)),
+  );
+  const [claude, codex, agy, catalogs, caches, runtimeProbes, dbProbes] = await Promise.all([
     Promise.all(files.claude.map(path => load(path, JSON.parse))),
     Promise.all(files.codex.map(path => load(path, parseToml))),
+    Promise.all(files.agy.map(path => load(path, JSON.parse))),
     Promise.all(files.catalogs.map(path => load(path, JSON.parse))),
     // Codex embeds model instructions in its cache, which can exceed the config file limit.
     Promise.all(files.caches.map(async ({ runtime, path }) => ({ runtime, models: record(await load(path, JSON.parse, 8 * maxFileBytes)).models }))),
-    Promise.all(runtimes.map(runtime => probe(config.runtimes?.[runtime]?.bin || runtime))),
+    Promise.all(resolvedBins.map(bin => probe(bin))),
     Promise.all(dbClients.map(onPath)),
   ]);
+  const agyDetectedModels = runtimeProbes[2].available && config.auto_detect_cli_configs !== false
+    ? await probeAgyModels(resolvedBins[2])
+    : [];
   // Refuse aliases/labels duplicating an actual local credential, even when pasted into a public field.
   const secrets = new Set<string>();
   if (typeof config.agent_token === "string" && config.agent_token) secrets.add(config.agent_token);
@@ -184,6 +233,13 @@ export async function detectBridgeCatalog(config: BridgeCatalogConfig, options: 
         default_effort: effort(profile.model_reasoning_effort) }], "cli_config");
     }
   }
+  for (const value of agy) {
+    const settings = record(value);
+    add([{ id: settings.model, runtime: "agy", default_effort: effort(settings.effort ?? settings.effortLevel), is_default: true }], "cli_config");
+  }
+  if (agyDetectedModels.length > 0) {
+    add(agyDetectedModels, "detected");
+  }
   // Caches describe capabilities. They do not select models or grant access to them.
   for (const { runtime, models } of caches) {
     if (!Array.isArray(models)) continue;
@@ -209,7 +265,7 @@ export async function detectBridgeCatalog(config: BridgeCatalogConfig, options: 
     if (items.has(key)) items.set(key, { ...builtin, ...items.get(key) });
   }
   return {
-    runtimes: { codex: runtimeProbes[0], claude: runtimeProbes[1] },
+    runtimes: { codex: runtimeProbes[0], claude: runtimeProbes[1], agy: runtimeProbes[2] },
     models: [...items.values()], db_clients: dbClients.filter((_, i) => dbProbes[i]),
   };
 }

@@ -195,7 +195,7 @@ it.each(["cloud", "local"])("delivers the Codex rollout snapshot from the effect
   } else {
     const cli = { available: true, version: "test" };
     const result = await runLocalChat({ ...shared, config: { runtimes: { codex: { bin: fake, extra_env: { CODEX_HOME: home } } } },
-      catalog: { models: [], db_clients: [], runtimes: { codex: cli, claude: cli } }, homeDir: temp, cwd: temp, spaceDir: temp, allowSecrets: false,
+      catalog: { models: [], db_clients: [], runtimes: { codex: cli, claude: cli, agy: cli } }, homeDir: temp, cwd: temp, spaceDir: temp, allowSecrets: false,
       p: { session_id: "session", project_id: "project", run_id: "run", runtime: "codex", sandbox_mode: "read-only", prompt: shared.prompt, workspace_manifest: { files: [] } } });
     expect(result).toMatchObject(expected);
   }

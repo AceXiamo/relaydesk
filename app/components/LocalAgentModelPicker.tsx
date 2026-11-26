@@ -40,7 +40,9 @@ const CONTEXT_FORMAT = new Intl.NumberFormat("en", {
 });
 
 export function runtimeLabel(runtime: ChatRuntime): string {
-  return runtime === "claude" ? "Claude Code" : "Codex CLI";
+  if (runtime === "claude") return "Claude Code";
+  if (runtime === "agy") return "Antigravity CLI";
+  return "Codex CLI";
 }
 
 export function adaptSelectionForRuntimeSwitch(options: {

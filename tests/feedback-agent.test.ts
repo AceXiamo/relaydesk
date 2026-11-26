@@ -581,6 +581,7 @@ describe("feedback agent Local Bridge execution, isolation, streaming, and SSRF 
     const runtimes = {
       claude: { available: true, version: "1", ...(defaultModel && { default_model: defaultModel }) },
       codex: { available: false, version: "" },
+      agy: { available: false, version: "" },
     };
     const models = ["provider/example", "provider/example[1m]"].map(id => ({ runtime: "claude" as const, id }));
     await conn.hello([{ project_id: projectId, workdir, path_ok: true, path_error: "" }], { runtimes, models });
@@ -638,6 +639,7 @@ console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_messag
         runtimes: {
           codex: { available: true, version: "1.0.0", default_model: "gpt-5.4" },
           claude: { available: false, version: "" },
+          agy: { available: false, version: "" },
         },
         models: [],
         db_clients: [],
@@ -689,6 +691,7 @@ console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_messag
         runtimes: {
           codex: { available: true, version: "1.0.0", default_model: "gpt-5.4" },
           claude: { available: false, version: "" },
+          agy: { available: false, version: "" },
         },
         models: [],
       },

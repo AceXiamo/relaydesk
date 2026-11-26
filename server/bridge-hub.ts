@@ -65,7 +65,7 @@ const runtime = z.object({ default_fast_mode: z.enum(["on", "off"]).optional(), 
 const catalog = z.object({
   hostname: text(200).optional(), platform: text(80).optional(), bridge_version: text(64).optional(),
   max_concurrency: z.number().int().min(0).max(128).optional(), accept_cli_runs: z.boolean().optional(),
-  runtimes: z.object({ claude: runtime.optional(), codex: runtime.optional() }).optional(),
+  runtimes: z.object({ claude: runtime.optional(), codex: runtime.optional(), agy: runtime.optional() }).optional(),
   projects: z.array(report).max(1000).optional(), models: z.unknown().optional(),
   allowed_roots_enabled: z.boolean().optional(), db_clients: z.array(text(64)).max(64).optional(),
 });

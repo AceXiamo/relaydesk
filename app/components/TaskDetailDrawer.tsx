@@ -1029,7 +1029,7 @@ export function TaskDetailDrawer({
                           role="group"
                           aria-label="选择分配 Harness"
                         >
-                          {(["codex", "claude"] as const).map((rt) => (
+                          {(["codex", "claude", "agy"] as const).map((rt) => (
                             <button
                               key={rt}
                               type="button"
@@ -1042,7 +1042,7 @@ export function TaskDetailDrawer({
                                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
                               }`}
                             >
-                              {rt === "claude" ? "Claude" : "Codex"}
+                              {rt === "claude" ? "Claude" : rt === "agy" ? "Agy" : "Codex"}
                             </button>
                           ))}
                         </div>

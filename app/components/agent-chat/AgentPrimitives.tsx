@@ -1482,7 +1482,7 @@ function ModelControls({
         }}
       >
         <LivePulseDot tone={ready ? "emerald" : "zinc"} active={!!ready} />
-        <span className="shrink-0">{runtime === "codex" ? "Codex" : "Claude"}</span>
+        <span className="shrink-0">{runtime === "codex" ? "Codex" : runtime === "agy" ? "Agy" : "Claude"}</span>
         <span className="max-w-[88px] sm:max-w-[200px] truncate font-mono text-[11px] text-[var(--text-muted)]">
           {current?.label || model || "默认模型"}
         </span>
@@ -1499,7 +1499,7 @@ function ModelControls({
           className="absolute left-0 right-0 sm:right-auto sm:w-[360px] bottom-full mb-2 z-30 max-h-[55dvh] sm:max-h-none flex flex-col rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up"
         >
           <div className="flex gap-1 p-1.5 border-b border-[var(--border-subtle)]">
-            {(["claude", "codex"] as const).map((rt) => (
+            {(["claude", "codex", "agy"] as const).map((rt) => (
               <button
                 key={rt}
                 type="button"
@@ -1523,7 +1523,7 @@ function ModelControls({
                     : "text-[var(--text-muted)] hover:text-[var(--text-primary)]",
                 )}
               >
-                {rt === "claude" ? "Claude Code" : "Codex CLI"}
+                {rt === "claude" ? "Claude Code" : rt === "agy" ? "Antigravity" : "Codex CLI"}
               </button>
             ))}
           </div>
@@ -2320,7 +2320,7 @@ export function PromptBar({
           onSubmit={handleSubmitFromEditor}
           onInterceptKeyDown={handleInterceptKeyDown}
           onPasteImages={onUploadImages}
-          placeholder={`向 ${runtime === "codex" ? "Codex" : "Claude"} 提问，支持粘贴/拖入图片、\`代码\`、@ 引用、/ 快捷指令…`}
+          placeholder={`向 ${runtime === "codex" ? "Codex" : runtime === "agy" ? "Antigravity" : "Claude"} 提问，支持粘贴/拖入图片、\`代码\`、@ 引用、/ 快捷指令…`}
         />
 
         {/* Inner Bottom Action Pill Bar */}

@@ -368,7 +368,7 @@ export function ProjectRoutingCard({
             <div className="grid items-start gap-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40 p-3.5 sm:grid-cols-2 lg:grid-cols-3">
               <div className="space-y-1.5">
                 <p className="text-xs text-[var(--text-secondary)]">Harness（运行工具）</p>
-                <Select<"default" | "codex" | "claude">
+                <Select<"default" | ChatRuntime>
                   ariaLabel="任务 Harness"
                   fullWidth
                   size="sm"
@@ -378,6 +378,7 @@ export function ProjectRoutingCard({
                     { value: "default", label: `跟随项目默认（${runtimeLabel(defaultRuntime)}）` },
                     { value: "codex", label: "Codex CLI" },
                     { value: "claude", label: "Claude Code" },
+                    { value: "agy", label: "Antigravity CLI" },
                   ]}
                   onChange={(value) => {
                     const nextRuntime: ChatRuntime = value === "default" ? defaultRuntime : value;

@@ -217,7 +217,7 @@ function AgentDetails({
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-muted)]">
-        {(["claude", "codex"] as const).map((runtime) => (
+        {(["claude", "codex", "agy"] as const).map((runtime) => (
           <span key={runtime} className="inline-flex items-center gap-1">
             <span
               className={`inline-block size-1.5 rounded-full ${

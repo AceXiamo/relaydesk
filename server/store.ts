@@ -158,7 +158,7 @@ export function normalizeDeployPolicy(raw: unknown): ProjectDeployPolicy {
   const doc_path =
     typeof parsed.doc_path === "string" ? parsed.doc_path.trim().slice(0, 240) : "";
 
-  const runtime = parsed.runtime === "codex" || parsed.runtime === "claude" ? parsed.runtime : null;
+  const runtime = parsed.runtime === "codex" || parsed.runtime === "claude" || parsed.runtime === "agy" ? parsed.runtime : null;
   return {
     runtime,
     model: runtime && validCatalogId(parsed.model) ? parsed.model : null,
@@ -243,7 +243,7 @@ export function parseDeployPolicyPatch(
   }
 
   const runtime = patch.runtime === undefined ? current.runtime : patch.runtime;
-  if (runtime !== null && runtime !== "codex" && runtime !== "claude") {
+  if (runtime !== null && runtime !== "codex" && runtime !== "claude" && runtime !== "agy") {
     throw new ApiError(400, "Invalid release runtime");
   }
   let model = runtime === current.runtime ? current.model : null;
@@ -304,7 +304,7 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE TABLE IF NOT EXISTS feedback_agents (
     project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
-    enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), runtime TEXT NOT NULL CHECK(runtime IN ('codex','claude')),
+    enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), runtime TEXT NOT NULL CHECK(runtime IN ('codex','claude','agy')),
     model TEXT NOT NULL, public_guide TEXT NOT NULL DEFAULT '',
     execution_target TEXT NOT NULL DEFAULT 'auto',
     reasoning_effort TEXT NOT NULL DEFAULT 'default',
@@ -401,7 +401,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     release_id TEXT,
     title TEXT NOT NULL,
-    runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude')),
+    runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude','agy')),
     model TEXT NOT NULL DEFAULT '',
     reasoning_effort TEXT NOT NULL DEFAULT 'default',
     fast_mode TEXT NOT NULL DEFAULT 'default' CHECK(fast_mode IN ('default','on','off')),
@@ -1127,6 +1127,7 @@ export class Store {
     this.db.exec(
       "UPDATE feedback_agents SET system_prompt = public_guide WHERE system_prompt = '' AND public_guide != ''",
     );
+    this.migrateFeedbackAgentsRuntimeCheck();
     this.db.exec("CREATE INDEX IF NOT EXISTS chat_sessions_project_kind ON chat_sessions(project_id, kind, updated_at DESC)");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS chat_sessions_task_unique ON chat_sessions(task_id) WHERE task_id IS NOT NULL");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS chat_sessions_release_unique ON chat_sessions(release_id) WHERE release_id IS NOT NULL");
@@ -1152,16 +1153,19 @@ export class Store {
       .prepare("PRAGMA table_info(chat_sessions)")
       .all() as Array<{ name: string }>;
     const hasReleaseId = cols.some((c) => c.name === "release_id");
+    const hasContextUsed = cols.some((c) => c.name === "context_used_tokens");
+    const hasContextWindow = cols.some((c) => c.name === "context_window_tokens");
     const hasOldKindCheck = /CHECK\s*\(\s*kind\s+IN\s*\(\s*'chat'\s*,\s*'task'\s*\)\s*\)/i.test(tableSql);
+    const hasOldRuntimeCheck = !/CHECK\s*\(\s*runtime\s+IN\s*\([^)]*'agy'/i.test(tableSql);
 
-    if (!hasOldKindCheck) {
+    if (!hasOldKindCheck && !hasOldRuntimeCheck) {
       if (!hasReleaseId) {
         this.db.exec("ALTER TABLE chat_sessions ADD COLUMN release_id TEXT");
       }
       return;
     }
 
-    // Safely rebuild chat_sessions to allow kind='release' and add release_id
+    // Safely rebuild chat_sessions to allow kind='release', runtime='agy', and add release_id
     // without triggering ON DELETE CASCADE on chat_messages.
     this.db.exec("PRAGMA foreign_keys=OFF");
     try {
@@ -1174,7 +1178,7 @@ export class Store {
             task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
             release_id TEXT,
             title TEXT NOT NULL,
-            runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude')),
+            runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude','agy')),
             model TEXT NOT NULL DEFAULT '',
             reasoning_effort TEXT NOT NULL DEFAULT 'default',
             fast_mode TEXT NOT NULL DEFAULT 'default' CHECK(fast_mode IN ('default','on','off')),
@@ -1185,21 +1189,57 @@ export class Store {
             external_session_id TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'idle' CHECK(status IN ('idle','running','error')),
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL${hasContextUsed ? ",\n            context_used_tokens INTEGER" : ""}${hasContextWindow ? ",\n            context_window_tokens INTEGER" : ""}
           );
           INSERT INTO chat_sessions_new (
             id, project_id, kind, task_id, release_id, title, runtime, model,
             reasoning_effort, fast_mode, execution_target, resolved_target, sandbox_mode,
-            network_access, external_session_id, status, created_at, updated_at
+            network_access, external_session_id, status, created_at, updated_at${hasContextUsed ? ", context_used_tokens" : ""}${hasContextWindow ? ", context_window_tokens" : ""}
           )
           SELECT
             id, project_id, kind, task_id, ${hasReleaseId ? "release_id" : "NULL"}, title, runtime, model,
             reasoning_effort, fast_mode, execution_target, resolved_target, sandbox_mode,
-            network_access, external_session_id, status, created_at, updated_at
+            network_access, external_session_id, status, created_at, updated_at${hasContextUsed ? ", context_used_tokens" : ""}${hasContextWindow ? ", context_window_tokens" : ""}
           FROM chat_sessions;
           DROP TABLE chat_sessions;
           ALTER TABLE chat_sessions_new RENAME TO chat_sessions;
           CREATE INDEX IF NOT EXISTS chat_sessions_project ON chat_sessions(project_id, updated_at DESC);
+        `);
+      });
+    } finally {
+      this.db.exec("PRAGMA foreign_keys=ON");
+    }
+  }
+
+  private migrateFeedbackAgentsRuntimeCheck(): void {
+    const meta = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'feedback_agents'")
+      .get() as { sql?: string } | undefined;
+    const tableSql = meta?.sql ?? "";
+    if (!tableSql || /CHECK\s*\(\s*runtime\s+IN\s*\([^)]*'agy'/i.test(tableSql)) return;
+
+    this.db.exec("PRAGMA foreign_keys=OFF");
+    try {
+      this.transaction(true, () => {
+        this.db.exec(`
+          CREATE TABLE feedback_agents_new (
+            project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+            runtime TEXT NOT NULL CHECK(runtime IN ('codex','claude','agy')),
+            model TEXT NOT NULL,
+            public_guide TEXT NOT NULL DEFAULT '',
+            execution_target TEXT NOT NULL DEFAULT 'auto',
+            reasoning_effort TEXT NOT NULL DEFAULT 'default',
+            system_prompt TEXT NOT NULL DEFAULT ''
+          );
+          INSERT INTO feedback_agents_new (
+            project_id, enabled, runtime, model, public_guide, execution_target, reasoning_effort, system_prompt
+          )
+          SELECT
+            project_id, enabled, runtime, model, public_guide, execution_target, reasoning_effort, system_prompt
+          FROM feedback_agents;
+          DROP TABLE feedback_agents;
+          ALTER TABLE feedback_agents_new RENAME TO feedback_agents;
         `);
       });
     } finally {
@@ -3338,7 +3378,7 @@ export class Store {
       typeof data.title === "string" && data.title.trim()
         ? data.title.trim().slice(0, 120)
         : "新对话";
-    const runtime: ChatRuntime = data.runtime === "claude" ? "claude" : "codex";
+    const runtime: ChatRuntime = data.runtime === "claude" || data.runtime === "agy" ? data.runtime : "codex";
     const model =
       typeof data.model === "string" ? data.model.trim().slice(0, 160) : "";
     const sandboxMode: ChatSandboxMode =
@@ -3570,7 +3610,7 @@ export class Store {
       const sessionId = uuidHex();
       const now = nowIso();
       const title = `REL-${releaseNumber} 发布${claimedTaskIds.length > 0 ? `（${claimedTaskIds.length} 个任务）` : ""}`;
-      const runtime: ChatRuntime = options.runtime === "claude" ? "claude" : "codex";
+      const runtime: ChatRuntime = options.runtime === "claude" || options.runtime === "agy" ? options.runtime : "codex";
       const model = typeof options.model === "string" ? options.model.trim().slice(0, 160) : "";
       const reasoningEffort = options.reasoning_effort ?? "default";
       const executionTarget = options.execution_target ?? "auto";
@@ -4249,8 +4289,8 @@ export class Store {
         : current.title;
     const runtime: ChatRuntime =
       patch.runtime !== undefined
-        ? patch.runtime === "claude"
-          ? "claude"
+        ? patch.runtime === "claude" || patch.runtime === "agy"
+          ? patch.runtime
           : "codex"
         : current.runtime;
     const model =

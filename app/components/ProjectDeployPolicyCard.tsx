@@ -223,6 +223,7 @@ export function ProjectDeployPolicyCard({
                 { value: "inherit", label: "跟随任务 Harness 和模型" },
                 { value: "codex", label: "Codex CLI" },
                 { value: "claude", label: "Claude Code" },
+                { value: "agy", label: "Antigravity CLI" },
               ]}
               onChange={(value) => {
                 const nextRuntime = value === "inherit" ? null : value;

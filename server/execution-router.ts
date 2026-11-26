@@ -123,7 +123,7 @@ export function resolveChatExecutionTarget(options: {
   projectId: string;
   executionTarget: string;
   runtime: ChatRuntime;
-  localClis: { codex: boolean; claude: boolean };
+  localClis: { codex: boolean; claude: boolean; agy?: boolean };
 }): ResolvedChatExecutionTarget {
   const { store, bridgeHub, projectId, executionTarget, runtime, localClis } = options;
 

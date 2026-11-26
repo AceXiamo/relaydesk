@@ -28,7 +28,7 @@ export function sanitizeBridgeModels(input: unknown): ModelCatalogItem[] {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const row: Record<string, unknown> = entry;
     const { id, runtime } = row;
-    if (!validCatalogId(id) || !publicText(id, 160) || (runtime !== "claude" && runtime !== "codex")) continue;
+    if (!validCatalogId(id) || !publicText(id, 160) || (runtime !== "claude" && runtime !== "codex" && runtime !== "agy")) continue;
     const item: ModelCatalogItem = { id, runtime };
     if (publicText(row.label, 120)) item.label = row.label;
     if (publicText(row.provider, 60)) item.provider = row.provider;
@@ -71,7 +71,36 @@ export const builtinModels: ModelCatalogItem[] = [
     context_window: 1_000_000, supports_effort: true,
     effort_levels: ["off", "low", "medium", "high"], default_effort: "medium",
   },
+  {
+    runtime: "agy", provider: "Google", id: "gemini-4-neon-medium", label: "Gemini 4 Neon (Medium)",
+    context_window: 1_000_000, supports_effort: true,
+    effort_levels: ["low", "medium", "high", "max"], default_effort: "medium",
+  },
+  {
+    runtime: "agy", provider: "Google", id: "gemini-4-neon-high", label: "Gemini 4 Neon (High)",
+    context_window: 1_000_000, supports_effort: true,
+    effort_levels: ["low", "medium", "high", "max"], default_effort: "high",
+  },
+  {
+    runtime: "agy", provider: "Google", id: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash (Medium)",
+    context_window: 1_000_000, supports_effort: true,
+    effort_levels: ["low", "medium", "high"], default_effort: "medium",
+  },
 ];
+
+export const CHAT_RUNTIMES: readonly ChatRuntime[] = ["codex", "claude", "agy"] as const;
+
+export function runtimeDisplayName(runtime: ChatRuntime): string {
+  if (runtime === "claude") return "Claude Code";
+  if (runtime === "agy") return "Antigravity CLI";
+  return "Codex CLI";
+}
+
+export function runtimeShortName(runtime: ChatRuntime): string {
+  if (runtime === "claude") return "Claude";
+  if (runtime === "agy") return "Agy";
+  return "Codex";
+}
 
 // Local windows depend on the harness configuration, even for a known model ID.
 export const localBuiltinMetadata = builtinModels.map(({ context_window, ...metadata }) => metadata);
@@ -272,7 +301,7 @@ function evaluateLocalAgentForTask(
       ready: false,
       bound,
       hasRuntime,
-      reason: `节点「${agent.name}」未检测到 ${runtime === "claude" ? "Claude Code" : "Codex CLI"}`,
+      reason: `节点「${agent.name}」未检测到 ${runtimeDisplayName(runtime)}`,
     };
   }
   if (agent.max_concurrency > 0 && agent.active_runs >= agent.max_concurrency) {
