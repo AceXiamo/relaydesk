@@ -20,6 +20,10 @@ export const validCatalogTokenLimit = (n: unknown): n is number =>
 const levels = ["off", "low", "medium", "high", "max"] as const;
 const isLevel = (value: unknown): value is typeof levels[number] => levels.some(level => value === level);
 
+export function isAgyOrchestrator(id: string): boolean {
+  return /^gemini-pro-orchestrator(?:-|$)/i.test(id);
+}
+
 /** Construct a new, bounded wire object; never copy unknown keys or nested configuration. */
 export function sanitizeBridgeModels(input: unknown): ModelCatalogItem[] {
   if (!Array.isArray(input)) return [];
@@ -42,6 +46,11 @@ export function sanitizeBridgeModels(input: unknown): ModelCatalogItem[] {
     if (runtime === "codex" && typeof row.supports_fast === "boolean") item.supports_fast = row.supports_fast;
     if (Array.isArray(row.effort_levels)) item.effort_levels = [...new Set(row.effort_levels.filter(isLevel))];
     if (isLevel(row.default_effort)) item.default_effort = row.default_effort;
+    if (runtime === "agy" && isAgyOrchestrator(id)) {
+      item.supports_effort = false;
+      delete item.effort_levels;
+      delete item.default_effort;
+    }
     if (Array.isArray(row.tags)) item.tags = [...new Set<string>(row.tags.filter((tag: unknown) => publicText(tag, 48)).slice(0, 8))];
     if (row.source === "bridge_config" || row.source === "cli_config" || row.source === "detected") item.source = row.source;
     const key = `${runtime}:${id}`;
@@ -146,7 +155,7 @@ export function resolveActiveLocalAgent(
 
 export function showEffortControl(runtime: ChatRuntime, entry?: ModelCatalogItem): boolean {
   if (runtime !== "agy") return true;
-  if (entry?.supports_effort === false) return false;
+  if (!entry || isAgyOrchestrator(entry.id) || entry.supports_effort === false) return false;
   return entry?.effort_levels ? entry.effort_levels.length > 0 : entry?.supports_effort === true;
 }
 

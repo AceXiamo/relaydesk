@@ -11,7 +11,7 @@ it("hides the effort field for explicit and inherited fixed agy models", () => {
   const agent = {
     runtimes: { agy: { default_model: fixed } },
     models: [
-      { id: fixed, runtime: "agy", supports_effort: false },
+      { id: fixed, runtime: "agy", supports_effort: true, effort_levels: ["low", "medium", "high", "max"] },
       { id: "adjustable", runtime: "agy", effort_levels: ["low", "high"] },
     ],
   } as BridgeAgentSummary;

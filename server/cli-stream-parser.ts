@@ -1,3 +1,4 @@
+import { isAgyOrchestrator } from "../app/lib/model-catalog.ts";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
@@ -280,7 +281,7 @@ export function buildCliInvocation(params: {
         ? ["--mode", "auto"]
         : ["--sandbox"];
     const hasExplicitEffort = effort !== "default" && effort !== "off";
-    const isEffortUnsupportedModel = /^gemini-pro-orchestrator(?:-|$)/i.test(effectiveModel);
+    const isEffortUnsupportedModel = isAgyOrchestrator(effectiveModel);
     // Avoid `--model foo-low --effort high` conflicts if a caller passes a legacy suffixed model ID.
     const agyModel =
       hasExplicitEffort && effectiveModel

@@ -99,6 +99,8 @@ describe("local bridge model discovery", () => {
         '  printf "gemini-4-neon-medium\\tGemini 4 Neon (Medium)\\n"',
         '  printf "gemini-4-neon-low\\tGemini 4 Neon (Low)\\n"',
         '  printf "gemini-pro-orchestrator-neon\\tOrchestrator (Neon)\\n"',
+        '  printf "gemini-pro-orchestrator-neon-low\\tOrchestrator (Neon) (Low)\\n"',
+        '  printf "gemini-pro-orchestrator-neon-high\\tOrchestrator (Neon) (High)\\n"',
         '  printf "claude-opus-5-5-low\\tClaude Opus 5.5 (Low)\\n"',
         '  printf "claude-opus-5-5-high\\tClaude Opus 5.5 (High)\\n"',
         '  printf "gpt-oss-120b-medium\\tGPT-OSS 120B (Medium)\\n"',

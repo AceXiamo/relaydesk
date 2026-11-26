@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { parse as parseToml } from "smol-toml";
-import { localBuiltinMetadata, sanitizeBridgeModels, validCatalogTokenLimit } from "../../app/lib/model-catalog.ts";
+import { isAgyOrchestrator, localBuiltinMetadata, sanitizeBridgeModels, validCatalogTokenLimit } from "../../app/lib/model-catalog.ts";
 import type { BridgeRuntimeStatus, ChatReasoningEffort, ChatRuntime, ModelCatalogItem } from "../../app/lib/types.ts";
 
 export interface BridgeCatalogConfig {
@@ -165,7 +165,7 @@ async function probeAgyModels(bin: string): Promise<Array<Record<string, unknown
     const rows: Array<Record<string, unknown>> = [];
     for (const entry of grouped.values()) {
       const effortLevels = AGY_EFFORT_ORDER.filter(level => entry.efforts.has(level));
-      if (effortLevels.length >= 2) {
+      if (effortLevels.length >= 2 && !isAgyOrchestrator(entry.id)) {
         rows.push({
           runtime: "agy",
           id: entry.id,
