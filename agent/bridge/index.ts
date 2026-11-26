@@ -97,7 +97,7 @@ function load(path: string): Config {
       throw new Error("Invalid project bindings");
     if (
       config.max_concurrency !== undefined &&
-      (!Number.isSafeInteger(config.max_concurrency) || config.max_concurrency < 1 || config.max_concurrency > 64)
+      (!Number.isSafeInteger(config.max_concurrency) || config.max_concurrency < 0 || config.max_concurrency > 128)
     )
       throw new Error("Invalid max_concurrency");
     return config;
@@ -150,38 +150,20 @@ function projectWorkdir(project: Project, config: Config, home: string) {
   if (project.bound_via_web && cwd !== project.workdir) throw new Error("Web-bound workdir has changed");
   return cwd;
 }
-// One shared shadow per project: serialize pulls, CLI execution and push as a unit.
-// Waiters still count towards the machine's admission limit and are independently cancellable.
-function projectLocks() {
-  const locks = new Map<string, Set<() => void>>();
-  return (project: string, signal: AbortSignal): Promise<() => void> =>
-    new Promise((accept, reject) => {
-      signal.throwIfAborted();
-      const existing = locks.get(project),
-        queue = existing ?? new Set<() => void>();
-      function release() {
-        const next = queue.values().next().value;
-        if (next) {
-          queue.delete(next);
-          next();
-        } else locks.delete(project);
-      }
-      const claim = () => {
-        signal.removeEventListener("abort", cancel);
-        accept(release);
-      };
-      const cancel = () => {
-        queue.delete(claim);
-        reject(new Error("Workspace wait cancelled"));
-      };
-      if (!existing) {
-        locks.set(project, queue);
-        accept(release);
-      } else {
-        queue.add(claim);
-        signal.addEventListener("abort", cancel, { once: true });
-      }
-    });
+function safeRunDir(runId: string) {
+  return runId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || randomUUID();
+}
+async function waitForJobs(jobs: Promise<void>[], signal: AbortSignal): Promise<void> {
+  if (!jobs.length) return;
+  signal.throwIfAborted();
+  await Promise.race([
+    Promise.allSettled(jobs),
+    new Promise<void>((_, reject) => {
+      const onAbort = () => reject(new Error("Workspace wait cancelled"));
+      signal.addEventListener("abort", onAbort, { once: true });
+    }),
+  ]);
+  signal.throwIfAborted();
 }
 function projects(config: Config, home: string) {
   return Object.entries(config.projects ?? {})
@@ -277,7 +259,6 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
     debounce: NodeJS.Timeout | undefined;
   let watchers: FSWatcher[] = [],
     version = 0;
-  const lock = projectLocks();
   let instance = randomUUID();
   const active = new Map<
     string,
@@ -287,7 +268,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
     hostname: hostname(),
     platform: process.platform,
     bridge_version: BRIDGE_VERSION,
-    max_concurrency: c.max_concurrency ?? 2,
+    max_concurrency: c.max_concurrency ?? 0,
     accept_cli_runs: c.accept_cli_runs === true,
     ...cat,
     allowed_roots_enabled: !!c.allowed_roots?.length,
@@ -489,10 +470,13 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         send(socket, "chat.event", { ...ids, event: { type: result.status === "error" ? "error" : "done" }, result });
       if (active.has(p.run_id)) return;
       // A follow-up may arrive while its cancelled predecessor is reaping children.
-      // The predecessor still owns the project lock until cleanup is complete.
+      // Wait for that same-session predecessor before launching the replacement turn.
+      const cancellingSameSession = [...active.values()].filter(run =>
+        run.abort.signal.aborted && run.session === p.session_id && run.project === p.project_id);
       const admitted = [...active.values()].filter(run =>
         !(run.abort.signal.aborted && run.session === p.session_id && run.project === p.project_id));
-      if (admitted.length >= (config.max_concurrency ?? 2) || admitted.some(run => run.session === p.session_id)) {
+      const maxConcurrency = config.max_concurrency ?? 0;
+      if ((maxConcurrency > 0 && admitted.length >= maxConcurrency) || admitted.some(run => run.session === p.session_id)) {
         terminal({ status: "error", error: "Bridge or project workspace is busy", content: "", events: [], externalSessionId: p.resume_session_id || "" });
         return;
       }
@@ -533,21 +517,21 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         : p;
       const job = (async () => {
         let result: RunChatTurnResult = { status: "aborted", content: "", events: [], externalSessionId: "" };
-        let release: (() => void) | undefined;
-        let feedbackCacheDir: string | undefined;
+        let runCacheDir: string | undefined;
         try {
           checkChat(effectiveP);
           if (!validProjectId(effectiveP.project_id) || !Object.hasOwn(c.projects ?? {}, effectiveP.project_id))
             throw new Error("Project is not locally bound");
           result.externalSessionId = effectiveP.resume_session_id || "";
           const boundDir = effectiveP.expected_workdir ?? projectWorkdir(c.projects![effectiveP.project_id], c, home);
-          release = await lock(effectiveP.project_id, abort.signal);
+          await waitForJobs(cancellingSameSession.map(run => run.job), abort.signal);
           abort.signal.throwIfAborted();
           const project = config.projects?.[effectiveP.project_id];
           if (!project) throw new Error("Project binding was removed");
           const cwd = projectWorkdir(project, config, home);
           if (cwd !== boundDir) throw new Error("Project binding changed while waiting");
           if (!cat.runtimes[effectiveP.runtime].available) throw new Error("Requested CLI is not available");
+          clock.progress();
           const onEvent = (event: ChatStreamEvent) => {
             clock.progress();
             if (link) link.event(event);
@@ -555,16 +539,16 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
           };
           const baseCacheDir =
             o.cacheDir ?? (c.cache_dir ? expand(c.cache_dir, home) : join(home, ".cache/relaydesk-bridge/spaces"));
-          if (isPublicFeedback) {
-            const safeRunDirName = effectiveP.run_id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || randomUUID();
-            feedbackCacheDir = join(baseCacheDir, "_public_feedback", safeRunDirName);
-          }
+          const safeRunDirName = safeRunDir(effectiveP.run_id);
+          runCacheDir = isPublicFeedback
+            ? join(baseCacheDir, "_public_feedback", safeRunDirName)
+            : join(baseCacheDir, "_runs", safeRunDirName);
           const opts = {
             workdir: cwd,
             onFileSynced: () => {
               if (!isPublicFeedback) onEvent({ type: "status", message: "已同步项目空间文件" });
             },
-            cacheDir: feedbackCacheDir ?? baseCacheDir,
+            cacheDir: runCacheDir,
             projectId: effectiveP.project_id,
             runId: effectiveP.run_id,
             serverUrl: c.server_url,
@@ -668,14 +652,13 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         } catch (e) {
           result = { ...result, status: "error", error: message(e) };
         } finally {
-          if (feedbackCacheDir) {
+          if (runCacheDir) {
             try {
-              rmSync(feedbackCacheDir, { recursive: true, force: true });
+              rmSync(runCacheDir, { recursive: true, force: true });
             } catch {
               // ignore cleanup errors
             }
           }
-          release?.();
         }
         if (abort.signal.aborted) {
           result = stopReason
@@ -710,7 +693,8 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         emit("fail", "Local bridge has accept_cli_runs disabled");
         return;
       }
-      if (active.size >= (config.max_concurrency ?? 2)) {
+      const maxConcurrency = config.max_concurrency ?? 0;
+      if (maxConcurrency > 0 && active.size >= maxConcurrency) {
         emit("fail", "Bridge concurrency limit reached");
         return;
       }
@@ -722,14 +706,13 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       const c = config,
         cat = catalog;
       const job = (async () => {
-        let release: (() => void) | undefined;
+        let runCacheDir: string | undefined;
         let sha = "";
         try {
           if (!validProjectId(p.project_id) || !Object.hasOwn(c.projects ?? {}, p.project_id))
             throw new Error("Project is not locally bound");
           if (p.runtime !== "codex" && p.runtime !== "claude") throw new Error("Invalid CLI runtime");
           if (typeof p.prompt !== "string" || !p.prompt.trim()) throw new Error("Empty CLI prompt");
-          release = await lock(p.project_id, abort.signal);
           abort.signal.throwIfAborted();
           const project = config.projects?.[p.project_id];
           if (!project) throw new Error("Project binding was removed");
@@ -743,11 +726,13 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
           if (rev.status === 0 && /^[0-9a-f]{40}$/i.test(rev.stdout.trim())) sha = rev.stdout.trim();
           emit("progress", `本机节点正在执行（${p.runtime}）…`, sha);
           const manifest = p.workspace_manifest ?? { files: [] };
+          const baseCacheDir =
+            o.cacheDir ?? (c.cache_dir ? expand(c.cache_dir, home) : join(home, ".cache/relaydesk-bridge/spaces"));
+          runCacheDir = join(baseCacheDir, "_runs", safeRunDir(runKey));
           const mirror = await syncSpace(
             {
               workdir: cwd,
-              cacheDir:
-                o.cacheDir ?? (c.cache_dir ? expand(c.cache_dir, home) : join(home, ".cache/relaydesk-bridge/spaces")),
+              cacheDir: runCacheDir,
               projectId: p.project_id,
               runId: runKey,
               serverUrl: c.server_url,
@@ -809,7 +794,13 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         } catch (e) {
           emit("fail", message(e), sha);
         } finally {
-          release?.();
+          if (runCacheDir) {
+            try {
+              rmSync(runCacheDir, { recursive: true, force: true });
+            } catch {
+              // ignore cleanup errors
+            }
+          }
         }
       })().finally(() => {
         clearTimeout(timeout);

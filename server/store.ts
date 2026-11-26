@@ -312,7 +312,7 @@ CREATE TABLE IF NOT EXISTS bridge_agents (
     id TEXT PRIMARY KEY, name TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE, token_prefix TEXT NOT NULL DEFAULT '',
     hostname TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL DEFAULT '', bridge_version TEXT NOT NULL DEFAULT '',
-    max_concurrency INTEGER NOT NULL DEFAULT 2, accept_cli_runs INTEGER NOT NULL DEFAULT 1,
+    max_concurrency INTEGER NOT NULL DEFAULT 0, accept_cli_runs INTEGER NOT NULL DEFAULT 1,
     runtimes_json TEXT NOT NULL DEFAULT '{}', models_json TEXT NOT NULL DEFAULT '[]', capabilities_json TEXT NOT NULL DEFAULT '{}',
     last_seen_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -900,8 +900,8 @@ type BindingPatch = Partial<Pick<BridgeAgentBindingSummary, "workdir" | "path_ok
 const BINDING_SELECT = `SELECT b.*, p.name AS project_name FROM project_agent_bindings b JOIN projects p ON p.id = b.project_id`;
 
 function verifyBridgeLimits(patch: BridgeAgentPatch) {
-  if (patch.max_concurrency !== undefined && (!Number.isSafeInteger(patch.max_concurrency) || patch.max_concurrency < 1)) {
-    throw new ApiError(400, "max_concurrency must be a positive integer");
+  if (patch.max_concurrency !== undefined && (!Number.isSafeInteger(patch.max_concurrency) || patch.max_concurrency < 0)) {
+    throw new ApiError(400, "max_concurrency must be a non-negative integer");
   }
   if (patch.accept_cli_runs !== undefined && typeof patch.accept_cli_runs !== "boolean") {
     throw new ApiError(400, "accept_cli_runs must be a boolean");

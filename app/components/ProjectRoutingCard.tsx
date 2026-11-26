@@ -266,7 +266,11 @@ export function ProjectRoutingCard({
                               <LivePulseDot active={agent.online} tone={agent.online ? "emerald" : "zinc"} />
                               {agent.online
                                 ? readyLocal
-                                  ? `就绪 · ${agent.active_runs}/${agent.max_concurrency}`
+                                  ? agent.max_concurrency > 0
+                                    ? `就绪 · ${agent.active_runs}/${agent.max_concurrency}`
+                                    : agent.active_runs > 0
+                                      ? `就绪 · 运行 ${agent.active_runs}`
+                                      : "就绪 · 不限并发"
                                   : "在线 · 待绑定/启用目录"
                                 : "离线"}
                             </span>

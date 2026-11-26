@@ -21,7 +21,7 @@ describe("local bridge store", () => {
     const first = store.createBridgeAgent(" Laptop ");
     expect(first.token).toMatch(/^rdbr_[a-f0-9]{48}$/);
     expect(first.agent).toMatchObject({ name: "Laptop", token_prefix: first.token.slice(0, 12), online: false,
-      active_runs: 0, bindings: [], last_seen_at: null, max_concurrency: 2, accept_cli_runs: true });
+      active_runs: 0, bindings: [], last_seen_at: null, max_concurrency: 0, accept_cli_runs: true });
     const hash = createHash("sha256").update(first.token).digest("hex");
     const db = new DatabaseSync(path, { readOnly: true });
     try {
@@ -48,7 +48,9 @@ describe("local bridge store", () => {
     const { agent } = store.createBridgeAgent("Workstation");
     expect(store.updateBridgeAgent(agent.id, { name: "Desk", accept_cli_runs: false, max_concurrency: 4 }))
       .toMatchObject({ name: "Desk", accept_cli_runs: false, max_concurrency: 4 });
-    expect(() => store.updateBridgeAgent(agent.id, { max_concurrency: 0 })).toThrow();
+    expect(store.updateBridgeAgent(agent.id, { max_concurrency: 0 })).toMatchObject({ max_concurrency: 0 });
+    expect(store.updateBridgeAgent(agent.id, { max_concurrency: 4 })).toMatchObject({ max_concurrency: 4 });
+    expect(() => store.updateBridgeAgent(agent.id, { max_concurrency: -1 })).toThrow();
     expect(() => store.updateBridgeAgent(agent.id, { hostname: "forged" } as never)).toThrow();
     store.updateBridgeAgentTelemetry(agent.id, { hostname: "workstation", bridge_version: "v1", runtimes: { codex: { available: true } },
       models: [{ runtime: "codex", id: "custom", context_window: 16000 }], capabilities: { allowed_roots_enabled: true } });

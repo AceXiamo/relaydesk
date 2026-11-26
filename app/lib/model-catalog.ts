@@ -275,7 +275,7 @@ function evaluateLocalAgentForTask(
       reason: `节点「${agent.name}」未检测到 ${runtime === "claude" ? "Claude Code" : "Codex CLI"}`,
     };
   }
-  if (agent.active_runs >= agent.max_concurrency) {
+  if (agent.max_concurrency > 0 && agent.active_runs >= agent.max_concurrency) {
     return {
       ready: false,
       bound,

@@ -99,7 +99,7 @@ export function evaluateLocalAgentEligibility(options: {
   if (!agent.runtimes[runtime]?.available) {
     return { eligible: false, reason: `本机节点「${agent.name}」未检测到 ${runtime} CLI` };
   }
-  if (agent.active_runs >= agent.max_concurrency) {
+  if (agent.max_concurrency > 0 && agent.active_runs >= agent.max_concurrency) {
     return {
       eligible: false,
       reason: `本机节点「${agent.name}」并发已满（${agent.active_runs}/${agent.max_concurrency}）`,

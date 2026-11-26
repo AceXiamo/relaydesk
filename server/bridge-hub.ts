@@ -64,7 +64,7 @@ const runtime = z.object({ default_fast_mode: z.enum(["on", "off"]).optional(), 
   default_effort: z.enum(["default", "off", "low", "medium", "high", "max"]).optional() });
 const catalog = z.object({
   hostname: text(200).optional(), platform: text(80).optional(), bridge_version: text(64).optional(),
-  max_concurrency: z.number().int().min(1).max(128).optional(), accept_cli_runs: z.boolean().optional(),
+  max_concurrency: z.number().int().min(0).max(128).optional(), accept_cli_runs: z.boolean().optional(),
   runtimes: z.object({ claude: runtime.optional(), codex: runtime.optional() }).optional(),
   projects: z.array(report).max(1000).optional(), models: z.unknown().optional(),
   allowed_roots_enabled: z.boolean().optional(), db_clients: z.array(text(64)).max(64).optional(),
@@ -572,7 +572,7 @@ export class BridgeHub {
     catch (error) { if (error instanceof ApiError && error.status === 403) throw new ApiError(409, error.message); throw error; }
     const agent = this.describe(this.agent(agentId));
     if (!agent.runtimes[runtime]?.available) throw new ApiError(409, `本机节点未安装 ${runtime}`);
-    if (agent.active_runs >= agent.max_concurrency) throw new ApiError(409, "本机节点并发已满");
+    if (agent.max_concurrency > 0 && agent.active_runs >= agent.max_concurrency) throw new ApiError(409, "本机节点并发已满");
     return binding;
   }
   writeLeaseId(agentId: string, projectId: string, runId?: string): string | undefined {

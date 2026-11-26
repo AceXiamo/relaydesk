@@ -141,7 +141,7 @@ export function LocalAgentTargetSelect({
         : undefined;
       const bindingReady = !projectId || Boolean(binding?.enabled && binding?.path_ok);
       const runtimeReady = Boolean(agent.runtimes[runtime]?.available);
-      const hasCapacity = agent.active_runs < agent.max_concurrency;
+      const hasCapacity = agent.max_concurrency <= 0 || agent.active_runs < agent.max_concurrency;
       const ready = agent.online && bindingReady && runtimeReady && hasCapacity;
 
       const statusText = !agent.online
@@ -152,7 +152,11 @@ export function LocalAgentTargetSelect({
             ? `未检测到 ${runtimeLabel(runtime)}`
             : !hasCapacity
               ? `并发已满 ${agent.active_runs}/${agent.max_concurrency}`
-              : `就绪 · 并发 ${agent.active_runs}/${agent.max_concurrency}`;
+              : agent.max_concurrency > 0
+                ? `就绪 · 并发 ${agent.active_runs}/${agent.max_concurrency}`
+                : agent.active_runs > 0
+                  ? `就绪 · 运行 ${agent.active_runs}`
+                  : "就绪 · 不限并发";
 
       list.push({
         value: `local:${agent.id}`,

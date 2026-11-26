@@ -1173,7 +1173,11 @@ function ExecutionTargetSelect({
           ? "未绑定/禁用本项目目录"
           : !runtimeReady
             ? `未安装 ${runtime}`
-            : `就绪 · 并发 ${agent.active_runs}/${agent.max_concurrency}`;
+            : agent.max_concurrency > 0
+              ? `就绪 · 并发 ${agent.active_runs}/${agent.max_concurrency}`
+              : agent.active_runs > 0
+                ? `就绪 · 运行 ${agent.active_runs}`
+                : "就绪 · 不限并发";
       list.push({
         value: `local:${agent.id}`,
         label: agent.name,

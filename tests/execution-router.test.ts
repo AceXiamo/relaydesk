@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { startBridgeDaemon } from "../agent/bridge/index.ts";
-import { normalizeExecutionPriority } from "../server/execution-router.ts";
+import { evaluateLocalAgentEligibility, normalizeExecutionPriority } from "../server/execution-router.ts";
 import { fixture, type Fixture } from "./bridge-fixture.ts";
 
 let f: Fixture | undefined;
@@ -314,5 +314,60 @@ describe("Execution routing, priority fallback, and local cli_runs dispatch", ()
     expect(cloudQueued.target).toBe("cloud");
     const { runs } = await f.ok(`/projects/${projectId}/tasks/${task.id}/cli-runs`);
     expect(runs[0].status).toBe("queued");
+  });
+
+  it("treats max_concurrency=0 as unlimited while still honoring explicit positive caps", () => {
+    const binding = {
+      project_id: "proj-1",
+      project_name: "Demo",
+      agent_id: "agent-1",
+      workdir: "/repo",
+      path_ok: true,
+      path_error: "",
+      allow_datasource_secrets: false,
+      enabled: true,
+      updated_at: "",
+    };
+    const mockStore = { getProjectAgentBinding: () => binding } as unknown as Parameters<typeof evaluateLocalAgentEligibility>[0]["store"];
+    const mockHub = { assertWorkspaceAccess: () => ({ workdir: "/repo" }) } as unknown as Parameters<typeof evaluateLocalAgentEligibility>[0]["bridgeHub"];
+    const baseAgent = {
+      id: "agent-1",
+      name: "Mac Studio",
+      token_prefix: "rdbr_test",
+      hostname: "mac",
+      platform: "darwin",
+      bridge_version: "2.0.0",
+      max_concurrency: 0,
+      accept_cli_runs: true,
+      runtimes: { codex: { available: true } },
+      models: [],
+      capabilities: {},
+      last_seen_at: null,
+      created_at: "",
+      updated_at: "",
+      online: true,
+      active_runs: 10,
+      bindings: [binding],
+    };
+
+    expect(
+      evaluateLocalAgentEligibility({
+        store: mockStore,
+        agent: baseAgent,
+        projectId: "proj-1",
+        runtime: "codex",
+        bridgeHub: mockHub,
+      }).eligible,
+    ).toBe(true);
+
+    const capped = evaluateLocalAgentEligibility({
+      store: mockStore,
+      agent: { ...baseAgent, max_concurrency: 2, active_runs: 2 },
+      projectId: "proj-1",
+      runtime: "codex",
+      bridgeHub: mockHub,
+    });
+    expect(capped.eligible).toBe(false);
+    expect(capped.reason).toContain("并发已满");
   });
 });

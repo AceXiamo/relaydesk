@@ -430,7 +430,10 @@ export function LocalAgentsSettingsCard({
               <LivePulseDot active={agent.online} tone={agent.online ? "emerald" : "zinc"} />
               <h3 className="break-all text-sm font-semibold">{agent.name}</h3>
               <span className="text-xs text-[var(--text-muted)]">
-                {agent.online ? "在线" : "离线"} · 运行 {agent.active_runs} / {agent.max_concurrency}
+                {agent.online ? "在线" : "离线"} ·{" "}
+                {agent.max_concurrency > 0
+                  ? `运行 ${agent.active_runs} / ${agent.max_concurrency}`
+                  : `运行 ${agent.active_runs} · 不限并发`}
               </span>
             </div>
             <span className="text-xs text-[var(--text-muted)]" title={formatDateTime(agent.last_seen_at)}>

@@ -5,6 +5,7 @@ import type { Duplex } from "node:stream";
 import type { ChatStreamEvent, ChatToolEvent } from "../app/lib/types.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startBridgeDaemon, type BridgeDaemonOptions } from "../agent/bridge/index.ts";
+import { syncSpace } from "../agent/bridge/space-sync.ts";
 import { buildWorkspaceManifest, getProjectFilesDir } from "../server/workspace.ts";
 import { bearer, fixture, operator, sha256, type Fixture } from "./bridge-fixture.ts";
 
@@ -258,21 +259,19 @@ describe("real bridge daemon + HTTP chat", () => {
     expect(text).toContain("event: done");
     const observed = facts(repo);
     expect(observed).toMatchObject({ cwd: realpathSync(repo), hasRef: true, handbook: "fixture handbook", digest: sha256(large), sqlite: "sqlite-marker" });
-    expect(realpathSync(observed.space)).toBe(realpathSync(join(cacheDir, p)));
-    expect(existsSync(join(observed.space, "files", "oversized.bin"))).toBe(false);
+    expect(observed.space.startsWith(realpathSync(join(cacheDir, "_runs")) + "/")).toBe(true);
+    expect(existsSync(observed.space)).toBe(false);
     expect(observed.args).toContain("--add-dir");
     expect(observed.args[observed.args.indexOf("--add-dir") + 1]).toBe(observed.space);
     expect(readdirSync(repo)).toEqual(["facts.json"]);
     expect((await s.detail()).session).toMatchObject({ resolved_target: `local:${id}`, external_session_id: "local-fixture-thread" });
-    const mirrorFile = join(observed.space, "files", "large.bin");
     await f.ok(`${w}/handbook`, "POST", { content: "new cloud handbook" });
     await f.ok(`${w}/file?path=reference.md`, "DELETE");
-    const previousMtime = statSync(mirrorFile).mtimeMs;
     expect(await (await s.turn("Follow up")).text()).toContain("event: done");
     expect(facts(repo).args).toEqual(expect.arrayContaining(["resume", "local-fixture-thread"]));
-    expect(statSync(mirrorFile).mtimeMs).toBe(previousMtime);
     expect(facts(repo).handbook).toBe("new cloud handbook");
-    expect(existsSync(join(observed.space, "files", "reference.md"))).toBe(false);
+    expect(facts(repo).space).not.toBe(observed.space);
+    expect(existsSync(facts(repo).space)).toBe(false);
     // A misbehaving CLI can write its own cache, but read-only turns must never publish it.
     expect(await (await s.turn("MAKE_CHANGES")).text()).toContain("event: done");
     expect((await f.ok(`${w}/handbook`)).handbook.content).toBe("new cloud handbook");
@@ -438,18 +437,29 @@ describe("real bridge daemon + HTTP chat", () => {
   });
 
   it.each(["symlink", "hardlink"])("refuses a %s in the shadow cache and leaves the external file untouched", async (kind) => {
-    const { id, p, cacheDir, repo } = await start();
+    const { p, cacheDir, repo } = await start();
     await f.ok(`/projects/${p}/workspace/file`, "POST", { path: "notes.txt", content: "cloud copy" });
     const dir = join(cacheDir, p, "files");
     mkdirSync(dir, { recursive: true });
     const outside = join(f.root, "outside.txt");
     writeFileSync(outside, "outside copy");
     (kind === "symlink" ? symlinkSync : linkSync)(outside, join(dir, "notes.txt"));
-    const s = await f.session(p, id, "workspace-write");
-    expect(await (await s.turn("Read the mirror")).text()).toContain("event: error");
-    expect((await s.detail()).messages.at(-1).status).toBe("error");
+    await expect(
+      syncSpace(
+        {
+          cacheDir,
+          workdir: repo,
+          projectId: p,
+          runId: "symlink-test",
+          serverUrl: f.wsUrl,
+          token: "unused",
+          rpc: async () => ({ data: Buffer.from("cloud copy").toString("base64") }),
+          signal: new AbortController().signal,
+        },
+        buildWorkspaceManifest(f.dbPath, p),
+      ),
+    ).rejects.toThrow();
     expect(readFileSync(outside, "utf8")).toBe("outside copy");
-    expect(existsSync(join(repo, "facts.json"))).toBe(false);
   });
 
   it("rejects a downloaded file if its bytes changed after the manifest was built", async () => {
@@ -549,21 +559,48 @@ describe("real bridge daemon + HTTP chat", () => {
       events: [{ id: "partial-tool", output: "partial output" }], externalSessionId: "local-fixture-thread" });
   });
 
-  it("times out a lock waiter separately while another chat keeps making progress", async () => {
-    vi.stubEnv("RELAYDESK_CHAT_QUEUE_TIMEOUT_MS", "1250");
-    vi.stubEnv("RELAYDESK_CHAT_IDLE_TIMEOUT_MS", "800");
-    const { id, p, repo } = await start(true, 2);
-    const first = await f.session(p, id);
-    const waiting = await f.session(p, id);
+  it("runs multiple sessions on the same project and across projects in parallel with isolated shadow spaces", async () => {
+    const { id, p, repo, cacheDir, configPath, allowed, agent } = await start(true, 0);
+    expect((await agent()).max_concurrency).toBe(0);
+    // Add a second project to verify unlimited cross-project + same-project concurrency.
+    const p2 = await f.project("Second Project");
+    const repo2 = join(allowed, "repo2");
+    mkdirSync(repo2, { recursive: true });
+    const cfg = JSON.parse(readFileSync(configPath, "utf8"));
+    cfg.projects[p2] = { workdir: repo2 };
+    writeFileSync(configPath, JSON.stringify(cfg));
+    await expect.poll(
+      async () => (await agent()).bindings.some((b: { project_id: string; path_ok: boolean }) => b.project_id === p2 && b.path_ok),
+      { timeout: 6000 },
+    ).toBe(true);
+
+    const first = await f.session(p, id, "workspace-write");
+    const parallelSameProject = await f.session(p, id, "workspace-write");
+    const parallelOtherProject = await f.session(p2, id, "workspace-write");
+
     const stream = (await first.turn("BLOCK_UNTIL_CANCELLED SHOW_PROGRESS")).text();
     await expect.poll(() => existsSync(join(repo, "pids.json"))).toBe(true);
-    const queued = await (await waiting.turn("must wait for the lock")).text();
-    expect(queued).toContain("等待项目执行锁超时");
+
+    // Same session must still reject concurrent re-entry.
+    expect((await f.api(`${first.path}/messages`, "POST", { content: "overlapping same session" })).status).toBe(409);
+
+    // Different session on the SAME project runs immediately in parallel and pushes its own shadow changes.
+    const [sameRes, otherRes] = await Promise.all([
+      parallelSameProject.turn("MAKE_CHANGES"),
+      parallelOtherProject.turn("MAKE_CHANGES"),
+    ]);
+    expect(await sameRes.text()).toContain("event: done");
+    expect(await otherRes.text()).toContain("event: done");
+    expect((await f.ok(`/projects/${p}/workspace/file?path=output.txt`)).file.content).toBe("result from local workspace");
+    expect((await f.ok(`/projects/${p2}/workspace/file?path=output.txt`)).file.content).toBe("result from local workspace");
+
+    // First session is still alive and unaffected by the parallel runs.
     expect(f.srv.bridgeHub.isChatSessionRunning(first.id)).toBe(true);
     f.srv.bridgeHub.abortChatSessionRun(first.id);
     expect(await stream).toContain("before interruption");
-    const next = await f.session(p, id);
-    expect(await (await next.turn("acquire after cancellation")).text()).toContain("fixture-reply");
+
+    // All per-run shadow directories should be cleaned up once runs settle.
+    await expect.poll(() => existsSync(join(cacheDir, "_runs")) ? readdirSync(join(cacheDir, "_runs")) : [], { timeout: 5000 }).toEqual([]);
   });
 
   it("reattaches the same CLI after transport loss, then syncs its workspace through the new socket", async () => {
