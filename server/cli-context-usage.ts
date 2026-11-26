@@ -107,7 +107,10 @@ function rolloutPath(home: string, id: string): string | undefined {
 export type CodexRolloutActivity = { threadId: string; kind: "started" | "completed" | "message"; task?: string; result?: string };
 
 // Only decode the collaboration records absent from exec --json. Never forward raw rollout rows.
-function codexActivityTracker(publish: (activity: CodexRolloutActivity) => void) {
+function codexActivityTracker(
+  publish: (activity: CodexRolloutActivity) => void,
+  priorThreadIds?: ReadonlySet<string>,
+) {
   const tasks = new Map<string, string>();
   const paths = new Map<string, string>();
   return (type: unknown, p: Record<string, unknown>) => {
@@ -126,7 +129,13 @@ function codexActivityTracker(publish: (activity: CodexRolloutActivity) => void)
         const task = typeof i.id === "string" ? tasks.get(i.id) : undefined;
         if (typeof i.id === "string") tasks.delete(i.id);
         publish({ threadId: i.agent_thread_id, kind: "started", ...(task && { task }) });
-      } else if (i.kind === "completed" && paths.get(i.agent_path) === i.agent_thread_id) {
+      } else if (
+        i.kind === "completed" &&
+        (paths.get(i.agent_path) === i.agent_thread_id || (!paths.has(i.agent_path) && priorThreadIds?.has(i.agent_thread_id)))
+      ) {
+        if (!paths.has(i.agent_path) && paths.size < 256) {
+          paths.set(i.agent_path, i.agent_thread_id);
+        }
         publish({ threadId: i.agent_thread_id, kind: "completed" });
       }
     } else if (type === "response_item" && p.type === "agent_message" && p.recipient === "/root" && typeof p.author === "string") {
@@ -142,8 +151,8 @@ function codexActivityTracker(publish: (activity: CodexRolloutActivity) => void)
 
 // Follow only the rollout identified by this child process.
 export function codexRolloutMonitor(env: NodeJS.ProcessEnv, resumeId: string, publish: (usage: ChatContextUsage) => void,
-  onSubagent?: (activity: CodexRolloutActivity) => void) {
-  const activity = onSubagent && codexActivityTracker(onSubagent);
+  onSubagent?: (activity: CodexRolloutActivity) => void, priorThreadIds?: ReadonlySet<string>) {
+  const activity = onSubagent && codexActivityTracker(onSubagent, priorThreadIds);
   let turnId: unknown;
   const home = env.CODEX_HOME || (env.HOME && join(env.HOME, ".codex"));
   const since = Date.now();

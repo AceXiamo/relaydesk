@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import type {
   ChatContextUsage,
   ChatFastMode,
+  ChatMessageRecord,
   ChatReasoningEffort,
   ChatRuntime,
   ChatSandboxMode,
@@ -267,11 +268,24 @@ export function buildCliInvocation(params: {
   }
 
   if (runtime === "agy") {
+    const agyEffort: Record<Exclude<ChatReasoningEffort, "default" | "off">, string> = {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      max: "xhigh",
+    };
     const permissionArgs = fullAccess
       ? ["--dangerously-skip-permissions"]
       : sandboxMode === "workspace-write"
         ? ["--mode", "auto"]
         : ["--sandbox"];
+    const hasExplicitEffort = effort !== "default" && effort !== "off";
+    const isEffortUnsupportedModel = /^gemini-pro-orchestrator(?:-|$)/i.test(effectiveModel);
+    // Avoid `--model foo-low --effort high` conflicts if a caller passes a legacy suffixed model ID.
+    const agyModel =
+      hasExplicitEffort && effectiveModel
+        ? effectiveModel.replace(/-(low|medium|high|xhigh|max)$/, "")
+        : effectiveModel;
     const args = [
       "--input-format",
       "stream-json",
@@ -279,8 +293,8 @@ export function buildCliInvocation(params: {
       "stream-json",
       ...permissionArgs,
       ...addDirArgs,
-      ...(effectiveModel ? ["--model", effectiveModel] : []),
-      ...(effort !== "default" && effort !== "off" ? ["--effort", effort] : []),
+      ...(agyModel ? ["--model", agyModel] : []),
+      ...(hasExplicitEffort && !isEffortUnsupportedModel ? ["--effort", agyEffort[effort]] : []),
       ...(resumeSessionId ? ["--resume", resumeSessionId] : []),
     ];
     return { args, env, secrets };
@@ -328,11 +342,74 @@ export function buildCliInvocation(params: {
   return { args, env, secrets };
 }
 
+export interface PriorSubagentSeed {
+  id: string;
+  tool: string;
+  summary: string;
+  status?: ChatToolEvent["status"];
+  subagent: NonNullable<ChatToolEvent["subagent"]>;
+}
+
+const GENERIC_SUBAGENT_SUMMARY_RE = /^(?:Codex\s*子代理|调用\s*(?:Agent|Task)|子代理任务|spawn_agent|Agent|Task)$/i;
+
+export function collectPriorSubagents(messages: readonly ChatMessageRecord[]): PriorSubagentSeed[] {
+  const map = new Map<string, PriorSubagentSeed>();
+  for (const msg of messages) {
+    if (!msg.events?.length) continue;
+    for (const ev of msg.events) {
+      if (!ev.subagent || !ev.id) continue;
+      const prev = map.get(ev.id);
+      const summaryCandidate = ev.summary?.trim() || "";
+      const summary =
+        summaryCandidate && !GENERIC_SUBAGENT_SUMMARY_RE.test(summaryCandidate)
+          ? summaryCandidate
+          : prev?.summary || summaryCandidate || ev.tool;
+      const tool =
+        summaryCandidate && !GENERIC_SUBAGENT_SUMMARY_RE.test(summaryCandidate)
+          ? ev.tool
+          : prev?.tool || ev.tool;
+      const activity = ev.subagent.activity?.trim() || prev?.subagent.activity;
+      map.set(ev.id, {
+        id: ev.id,
+        tool,
+        summary,
+        status: ev.status,
+        subagent: {
+          status: ev.subagent.status,
+          ...(activity ? { activity } : {}),
+        },
+      });
+    }
+  }
+  const list = Array.from(map.values());
+  return list.length > 50 ? list.slice(-50) : list;
+}
+
+export function finalizeTurnSubagents(
+  events: readonly ChatToolEvent[],
+  outcome: "done" | "error" | "aborted",
+): ChatToolEvent[] {
+  if (outcome === "done") return [...events];
+  const nextSubagentStatus = outcome === "aborted" ? "interrupted" : "unknown";
+  return events.map((ev) => {
+    if (!ev.subagent || ev.subagent.status !== "running") return ev;
+    return {
+      ...ev,
+      status: "error",
+      subagent: {
+        ...ev.subagent,
+        status: nextSubagentStatus,
+      },
+    };
+  });
+}
+
 export interface StreamParseState {
   externalSessionId: string;
   text: string;
   hadIncrementalDelta: boolean;
   toolEvents: Map<string, ChatToolEvent>;
+  priorSubagents?: Map<string, ChatToolEvent>;
   readAttachments: Map<string, ChatToolImage>;
   claudeNestedAgents?: Map<string, string>;
   errorMessage: string;
@@ -472,7 +549,7 @@ function handleCodexCollab(
     const id = agents.get(thread) || (spawn ? itemId : clean(`codex-agent-${thread}`, 256));
     if (!id) continue;
     if (thread) agents.set(thread, id);
-    const previous = state.toolEvents.get(id);
+    const previous = state.toolEvents.get(id) ?? state.priorSubagents?.get(id);
     const snapshot = Object.hasOwn(snapshots, thread) ? snapshots[thread] : null;
     const agent = snapshot && typeof snapshot === "object" ? snapshot as Record<string, unknown> : {};
     const message = clean(agent.message, 32768);
@@ -718,8 +795,9 @@ function updateClaudeChildActivity(
   obj: Record<string, unknown>, parentId: string, state: StreamParseState,
   secrets: string[], emit: (ev: ChatStreamEvent) => void,
 ) {
-  const owner = state.toolEvents.get(state.claudeNestedAgents?.get(parentId) ?? claudeAgentId(parentId, secrets));
-  if (owner?.subagent?.status !== "running") return;
+  const resolvedId = state.claudeNestedAgents?.get(parentId) ?? claudeAgentId(parentId, secrets);
+  const owner = state.toolEvents.get(resolvedId) ?? state.priorSubagents?.get(resolvedId);
+  if (!owner?.subagent || (owner.subagent.status !== "running" && owner.subagent.status !== "unknown")) return;
   const stream = obj.event as Record<string, unknown> | undefined;
   const message = obj.message as Record<string, unknown> | undefined;
   const blocks = obj.type === "stream_event" && stream?.type === "content_block_start"
@@ -744,8 +822,8 @@ function updateClaudeChildActivity(
     if (delta?.type === "text_delta") activity = "正在回复";
   }
   activity = redactSecrets(activity, secrets).slice(0, 4096);
-  if (activity && activity !== owner.subagent.activity) {
-    upsertToolEvent(state, { ...owner, subagent: { status: "running", activity } }, emit);
+  if (activity && (activity !== owner.subagent.activity || owner.subagent.status !== "running")) {
+    upsertToolEvent(state, { ...owner, status: "running", subagent: { status: "running", activity } }, emit);
   }
 }
 
@@ -768,13 +846,14 @@ export function handleClaudeJsonLine(
   }
 
   if (type === "system" && typeof obj.tool_use_id === "string") {
-    const owner = state.toolEvents.get(claudeAgentId(obj.tool_use_id, secrets));
+    const resolvedId = claudeAgentId(obj.tool_use_id, secrets);
+    const owner = state.toolEvents.get(resolvedId) ?? state.priorSubagents?.get(resolvedId);
     if (owner?.subagent && (owner.subagent.status === "running" || owner.subagent.status === "unknown")) {
       if (obj.subtype === "task_progress" || obj.subtype === "task_started") {
         const raw = obj.last_tool_name || obj.description;
         if (typeof raw === "string" && raw.trim()) {
           const activity = redactSecrets(raw.trim(), secrets).slice(0, 4096);
-          upsertToolEvent(state, { ...owner, subagent: { status: "running", activity } }, emit);
+          upsertToolEvent(state, { ...owner, status: "running", subagent: { status: "running", activity } }, emit);
         }
       } else if (obj.subtype === "task_notification") {
         const status = obj.status === "completed" ? "done" : obj.status === "failed" ? "error"
@@ -890,7 +969,12 @@ export function handleClaudeJsonLine(
         if (!block || typeof block !== "object") continue;
         const b = block as Record<string, unknown>;
         if (b.type === "tool_result" && typeof b.tool_use_id === "string") {
-          const existing = state.toolEvents.get(b.tool_use_id) ?? state.toolEvents.get(claudeAgentId(b.tool_use_id, secrets));
+          const hashedId = claudeAgentId(b.tool_use_id, secrets);
+          const existing =
+            state.toolEvents.get(b.tool_use_id) ??
+            state.toolEvents.get(hashedId) ??
+            state.priorSubagents?.get(b.tool_use_id) ??
+            state.priorSubagents?.get(hashedId);
           if (existing) {
             if (existing.subagent) {
               // The CLI's envelope contains structured output for a single tool result only.
@@ -1076,7 +1160,12 @@ export function createCliStreamParser(
   onEvent: (event: ChatStreamEvent) => void,
   onImage?: CliStreamImageHandler,
   lookupAttachment?: (path: string) => ChatToolImage | undefined,
-  sessionFiles?: { env: NodeJS.ProcessEnv; resumeId: string; redact?: (value: string) => string },
+  sessionFiles?: {
+    env: NodeJS.ProcessEnv;
+    resumeId: string;
+    redact?: (value: string) => string;
+    priorSubagents?: readonly PriorSubagentSeed[];
+  },
 ) {
   let lastUsage: ChatContextUsage | undefined;
   function publish(usage: ChatContextUsage) {
@@ -1086,11 +1175,41 @@ export function createCliStreamParser(
   }
   const trackClaude = claudeContextTracker(publish);
   let nativeCodexSnapshot = false;
+  const priorSubagents = sessionFiles?.priorSubagents?.length
+    ? new Map<string, ChatToolEvent>(
+        sessionFiles.priorSubagents.map((seed) => [
+          seed.id,
+          {
+            id: seed.id,
+            tool: seed.tool,
+            summary: seed.summary,
+            status:
+              seed.status ??
+              (seed.subagent.status === "done"
+                ? "done"
+                : seed.subagent.status === "error" || seed.subagent.status === "interrupted"
+                  ? "error"
+                  : "running"),
+            subagent: seed.subagent,
+          },
+        ]),
+      )
+    : undefined;
+  const priorThreadIds = new Set<string>();
+  if (sessionFiles?.priorSubagents) {
+    for (const seed of sessionFiles.priorSubagents) {
+      if (seed.id.startsWith("codex-agent-")) {
+        const tid = seed.id.slice("codex-agent-".length).trim();
+        if (tid) priorThreadIds.add(tid);
+      }
+    }
+  }
   const state: StreamParseState = {
     externalSessionId: "",
     text: "",
     hadIncrementalDelta: false,
     toolEvents: new Map(),
+    ...(priorSubagents ? { priorSubagents } : {}),
     readAttachments: new Map(),
     errorMessage: "",
   };
@@ -1098,7 +1217,7 @@ export function createCliStreamParser(
     if (!nativeCodexSnapshot) publish(usage);
   }, activity => {
     const id = codexAgentIds.get(state)?.get(activity.threadId) ?? `codex-agent-${activity.threadId}`;
-    const previous = state.toolEvents.get(id);
+    const previous = state.toolEvents.get(id) ?? state.priorSubagents?.get(id);
     const previousStatus = previous?.subagent?.status;
     const terminal = previousStatus === "done" || previousStatus === "error" || previousStatus === "interrupted";
     const status = terminal ? previousStatus : activity.kind === "completed" ? "done"
@@ -1110,7 +1229,7 @@ export function createCliStreamParser(
       status: status === "done" ? "done" : status === "error" || status === "interrupted" ? "error" : "running",
       subagent: { ...previous?.subagent, status }, ...(output ? { output } : {}),
     }, onEvent);
-  }) : undefined;
+  }, priorThreadIds.size > 0 ? priorThreadIds : undefined) : undefined;
   let remainder = "";
   const processLine = (rawLine: string) => {
     const line = rawLine.trim();

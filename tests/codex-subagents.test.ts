@@ -83,4 +83,47 @@ describe("Codex collaboration events", () => {
     expect(events.every(event => event.summary === "Reply only COPPER.")).toBe(true);
     expect([...parser.state.toolEvents.values()]).toMatchObject([{ status: "done", output: "COPPER", subagent: { status: "done" } }]);
   });
+
+  it("preserves prior subagent task summary when a resumed turn receives wait/close updates", () => {
+    const events: ChatToolEvent[] = [];
+    const parser = createCliStreamParser(
+      "codex",
+      ["sample-secret"],
+      (event) => { if (event.type === "tool") events.push(event.event); },
+      undefined,
+      undefined,
+      {
+        env: {},
+        resumeId: "thread-1",
+        priorSubagents: [
+          {
+            id: "codex-agent-child-1",
+            tool: "spawn_agent",
+            summary: "检查跨轮次状态同步",
+            status: "running",
+            subagent: { status: "unknown" },
+          },
+        ],
+      },
+    );
+
+    parser.write(
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "wait-2",
+          type: "collab_tool_call",
+          tool: "wait",
+          agents_states: { "child-1": { status: "completed", message: "同步完成 sample-secret" } },
+        },
+      }) + "\n",
+    );
+    expect(parser.state.toolEvents.get("codex-agent-child-1")).toMatchObject({
+      tool: "spawn_agent",
+      summary: "检查跨轮次状态同步",
+      status: "done",
+      output: "同步完成 [redacted]",
+      subagent: { status: "done" },
+    });
+  });
 });

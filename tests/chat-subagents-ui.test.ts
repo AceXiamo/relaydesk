@@ -8,6 +8,7 @@ import { CodexChatView } from "../app/components/CodexChatView.tsx";
 import { TaskAgentSessionPanel } from "../app/components/TaskAgentSessionPanel.tsx";
 import { ToastProvider } from "../app/components/ui.tsx";
 import { ProjectChatStreams } from "../app/lib/chat-streams.ts";
+import { aggregateSessionSubagents } from "../app/lib/subagents.ts";
 import type { ChatMessageRecord, ChatSessionRecord, ChatToolEvent, ProjectDetail, TaskRecord } from "../app/lib/types.ts";
 
 const mockApi = vi.hoisted(() => ({
@@ -316,7 +317,7 @@ describe("ToolChipsGroup subagent UI", () => {
     expect(container.textContent).toContain("历史返回结果");
   });
 
-  it("reuses the subagent UI across both TaskAgentSessionPanel and CodexChatView", async () => {
+  it("reuses the corner SubagentDock and lightweight inline references across TaskAgentSessionPanel and CodexChatView", async () => {
     const events = makeSubagentEvents().slice(0, 2);
     const messages = makeMessages(events);
     const streams = new ProjectChatStreams({
@@ -365,11 +366,69 @@ describe("ToolChipsGroup subagent UI", () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('section[aria-label="并行子代理任务"]')).not.toBeNull();
+    const taskTrigger = container.querySelector<HTMLButtonElement>("[data-subagent-dock-trigger]");
+    expect(taskTrigger).not.toBeNull();
+    expect(taskTrigger!.getAttribute("aria-expanded")).toBe("false");
+    expect(taskTrigger!.textContent).toContain("1 个子代理运行中");
+    expect(taskTrigger!.textContent).toContain("共 2");
+    expect(container.querySelector('section[aria-label="并行子代理任务"]')).toBeNull();
+
+    // Lightweight inline references stay inside the message
+    const taskRefs = container.querySelectorAll<HTMLButtonElement>("[data-subagent-ref-trigger]");
+    expect(taskRefs).toHaveLength(2);
     expect(container.textContent).toContain("审查 server/cli-stream-parser.ts 解析逻辑");
     expect(container.textContent).toContain("补充 vitest 单元测试");
 
-    // 2) CodexChatView
+    // Clicking the corner trigger opens the upward popover
+    await act(() => user.click(taskTrigger!));
+    expect(container.querySelector('section[aria-label="并行子代理任务"]')).not.toBeNull();
+
+    // Escape closes the popover
+    await act(() => user.keyboard("{Escape}"));
+    expect(container.querySelector('section[aria-label="并行子代理任务"]')).toBeNull();
+
+    // 2) CodexChatView with cross-turn update (Turn 1 launched as unknown, Turn 2 completed it)
+    const crossTurnMessages: ChatMessageRecord[] = [
+      ...makeMessages([
+        {
+          id: "sa-cross",
+          tool: "Agent",
+          summary: "排查跨轮次子代理生命周期",
+          status: "running",
+          subagent: { status: "unknown", activity: "Read" },
+        },
+      ]),
+      {
+        id: "m-user-2",
+        session_id: "chat-sess-1",
+        role: "user",
+        content: "继续汇报子代理结果",
+        events: [],
+        attachments: [],
+        status: "done",
+        created_at: "2026-11-24T10:02:00.000Z",
+      },
+      {
+        id: "m-assistant-2",
+        session_id: "chat-sess-1",
+        role: "assistant",
+        content: "子代理已完成。",
+        events: [
+          {
+            id: "sa-cross",
+            tool: "Agent",
+            summary: "调用 Agent",
+            status: "done",
+            output: "已定位跨轮次状态丢失问题",
+            subagent: { status: "done", activity: "Done" },
+          },
+        ],
+        attachments: [],
+        status: "done",
+        created_at: "2026-11-24T10:03:00.000Z",
+      },
+    ];
+
     const chatSession = makeSession({ id: "chat-sess-1", kind: "chat" });
     mockApi.listCodexChatSessions.mockResolvedValue({ sessions: [chatSession] });
     mockApi.getCodexChatRuntime.mockResolvedValue({
@@ -388,7 +447,7 @@ describe("ToolChipsGroup subagent UI", () => {
     mockApi.listWorkspaceFiles.mockResolvedValue({ files: [] });
     mockApi.getCodexChatSession.mockResolvedValue({
       session: chatSession,
-      messages: messages.map((m) => ({ ...m, session_id: chatSession.id })),
+      messages: crossTurnMessages.map((m) => ({ ...m, session_id: chatSession.id })),
     });
 
     const project: ProjectDetail = {
@@ -440,8 +499,127 @@ describe("ToolChipsGroup subagent UI", () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('section[aria-label="并行子代理任务"]')).not.toBeNull();
-    expect(container.textContent).toContain("审查 server/cli-stream-parser.ts 解析逻辑");
-    expect(container.textContent).toContain("补充 vitest 单元测试");
+    const chatTrigger = container.querySelector<HTMLButtonElement>("[data-subagent-dock-trigger]");
+    expect(chatTrigger).not.toBeNull();
+    expect(chatTrigger!.textContent).toContain("子代理 · 1 已完成");
+
+    // Inline reference in the earlier message reflects the live merged status ("done"), not stale "unknown"
+    const inlineRefs = [...container.querySelectorAll<HTMLButtonElement>("[data-subagent-ref-trigger]")];
+    expect(inlineRefs).toHaveLength(2);
+    expect(inlineRefs[0].dataset.subagentStatus).toBe("done");
+    expect(inlineRefs[0].textContent).toContain("派发子代理");
+    expect(inlineRefs[0].textContent).toContain("排查跨轮次子代理生命周期");
+    expect(inlineRefs[1].textContent).toContain("子代理更新");
+
+    // Clicking an inline reference opens the dock and expands/focuses the item
+    await act(() => user.click(inlineRefs[0]));
+    const dockSection = container.querySelector('section[aria-label="子代理任务"]');
+    expect(dockSection).not.toBeNull();
+    expect(dockSection!.textContent).toContain("排查跨轮次子代理生命周期");
+    expect(dockSection!.textContent).toContain("已定位跨轮次状态丢失问题");
+
+    // Clicking "跳到发起消息" scrolls to the originating message
+    const originMsg = container.querySelector<HTMLElement>('[data-message-id="m-assistant"]')!;
+    const scrollIntoView = vi.fn();
+    originMsg.scrollIntoView = scrollIntoView;
+    const jumpBtn = dockSection!.querySelector<HTMLButtonElement>('button[aria-label="跳到发起消息"]')!;
+    await act(() => user.click(jumpBtn));
+    expect(scrollIntoView).toHaveBeenCalled();
+
+    // Outside click dismisses the dock
+    await act(() => user.click(document.body));
+    expect(container.querySelector('section[aria-label="子代理任务"]')).toBeNull();
+  });
+
+  it("renders zero dock DOM when a session has no subagents and aggregates cross-turn states accurately", async () => {
+    const summary = aggregateSessionSubagents([
+      {
+        id: "m1",
+        session_id: "s1",
+        role: "assistant",
+        content: "",
+        events: [
+          { id: "a1", tool: "Agent", summary: "任务 A", status: "running", subagent: { status: "running", activity: "Read" } },
+          { id: "a2", tool: "Agent", summary: "任务 B", status: "running", subagent: { status: "running" } },
+        ],
+        attachments: [],
+        status: "aborted",
+        created_at: "2026-11-24T10:00:00.000Z",
+      },
+      {
+        id: "m2",
+        session_id: "s1",
+        role: "assistant",
+        content: "",
+        events: [
+          { id: "a1", tool: "Agent", summary: "调用 Agent", status: "done", output: "A 完成", subagent: { status: "done" } },
+          { id: "a3", tool: "Agent", summary: "任务 C", status: "running", subagent: { status: "running" } },
+        ],
+        attachments: [],
+        status: "streaming",
+        created_at: "2026-11-24T10:01:00.000Z",
+      },
+    ]);
+
+    expect(summary.total).toBe(3);
+    expect(summary.counts).toEqual({ running: 1, done: 1, error: 0, interrupted: 1, unknown: 0 });
+    // Running subagent sorted first, then newer turn (a1), then earlier turn (a2)
+    expect(summary.items.map((i) => i.id)).toEqual(["a3", "a1", "a2"]);
+    expect(summary.byId.get("a1")?.sourceMessageId).toBe("m1");
+    expect(summary.byId.get("a1")?.latestMessageId).toBe("m2");
+    expect(summary.byId.get("a1")?.event.summary).toBe("任务 A");
+    expect(summary.byId.get("a2")?.status).toBe("interrupted");
+
+    const streams = new ProjectChatStreams({
+      streamCodexChatMessage: vi.fn(),
+      abortCodexChatSession: vi.fn(),
+      getCodexChatSession: vi.fn(),
+    });
+    const taskSession = makeSession({ id: "task-sess-empty", kind: "task", task_id: "task-empty" });
+    mockApi.getTaskAgentSession.mockResolvedValue({
+      session: taskSession,
+      messages: makeMessages([{ id: "r1", tool: "Read", summary: "Read: a.ts", status: "done" }]),
+    });
+    await act(async () => {
+      root.render(
+        createElement(
+          ToastProvider,
+          null,
+          createElement(TaskAgentSessionPanel, {
+            task: {
+              id: "task-empty",
+              project_id: "proj-1",
+              number: 20,
+              title: "No subagents",
+              body: "",
+              requirements: "",
+              source: "console",
+              source_url: "",
+              status: "working",
+              priority: "normal",
+              owner: "agent",
+              version: 1,
+              attempts: 1,
+              resolution: null,
+              delivery_ref: "",
+              deploy_status: "not_required",
+              deployed_at: null,
+              release_id: null,
+              triaged_by: "",
+              merged_into: null,
+              agent_session_id: taskSession.id,
+              agent_session_status: "idle",
+              agent_session_target: "local:mac",
+              created_at: "2026-11-24T10:00:00.000Z",
+              updated_at: "2026-11-24T10:01:00.000Z",
+              last_seen: null,
+            },
+            streams,
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    expect(container.querySelector("[data-subagent-dock]")).toBeNull();
   });
 });

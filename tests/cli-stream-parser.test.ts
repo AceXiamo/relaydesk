@@ -369,7 +369,7 @@ describe("shared CLI stream parser", () => {
       runtime: "agy",
       bin: "agy",
       model: "gemini-4-neon-medium",
-      reasoningEffort: "high",
+      reasoningEffort: "max",
       sandboxMode: "workspace-write",
       extraAddDirs: ["/space"],
     });
@@ -379,9 +379,20 @@ describe("shared CLI stream parser", () => {
       "--mode", "auto",
       "--add-dir", "/repos",
       "--add-dir", "/space",
-      "--model", "gemini-4-neon-medium",
-      "--effort", "high",
+      "--model", "gemini-4-neon",
+      "--effort", "xhigh",
     ]);
+
+    const orchestrator = buildCliInvocation({
+      ...base,
+      runtime: "agy",
+      bin: "agy",
+      model: "gemini-pro-orchestrator-neon",
+      reasoningEffort: "medium",
+      sandboxMode: "read-only",
+    });
+    expect(orchestrator.args).toContain("gemini-pro-orchestrator-neon");
+    expect(orchestrator.args).not.toContain("--effort");
 
     const fullAccess = buildCliInvocation({
       ...base,

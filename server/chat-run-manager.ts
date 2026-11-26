@@ -11,6 +11,7 @@ import {
   runWebCliChatTurn,
 } from "./codex-chat.ts";
 import { ApiError } from "./errors.ts";
+import { collectPriorSubagents, finalizeTurnSubagents } from "./cli-stream-parser.ts";
 import {
   canResumeExternalSession,
   resolveChatExecutionTarget,
@@ -638,6 +639,7 @@ export class ChatRunManager {
         if (!canResumePrior && attachmentContext) {
           contextBlocks.push(`## Explicitly Attached Context\n${attachmentContext}`);
         }
+        const priorSubagents = canResumePrior ? collectPriorSubagents(priorMessages) : [];
         result = await this.bridgeHub!.runChatTurn(
           localAgentId,
           {
@@ -653,6 +655,7 @@ export class ChatRunManager {
             prompt: canResumePrior ? buildResumePrompt(prompt, attachmentContext) : prompt,
             system_context: contextBlocks.join("\n\n"),
             workspace_manifest: workspaceManifest,
+            ...(priorSubagents.length ? { prior_subagents: priorSubagents } : {}),
             ...(bridgeImagePaths.length ? { image_paths: bridgeImagePaths } : {}),
             ...(localBinding?.allow_datasource_secrets
               ? {
@@ -710,11 +713,12 @@ export class ChatRunManager {
       terminalStatus = result.status;
       terminalStopReason = stopReason;
 
+      const finalEvents = finalizeTurnSubagents(result.events, result.status);
       const saved = this.store.transaction(true, () => {
         const updatedMsg = this.store.updateChatMessage(run.assistantMessageId, {
           content: result.status === "error" ? result.content || run.content : result.content,
           error_reason: result.status === "error" ? result.error : undefined,
-          events: result.events,
+          events: finalEvents,
           status: result.status,
           stop_reason: stopReason,
         });
@@ -788,7 +792,7 @@ export class ChatRunManager {
       const { savedMsg, taskFinalized, releaseFinalized } = this.store.transaction(true, () => {
         const msg = this.store.updateChatMessage(run.assistantMessageId, {
           content: run.content,
-          events: Array.from(run.events.values()),
+          events: finalizeTurnSubagents(Array.from(run.events.values()), "error"),
           error_reason: errMsg,
           status: "error",
         });

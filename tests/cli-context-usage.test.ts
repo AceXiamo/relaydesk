@@ -143,6 +143,45 @@ describe("Codex current context", () => {
       { threadId: other, kind: "message", result: "铜色" }]);
   });
 
+  it("matches resumed-turn Codex rollout completed + FINAL_ANSWER for prior subagent thread IDs", async () => {
+    const home = tmp(), path = filename(home);
+    mkdirSync(dirname(path), { recursive: true });
+    index(home, path);
+    const fixture = readFileSync(new URL("./fixtures/codex-subagent-rollout.jsonl", import.meta.url), "utf8").trim().split("\n").map(l => JSON.parse(l));
+    const row = (r: unknown) => JSON.stringify({ timestamp: new Date().toISOString(), ...r as object }) + "\n";
+    const [start, , , done, , message, end] = fixture;
+    writeFileSync(path, row(start) + row(end));
+
+    const events: ChatStreamEvent[] = [];
+    const parser = createCliStreamParser("codex", [], (e) => events.push(e), undefined, undefined, {
+      env: { CODEX_HOME: home },
+      resumeId: id,
+      priorSubagents: [
+        {
+          id: `codex-agent-${other}`,
+          tool: "spawn_agent",
+          summary: "检查颜色",
+          status: "running",
+          subagent: { status: "running" },
+        },
+      ],
+    });
+    parser.write(JSON.stringify({ type: "thread.started", thread_id: id }) + "\n");
+    appendFileSync(path, [start, done, message, end].map(row).join(""));
+    try {
+      await vi.waitFor(
+        () => expect(parser.state.toolEvents.get(`codex-agent-${other}`)).toMatchObject({
+          summary: "检查颜色",
+          output: "铜色",
+          subagent: { status: "done" },
+        }),
+        { timeout: 3000 },
+      );
+    } finally {
+      await parser.finish(true);
+    }
+  });
+
   it.each(["outside", "wrong-id", "symlink", "mismatched-resume", "traversal"])("rejects %s without reading its telemetry", async mode => {
     const home = tmp();
     const untrusted = mode === "wrong-id" ? filename(home, other) : filename(tmp());

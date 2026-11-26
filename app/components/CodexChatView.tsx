@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { api } from "~/lib/api.ts";
 import { messagesWithTurn, type ProjectChatStreams, type TurnTrace } from "~/lib/chat-streams.ts";
 import { formatRelativeTime } from "~/lib/format.ts";
+import { aggregateSessionSubagents } from "~/lib/subagents.ts";
 import {
   chatTargetAvailability,
   fastSupportForTarget,
@@ -29,6 +30,7 @@ import {
   ChatFailureNotice,
   FollowUpList,
   PromptBar,
+  SubagentDock,
   ThinkingTrace,
   ToolChipsGroup,
   type QuickPromptItem,
@@ -161,6 +163,11 @@ export function CodexChatView({
   const activeSession = turn?.session ?? (loadedSession?.id === activeSessionId ? loadedSession : null);
   const [history, setMessages] = useState<ChatMessageRecord[]>([]);
   const messages = messagesWithTurn(history[0]?.session_id === activeSessionId ? history : [], turn);
+  const subagentSummary = useMemo(() => aggregateSessionSubagents(messages), [messages]);
+  const [subagentDockOpen, setSubagentDockOpen] = useState(false);
+  const [focusedSubagentId, setFocusedSubagentId] = useState<string | null>(null);
+  const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
   const [messagesLoading, setMessagesLoading] = useState(false);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -209,6 +216,47 @@ export function CodexChatView({
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     bottomRef.current?.scrollIntoView({ behavior, block: "end" });
+  }, []);
+
+  useEffect(() => {
+    setSubagentDockOpen(false);
+    setFocusedSubagentId(null);
+    setHighlightedMsgId(null);
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleFocusSubagent = useCallback((id: string) => {
+    setFocusedSubagentId(id);
+    setSubagentDockOpen(true);
+  }, []);
+
+  const handleClearSubagentFocus = useCallback(() => {
+    setFocusedSubagentId(null);
+  }, []);
+
+  const handleJumpToMessage = useCallback((messageId: string) => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const candidates = container.querySelectorAll<HTMLElement>("[data-message-id]");
+    const target = Array.from(candidates).find((el) => el.dataset.messageId === messageId);
+    target?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    setHighlightedMsgId(messageId);
+    if (highlightTimerRef.current !== null) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightedMsgId((curr) => (curr === messageId ? null : curr));
+    }, 1800);
+    if (typeof window !== "undefined" && window.innerWidth < 640) {
+      setSubagentDockOpen(false);
+    }
   }, []);
 
   const handleThreadScroll = useCallback(() => {
@@ -1239,11 +1287,14 @@ export function CodexChatView({
           </div>
         </header>
 
-        {/* Scrollable Conversation Thread */}
+        {/* Scrollable Conversation Thread + Corner Subagent Dock */}
+        <div className="relative flex-1 min-h-0 flex flex-col">
         <div
           ref={scrollContainerRef}
           onScroll={handleThreadScroll}
-          className="flex-1 overflow-y-auto rd-scroll px-3 sm:px-4 pt-4 sm:pt-6 pb-6 sm:pb-8"
+          className={`flex-1 overflow-y-auto rd-scroll px-3 sm:px-4 pt-4 sm:pt-6 ${
+            subagentSummary.total > 0 ? "pb-14 sm:pb-16" : "pb-6 sm:pb-8"
+          }`}
         >
           <div className="max-w-[740px] mx-auto">
             {messagesLoading ? (
@@ -1356,7 +1407,7 @@ export function CodexChatView({
                       msg.content.includes("\n") ||
                       msg.content.length > 80;
                     return (
-                      <div key={msg.id} className="flex justify-end animate-fade-up">
+                      <div key={msg.id} data-message-id={msg.id} className="flex justify-end animate-fade-up">
                         <div
                           className={`space-y-1.5 flex flex-col items-end ${
                             hasBlockMarkdown ? "max-w-[88%] min-w-0" : "max-w-[82%] min-w-0"
@@ -1459,7 +1510,15 @@ export function CodexChatView({
                       : [];
 
                   return (
-                    <article key={msg.id} className="group/msg space-y-1 animate-fade-up">
+                    <article
+                      key={msg.id}
+                      data-message-id={msg.id}
+                      className={`group/msg space-y-1 animate-fade-up transition-colors ${
+                        highlightedMsgId === msg.id
+                          ? "rounded-xl ring-2 ring-indigo-500/40 bg-indigo-500/[0.04] px-2.5 py-2 -mx-2.5"
+                          : ""
+                      }`}
+                    >
                       {/* Minimal Turn Meta Header */}
                       <div className="flex items-center gap-2 mb-1.5">
                         <span className="w-5 h-5 rounded-md bg-[var(--surface-subtle)] border border-[var(--border-subtle)] inline-flex items-center justify-center text-[var(--text-secondary)]">
@@ -1495,7 +1554,13 @@ export function CodexChatView({
                       />
 
                       {/* Compact Tool Chips */}
-                      <ToolChipsGroup events={msg.events} isStreaming={isStreamingMsg} />
+                      <ToolChipsGroup
+                        events={msg.events}
+                        isStreaming={isStreamingMsg}
+                        subagentStates={subagentSummary.byId}
+                        messageId={msg.id}
+                        onSelectSubagent={handleFocusSubagent}
+                      />
 
                       {/* Streamed Markdown Prose */}
                       {visibleContent && (
@@ -1579,7 +1644,11 @@ export function CodexChatView({
 
         {/* Floating Scroll-to-Bottom Pill */}
         {showScrollBottom && (
-          <div className="pointer-events-none absolute inset-x-0 bottom-[152px] sm:bottom-[168px] flex justify-center z-20 animate-fade-in">
+          <div
+            className={`pointer-events-none absolute inset-x-0 flex justify-center z-20 animate-fade-in ${
+              subagentSummary.total > 0 ? "bottom-13 sm:bottom-3" : "bottom-3"
+            }`}
+          >
             <button
               type="button"
               onClick={() => {
@@ -1594,6 +1663,17 @@ export function CodexChatView({
             </button>
           </div>
         )}
+
+        <SubagentDock
+          summary={subagentSummary}
+          isStreaming={streaming}
+          open={subagentDockOpen}
+          onOpenChange={setSubagentDockOpen}
+          focusedId={focusedSubagentId}
+          onClearFocus={handleClearSubagentFocus}
+          onJumpToMessage={handleJumpToMessage}
+        />
+        </div>
 
         {/* Bottom Floating Prompt Bar */}
         <div className="shrink-0 px-2.5 sm:px-4 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:pb-4 bg-gradient-to-t from-[var(--surface-canvas)] via-[var(--surface-canvas)]/95 to-transparent">

@@ -7,7 +7,7 @@ import { z } from "zod";
 import { sanitizeBridgeModels } from "../app/lib/model-catalog.ts";
 import type { BridgeAgentSummary, ChatFastMode, ChatReasoningEffort, ChatRuntime, ChatSandboxMode, ChatStreamEvent } from "../app/lib/types.ts";
 import type { RunChatTurnResult } from "./codex-chat.ts";
-import { redactSecrets } from "./cli-stream-parser.ts";
+import { redactSecrets, type PriorSubagentSeed } from "./cli-stream-parser.ts";
 import { ApiError } from "./errors.ts";
 import { sanitizeSidebarAccount, type AccountProvider } from "./sidebar-accounts.ts";
 import type { Store } from "./store.ts";
@@ -30,6 +30,7 @@ export interface BridgeChatStart {
   datasource_env?: Record<string, string>;
   pg_read_only_enforced?: boolean;
   public_feedback?: boolean;
+  prior_subagents?: PriorSubagentSeed[];
 }
 
 export interface BridgeCliRunStart {

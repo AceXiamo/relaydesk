@@ -2,6 +2,22 @@ import { ChatWorkspaceImage } from "../ChatWorkspaceImage.tsx";
 import { ContextUsageLabel } from "./ContextUsageLabel.tsx";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
+  SUBAGENT_STATUS_META,
+  SUBAGENT_STATUS_ORDER,
+  formatSubagentTask,
+  resolveSubagentStatus,
+  stripToolPrefix,
+  type AggregatedSubagent,
+  type SubagentStatus,
+  type SubagentToolEvent,
+} from "~/lib/subagents.ts";
+import {
+  PixelGridMatrix,
+  SubagentDock,
+  SubagentTaskList,
+  renderToolOutputLines,
+} from "./SubagentDock.tsx";
+import {
   effortLabels,
   fastSupportForTarget,
   resolveActiveLocalAgent,
@@ -27,7 +43,7 @@ import { Select, type SelectOption } from "../Select.tsx";
 import { LivePulseDot } from "../ui.tsx";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./RichPromptEditor.tsx";
 
-export type { RichPromptEditorHandle };
+export { PixelGridMatrix, SubagentDock, type RichPromptEditorHandle };
 
 function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -44,48 +60,6 @@ function formatElapsed(ms: number): string {
 /* -------------------------------------------------------------------------- */
 /* 01. PixelGridLoader (Beautiful UI Loading State)                           */
 /* -------------------------------------------------------------------------- */
-
-// 3x3 pixel matrix with staggered wave delays (Drive pattern)
-const DRIVE_DELAYS: Array<number | null> = [0, 110, 220, 110, 220, 330, 220, 330, 440];
-const ORBIT_ORDER = [0, 1, 2, 5, 8, 7, 6, 3];
-const ORBIT_DELAYS: Array<number | null> = Array.from({ length: 9 }, (_, i) => {
-  const idx = ORBIT_ORDER.indexOf(i);
-  return idx === -1 ? null : idx * 105;
-});
-
-export function PixelGridMatrix({
-  variant = "drive",
-  className,
-}: {
-  variant?: "drive" | "orbit";
-  className?: string;
-}) {
-  const delays = variant === "orbit" ? ORBIT_DELAYS : DRIVE_DELAYS;
-  const dur = variant === "orbit" ? 900 : 680;
-  return (
-    <span
-      aria-hidden="true"
-      className={cn(
-        "grid shrink-0 grid-cols-[repeat(3,3.5px)] gap-[1.5px]",
-        className,
-      )}
-    >
-      {delays.map((delay, idx) => (
-        <span
-          key={idx}
-          className="size-[3.5px] rounded-[1px] bg-[var(--text-primary)]"
-          style={{
-            opacity: delay === null ? 0.08 : 0.16,
-            animation:
-              delay === null
-                ? "none"
-                : `rd-pixel-on ${dur}ms ease-in-out ${delay}ms infinite`,
-          }}
-        />
-      ))}
-    </span>
-  );
-}
 
 export function PixelGridLoader({
   label = "正在思考",
@@ -256,101 +230,6 @@ interface ParsedToolMeta {
   mono: boolean;
 }
 
-type SubagentStatus = NonNullable<ChatToolEvent["subagent"]>["status"];
-type SubagentToolEvent = ChatToolEvent & { subagent: NonNullable<ChatToolEvent["subagent"]> };
-
-interface SubagentStatusMeta {
-  label: string;
-  countLabel: string;
-  icon: string;
-  iconClass: string;
-  badgeClass: string;
-  accentClass: string;
-  outputLabel: string;
-}
-
-const SUBAGENT_STATUS_ORDER: readonly SubagentStatus[] = [
-  "running",
-  "done",
-  "error",
-  "interrupted",
-  "unknown",
-];
-
-const SUBAGENT_STATUS_META: Record<SubagentStatus, SubagentStatusMeta> = {
-  running: {
-    label: "运行中",
-    countLabel: "运行中",
-    icon: "loader-2",
-    iconClass: "animate-spin text-indigo-500",
-    badgeClass: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20",
-    accentClass: "border-l-indigo-500/70",
-    outputLabel: "最近输出",
-  },
-  done: {
-    label: "已完成",
-    countLabel: "已完成",
-    icon: "check-circle-2",
-    iconClass: "text-emerald-500",
-    badgeClass: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/20",
-    accentClass: "border-l-emerald-500/70",
-    outputLabel: "执行结果",
-  },
-  error: {
-    label: "执行失败",
-    countLabel: "失败",
-    icon: "x-circle",
-    iconClass: "text-rose-500",
-    badgeClass: "bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20",
-    accentClass: "border-l-rose-500/80",
-    outputLabel: "错误信息",
-  },
-  interrupted: {
-    label: "已中断",
-    countLabel: "已中断",
-    icon: "pause-circle",
-    iconClass: "text-amber-500",
-    badgeClass: "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25",
-    accentClass: "border-l-amber-500/80",
-    outputLabel: "中断前输出",
-  },
-  unknown: {
-    label: "状态未知",
-    countLabel: "未知",
-    icon: "circle-dashed",
-    iconClass: "text-[var(--text-muted)]",
-    badgeClass: "bg-[var(--surface-subtle)] text-[var(--text-muted)] border-[var(--border-subtle)]",
-    accentClass: "border-l-[var(--border-strong)]",
-    outputLabel: "最后已知输出",
-  },
-};
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function compactWhitespace(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
-}
-
-function stripToolPrefix(tool: string, summary: string): string {
-  if (!tool) return summary;
-  return summary.replace(new RegExp(`^${escapeRegExp(tool)}\\s*:\\s*`, "i"), "").trim();
-}
-
-function resolveSubagentStatus(status: string | undefined): SubagentStatus {
-  if (status && status in SUBAGENT_STATUS_META) {
-    return status as SubagentStatus;
-  }
-  return "unknown";
-}
-
-function formatSubagentTask(ev: ChatToolEvent): string {
-  const summary = ev.summary.trim();
-  const cleaned = stripToolPrefix(ev.tool, summary);
-  return cleaned || summary || "子代理任务";
-}
-
 function parseToolMeta(ev: ChatToolEvent): ParsedToolMeta {
   const rawTool = ev.tool.toLowerCase();
   const summary = ev.summary.trim();
@@ -377,33 +256,65 @@ function parseToolMeta(ev: ChatToolEvent): ParsedToolMeta {
   return { icon: "wrench", verb: ev.tool, target: cleaned && cleaned !== ev.tool ? cleaned : "", mono: true };
 }
 
-function renderOutputLines(output: string) {
-  const lines = output.split(/\r?\n/);
-  const looksLikeDiff = lines.some((l) => l.startsWith("+++ ") || l.startsWith("--- ") || l.startsWith("@@ "));
-  if (!looksLikeDiff) {
-    return (
-      <pre className="m-0 font-mono text-[11.5px] leading-[1.55] text-[var(--text-secondary)] whitespace-pre-wrap break-words">
-        {output}
-      </pre>
-    );
-  }
+function SubagentInlineReferences({
+  events,
+  subagentStates,
+  messageId,
+  onSelectSubagent,
+}: {
+  events: SubagentToolEvent[];
+  subagentStates?: ReadonlyMap<string, AggregatedSubagent>;
+  messageId?: string;
+  onSelectSubagent: (id: string) => void;
+}) {
   return (
-    <pre className="m-0 font-mono text-[11.5px] leading-[1.55] whitespace-pre-wrap break-words">
-      {lines.map((line, idx) => {
-        const tone = line.startsWith("+") && !line.startsWith("+++")
-          ? "text-emerald-600 dark:text-emerald-400 bg-emerald-500/8 block -mx-3 px-3"
-          : line.startsWith("-") && !line.startsWith("---")
-            ? "text-rose-600 dark:text-rose-400 bg-rose-500/8 block -mx-3 px-3"
-            : line.startsWith("@@")
-              ? "text-indigo-600 dark:text-indigo-400 block"
-              : "text-[var(--text-secondary)] block";
+    <div className="space-y-1">
+      {events.map((ev) => {
+        const aggregated = subagentStates?.get(ev.id);
+        const resolvedEvent = aggregated?.event ?? ev;
+        const status = aggregated?.status ?? resolveSubagentStatus(ev.subagent.status);
+        const meta = SUBAGENT_STATUS_META[status];
+        const taskText = formatSubagentTask(resolvedEvent);
+        const isOrigin = !messageId || !aggregated || aggregated.sourceMessageId === messageId;
+
         return (
-          <span key={idx} className={tone}>
-            {line || " "}
-          </span>
+          <button
+            key={ev.id}
+            type="button"
+            data-subagent-ref-trigger="1"
+            data-subagent-ref-id={ev.id}
+            data-subagent-status={status}
+            onClick={() => onSelectSubagent(ev.id)}
+            className="rd-focus-ring group w-full flex items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)]/70 hover:bg-[var(--surface-hover)]/80 hover:border-[var(--border-strong)] px-2.5 py-1.5 text-left transition-colors cursor-pointer"
+          >
+            <span className="flex items-center gap-2 min-w-0 flex-1">
+              <Icon name={meta.icon} size={12} className={meta.iconClass} />
+              <span className="text-[11.5px] font-medium text-[var(--text-muted)] shrink-0">
+                {isOrigin ? "派发子代理" : "子代理更新"}
+              </span>
+              <span className="text-[var(--border-strong)] shrink-0">·</span>
+              <span className="text-[12px] font-medium text-[var(--text-primary)] truncate min-w-0" title={taskText}>
+                {taskText}
+              </span>
+            </span>
+            <span className="flex items-center gap-1.5 shrink-0">
+              <span
+                className={cn(
+                  "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap",
+                  meta.badgeClass,
+                )}
+              >
+                {meta.label}
+              </span>
+              <span className="inline-flex items-center gap-0.5 text-[11px] font-medium text-[var(--text-muted)] group-hover:text-[var(--text-primary)] transition-colors">
+                <span>查看</span>
+                <Icon name="arrow-up-right" size={11} />
+              </span>
+            </span>
+          </button>
         );
       })}
-    </pre>
+    </div>
   );
 }
 
@@ -416,7 +327,6 @@ function SubagentTasksPanel({
 }) {
   const [groupOpen, setGroupOpen] = useState(true);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
-  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const isParallel = events.length > 1;
   const counts: Record<SubagentStatus, number> = {
@@ -437,12 +347,6 @@ function SubagentTasksPanel({
       else next.add(id);
       return next;
     });
-  };
-
-  const handleCopyOutput = (id: string, text: string) => {
-    void navigator.clipboard?.writeText(text);
-    setCopiedId(id);
-    window.setTimeout(() => setCopiedId((curr) => (curr === id ? null : curr)), 1500);
   };
 
   const headerTitle = isParallel ? `并行子代理 (${events.length})` : "子代理任务";
@@ -508,232 +412,13 @@ function SubagentTasksPanel({
       </button>
 
       {groupOpen && (
-        <ul className="m-0 list-none border-t border-[var(--border-subtle)] bg-[var(--surface-subtle)]/35 dark:bg-[#0d0f13]/35 p-2 space-y-2">
-          {events.map((ev, idx) => {
-            const status = resolveSubagentStatus(ev.subagent.status);
-            const statusMeta = SUBAGENT_STATUS_META[status];
-            const taskText = formatSubagentTask(ev);
-            const activity = ev.subagent.activity?.trim() || "";
-            const outputText = ev.output ?? "";
-            const hasOutput = outputText.trim().length > 0;
-            const hasExitCode = typeof ev.exit_code === "number";
-            const hasLongTask = taskText.length > 120 || taskText.includes("\n");
-            const hasLongActivity = Boolean(activity && (activity.length > 90 || activity.includes("\n")));
-            const hasDetail = hasOutput || hasExitCode || hasLongTask || hasLongActivity;
-            const hasDrawerContent = Boolean(activity || hasOutput || hasExitCode);
-            const isOpen = expandedIds.has(ev.id);
-
-            return (
-              <li
-                key={ev.id}
-                data-subagent-id={ev.id}
-                data-subagent-status={status}
-                className={cn(
-                  "rounded-lg border border-[var(--border-subtle)] border-l-2 bg-[var(--surface-card)] overflow-hidden transition-colors",
-                  statusMeta.accentClass,
-                )}
-              >
-                <button
-                  type="button"
-                  onClick={() => hasDetail && toggleItem(ev.id)}
-                  disabled={!hasDetail}
-                  aria-expanded={hasDetail ? isOpen : undefined}
-                  className={cn(
-                    "rd-focus-ring block w-full px-3 py-2 text-left transition-colors",
-                    hasDetail ? "hover:bg-[var(--surface-hover)]/55 cursor-pointer" : "cursor-default",
-                  )}
-                >
-                  <span className="flex items-start justify-between gap-2.5">
-                    <span className="flex items-start gap-2 min-w-0 flex-1">
-                      <Icon
-                        name={statusMeta.icon}
-                        size={13}
-                        className={cn("mt-[2px] shrink-0", statusMeta.iconClass)}
-                      />
-                      {isParallel && (
-                        <span className="mt-[1px] shrink-0 rounded border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-1 py-0.5 font-mono text-[10px] leading-none text-[var(--text-muted)] tabular-nums">
-                          #{idx + 1}
-                        </span>
-                      )}
-                      <span
-                        className={cn(
-                          "min-w-0 flex-1 text-[12.5px] font-medium leading-[1.45] text-[var(--text-primary)] break-words",
-                          isOpen ? "whitespace-pre-wrap" : "line-clamp-2",
-                        )}
-                        title={taskText}
-                      >
-                        {taskText}
-                      </span>
-                    </span>
-                    <span className="flex items-center gap-1.5 shrink-0 pt-[1px]">
-                      <span
-                        title={`最后已知状态：${statusMeta.label}`}
-                        className={cn(
-                          "inline-flex items-center rounded-full border px-2 py-0.5 text-[10.5px] font-medium leading-none whitespace-nowrap",
-                          statusMeta.badgeClass,
-                        )}
-                      >
-                        {statusMeta.label}
-                      </span>
-                      {hasDetail && (
-                        <Icon
-                          name="chevron-right"
-                          size={12}
-                          className={cn(
-                            "text-[var(--text-muted)] transition-transform duration-150",
-                            isOpen && "rotate-90",
-                          )}
-                        />
-                      )}
-                    </span>
-                  </span>
-
-                  {!isOpen && activity && (
-                    <span className="mt-1.5 flex items-center gap-1.5 min-w-0 text-[11px] leading-[1.4]">
-                      <span className="shrink-0 font-medium text-[var(--text-muted)]">最近活动</span>
-                      <span
-                        className="min-w-0 truncate rounded border border-[var(--border-subtle)]/80 bg-[var(--surface-subtle)] px-1.5 py-0.5 font-mono text-[10.5px] text-[var(--text-secondary)]"
-                        title={activity}
-                      >
-                        {compactWhitespace(activity)}
-                      </span>
-                    </span>
-                  )}
-
-                  {!isOpen && hasOutput && (
-                    <span
-                      className={cn(
-                        "mt-1.5 flex items-start gap-1.5 min-w-0 rounded-md border px-2 py-1.5 text-[11.5px] leading-[1.45]",
-                        status === "error"
-                          ? "border-rose-500/25 bg-rose-500/[0.05] dark:bg-rose-500/[0.08]"
-                          : status === "interrupted"
-                            ? "border-amber-500/20 bg-amber-500/[0.05] dark:bg-amber-500/[0.08]"
-                            : "border-[var(--border-subtle)]/75 bg-[var(--surface-subtle)]/70",
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "mt-[1px] shrink-0 text-[10.5px] font-semibold",
-                          status === "error"
-                            ? "text-rose-600 dark:text-rose-400"
-                            : status === "interrupted"
-                              ? "text-amber-700 dark:text-amber-300"
-                              : status === "done"
-                                ? "text-emerald-700 dark:text-emerald-400"
-                                : "text-[var(--text-muted)]",
-                        )}
-                      >
-                        {statusMeta.outputLabel}
-                      </span>
-                      <span
-                        className={cn(
-                          "min-w-0 flex-1 line-clamp-2 break-words",
-                          status === "error"
-                            ? "text-rose-700 dark:text-rose-300"
-                            : "text-[var(--text-secondary)]",
-                        )}
-                      >
-                        {compactWhitespace(outputText)}
-                      </span>
-                    </span>
-                  )}
-                </button>
-
-                {isOpen && hasDrawerContent && (
-                  <div className="border-t border-[var(--border-subtle)]/80 bg-[var(--surface-subtle)]/65 dark:bg-[#0d0f13]/80 px-3 py-2.5 space-y-2.5 animate-fade-in">
-                    {activity && (
-                      <div className="space-y-1">
-                        <div className="text-[10.5px] font-medium text-[var(--text-muted)]">
-                          最近活动
-                        </div>
-                        <p className="m-0 font-mono text-[11.5px] leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap break-words">
-                          {activity}
-                        </p>
-                      </div>
-                    )}
-
-                    {(hasOutput || hasExitCode) && (
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between gap-2 text-[11px]">
-                          <span className="flex items-center gap-1.5 min-w-0">
-                            <span
-                              className={cn(
-                                "font-semibold",
-                                status === "error"
-                                  ? "text-rose-600 dark:text-rose-400"
-                                  : status === "interrupted"
-                                    ? "text-amber-700 dark:text-amber-300"
-                                    : status === "done"
-                                      ? "text-emerald-700 dark:text-emerald-400"
-                                      : "text-[var(--text-muted)]",
-                              )}
-                            >
-                              {statusMeta.outputLabel}
-                            </span>
-                            {hasExitCode && ev.exit_code !== 0 && (
-                              <span className="font-mono text-[10.5px] px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-600 dark:text-rose-400">
-                                exit {ev.exit_code}
-                              </span>
-                            )}
-                          </span>
-                          {hasOutput && (
-                            <button
-                              type="button"
-                              onClick={() => handleCopyOutput(ev.id, outputText)}
-                              className="rd-focus-ring inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition cursor-pointer shrink-0"
-                            >
-                              <Icon name={copiedId === ev.id ? "check" : "copy"} size={11} />
-                              {copiedId === ev.id ? "已复制" : status === "error" ? "复制错误" : "复制结果"}
-                            </button>
-                          )}
-                        </div>
-                        {hasOutput ? (
-                          <div
-                            className={cn(
-                              "max-h-60 overflow-auto rd-scroll rounded-md border p-2.5",
-                              status === "error"
-                                ? "border-rose-500/25 bg-rose-500/[0.06] dark:bg-rose-500/[0.09]"
-                                : status === "interrupted"
-                                  ? "border-amber-500/20 bg-amber-500/[0.04]"
-                                  : "border-[var(--border-subtle)]/70 bg-[var(--surface-card)]/85 dark:bg-[#111215]/90",
-                            )}
-                          >
-                            {status === "error" ? (
-                              <pre className="m-0 font-mono text-[11.5px] leading-[1.55] text-rose-700 dark:text-rose-300 whitespace-pre-wrap break-words">
-                                {outputText}
-                              </pre>
-                            ) : (
-                              renderOutputLines(outputText)
-                            )}
-                          </div>
-                        ) : (
-                          <div className="text-[11px] font-mono text-[var(--text-muted)]">
-                            （无输出，退出码 {ev.exit_code}）
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {ev.images && ev.images.length > 0 && (
-                  <div className="px-3 pb-2.5 pt-1 flex flex-wrap gap-2">
-                    {ev.images.map((img, imgIdx) => (
-                      <ChatWorkspaceImage
-                        key={`${imgIdx}:${img.url}`}
-                        url={img.url}
-                        alt={img.alt || `${ev.tool} 图片`}
-                        streaming={isStreaming}
-                        linkClassName="block group"
-                        className="max-h-64 w-auto max-w-full rounded-xl border border-[var(--border-subtle)] object-contain"
-                      />
-                    ))}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+        <SubagentTaskList
+          items={events.map((event) => ({ event }))}
+          isStreaming={isStreaming}
+          expandedIds={expandedIds}
+          onToggleItem={toggleItem}
+          listClassName="border-t border-[var(--border-subtle)] bg-[var(--surface-subtle)]/35 dark:bg-[#0d0f13]/35"
+        />
       )}
     </section>
   );
@@ -895,7 +580,7 @@ function RegularToolChipsPanel({
                     </div>
                     {ev.output ? (
                       <div className="max-h-56 overflow-auto rd-scroll">
-                        {renderOutputLines(ev.output)}
+                        {renderToolOutputLines(ev.output)}
                       </div>
                     ) : (
                       <div className="text-[11px] font-mono text-[var(--text-muted)]">
@@ -943,9 +628,15 @@ function RegularToolChipsPanel({
 export function ToolChipsGroup({
   events,
   isStreaming = false,
+  subagentStates,
+  messageId,
+  onSelectSubagent,
 }: {
   events: ChatToolEvent[];
   isStreaming?: boolean;
+  subagentStates?: ReadonlyMap<string, AggregatedSubagent>;
+  messageId?: string;
+  onSelectSubagent?: (id: string) => void;
 }) {
   if (!events.length) return null;
 
@@ -955,7 +646,16 @@ export function ToolChipsGroup({
   return (
     <div className="mb-3 space-y-2.5">
       {subagentEvents.length > 0 && (
-        <SubagentTasksPanel events={subagentEvents} isStreaming={isStreaming} />
+        onSelectSubagent ? (
+          <SubagentInlineReferences
+            events={subagentEvents}
+            subagentStates={subagentStates}
+            messageId={messageId}
+            onSelectSubagent={onSelectSubagent}
+          />
+        ) : (
+          <SubagentTasksPanel events={subagentEvents} isStreaming={isStreaming} />
+        )
       )}
       {regularEvents.length > 0 && (
         <RegularToolChipsPanel events={regularEvents} isStreaming={isStreaming} />

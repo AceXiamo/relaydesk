@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { ChatStreamEvent } from "../app/lib/types.ts";
-import { createCliStreamParser } from "../server/cli-stream-parser.ts";
+import type { ChatMessageRecord, ChatStreamEvent } from "../app/lib/types.ts";
+import { collectPriorSubagents, createCliStreamParser, finalizeTurnSubagents } from "../server/cli-stream-parser.ts";
 
 const secret = "fixture-secret";
 function stream() {
@@ -81,5 +81,73 @@ describe("Claude subagents", () => {
     expect(parser.state.toolEvents.size).toBe(1);
     expect(parser.state.toolEvents.get(event.id)?.output).toHaveLength(32768);
     expect(JSON.stringify(events)).not.toContain(secret);
+  });
+
+  it("resumes prior async subagent metadata across turns and normalizes aborted running subagents", () => {
+    const turn1 = stream();
+    turn1.message("assistant", [tool("agent-1", "Agent", "探索 agy harness 集成")]);
+    turn1.line({ type: "user", message: { content: [result("agent-1", "Launch acknowledged")] }, tool_use_result: { status: "async_launched" } });
+    turn1.parser.finish(true);
+
+    const priorMsg: ChatMessageRecord = {
+      id: "m1",
+      session_id: "s1",
+      role: "assistant",
+      content: "",
+      events: [...turn1.parser.state.toolEvents.values()],
+      attachments: [],
+      status: "done",
+      created_at: "2026-11-26T10:00:00.000Z",
+    };
+
+    const seeds = collectPriorSubagents([priorMsg]);
+    expect(seeds).toEqual([
+      {
+        id: "agent-1",
+        tool: "Agent",
+        summary: "探索 agy harness 集成",
+        status: "running",
+        subagent: { status: "unknown" },
+      },
+    ]);
+
+    const turn2Events: ChatStreamEvent[] = [];
+    const turn2 = createCliStreamParser(
+      "claude",
+      [secret],
+      (ev) => turn2Events.push(ev),
+      undefined,
+      undefined,
+      { env: {}, resumeId: "claude-sess-1", priorSubagents: seeds },
+    );
+
+    // Unreferenced prior subagents are not eagerly added to turn 2 toolEvents
+    expect(turn2.state.toolEvents.size).toBe(0);
+
+    turn2.write(JSON.stringify({ type: "system", subtype: "task_progress", tool_use_id: "agent-1", last_tool_name: "Grep" }) + "\n");
+    expect(turn2.state.toolEvents.get("agent-1")).toMatchObject({
+      tool: "Agent",
+      summary: "探索 agy harness 集成",
+      status: "running",
+      subagent: { status: "running", activity: "Grep" },
+    });
+
+    turn2.write(JSON.stringify({ type: "system", subtype: "task_notification", tool_use_id: "agent-1", status: "completed", summary: "Found 3 callers" }) + "\n");
+    turn2.finish(true);
+    expect(turn2.state.toolEvents.get("agent-1")).toMatchObject({
+      tool: "Agent",
+      summary: "探索 agy harness 集成",
+      status: "done",
+      output: "Found 3 callers",
+      subagent: { status: "done" },
+    });
+
+    const finalized = finalizeTurnSubagents(
+      [{ id: "a-run", tool: "Agent", summary: "running task", status: "running", subagent: { status: "running", activity: "Read" } }],
+      "aborted",
+    );
+    expect(finalized).toEqual([
+      { id: "a-run", tool: "Agent", summary: "running task", status: "error", subagent: { status: "interrupted", activity: "Read" } },
+    ]);
   });
 });

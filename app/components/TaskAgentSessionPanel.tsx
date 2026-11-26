@@ -5,6 +5,7 @@ import { chatMessageContent, STOP_LABELS } from "~/lib/chat-content.ts";
 import { messagesWithTurn, type ProjectChatStreams } from "~/lib/chat-streams.ts";
 import { formatRelativeTime } from "~/lib/format.ts";
 import { effortLabels, resolveLocalTaskAgent } from "~/lib/model-catalog.ts";
+import { aggregateSessionSubagents } from "~/lib/subagents.ts";
 import type {
   ChatContextRef,
   ChatReasoningEffort,
@@ -13,7 +14,7 @@ import type {
   ProjectExecutionRoutingResponse,
   TaskRecord,
 } from "~/lib/types.ts";
-import { ChatFailureNotice, ThinkingTrace, ToolChipsGroup } from "./agent-chat/AgentPrimitives.tsx";
+import { ChatFailureNotice, SubagentDock, ThinkingTrace, ToolChipsGroup } from "./agent-chat/AgentPrimitives.tsx";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./agent-chat/RichPromptEditor.tsx";
 import { Icon } from "./Icon.tsx";
 import {
@@ -347,6 +348,52 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
   const target = session?.resolved_target || task.agent_session_target || session?.execution_target;
   const nodeName = agents.find(agent => `local:${agent.id}` === target)?.name;
   const messages = messagesWithTurn(data?.messages ?? [], turn);
+  const subagentSummary = useMemo(() => aggregateSessionSubagents(messages), [messages]);
+  const [subagentDockOpen, setSubagentDockOpen] = useState(false);
+  const [focusedSubagentId, setFocusedSubagentId] = useState<string | null>(null);
+  const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
+  const highlightTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    setSubagentDockOpen(false);
+    setFocusedSubagentId(null);
+    setHighlightedMsgId(null);
+  }, [sessionId]);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimer.current !== null) {
+        window.clearTimeout(highlightTimer.current);
+      }
+    };
+  }, []);
+
+  const handleFocusSubagent = useCallback((id: string) => {
+    setFocusedSubagentId(id);
+    setSubagentDockOpen(true);
+  }, []);
+
+  const handleClearSubagentFocus = useCallback(() => {
+    setFocusedSubagentId(null);
+  }, []);
+
+  const handleJumpToMessage = useCallback((messageId: string) => {
+    const container = transcript.current;
+    if (!container) return;
+    const candidates = container.querySelectorAll<HTMLElement>("[data-message-id]");
+    const el = Array.from(candidates).find((node) => node.dataset.messageId === messageId);
+    el?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    setHighlightedMsgId(messageId);
+    if (highlightTimer.current !== null) {
+      window.clearTimeout(highlightTimer.current);
+    }
+    highlightTimer.current = window.setTimeout(() => {
+      setHighlightedMsgId((curr) => (curr === messageId ? null : curr));
+    }, 1800);
+    if (typeof window !== "undefined" && window.innerWidth < 640) {
+      setSubagentDockOpen(false);
+    }
+  }, []);
   const status = running ? "执行中" : session?.status === "error" ? "执行异常" : "空闲";
   const controlsDisabled = running || dispatching || savingConfig || blocked;
 
@@ -493,7 +540,14 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
           )}
         </div>
       ) : <>
-        <div ref={transcript} onScroll={e => { const el = e.currentTarget; followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 72; }} className="rd-scroll min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+        <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          ref={transcript}
+          onScroll={e => { const el = e.currentTarget; followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 72; }}
+          className={`rd-scroll min-h-0 flex-1 overflow-y-auto px-4 pt-5 sm:px-6 ${
+            subagentSummary.total > 0 ? "pb-14" : "pb-5"
+          }`}
+        >
           <div className="mx-auto max-w-3xl space-y-6">
             {messages.map((msg, index) => {
               if (!msg.content && msg.role === "user" && !msg.attachments.length) return null;
@@ -503,7 +557,14 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
               const live = assistant && running && msg.id === turn?.assistant.id;
               const { thinkingBlocks, visibleContent, errorReason } = chatMessageContent(msg);
               const label = assistant ? "Local Agent" : brief ? "任务说明" : msg.role === "system" ? "系统" : "你";
-              return <article key={msg.id} className={assistant ? "space-y-2" : "rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] px-4 py-3"}>
+              const isHighlighted = highlightedMsgId === msg.id;
+              return <article
+                key={msg.id}
+                data-message-id={msg.id}
+                className={`${assistant ? "space-y-2" : "rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] px-4 py-3"} ${
+                  isHighlighted ? "ring-2 ring-indigo-500/40 rounded-xl" : ""
+                }`}
+              >
                 <div className="mb-2 flex items-center gap-2 text-xs text-[var(--text-muted)]">
                   <Icon name={assistant ? "terminal" : brief ? "file-text" : "message-square"} size={13} />
                   <span className="font-medium text-[var(--text-secondary)]">{label}</span>
@@ -511,7 +572,13 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                 </div>
                 {assistant && <>
                   <ThinkingTrace active={Boolean(live)} statusLabel={turn?.statusLine || "正在执行"} startedAt={trace?.startedAt} durationMs={trace?.durationMs} entries={[...(trace?.entries ?? []), ...thinkingBlocks.map((text, i) => ({ id: `inline-${i}`, kind: "reasoning" as const, text }))]} />
-                  <ToolChipsGroup events={msg.events} isStreaming={live} />
+                  <ToolChipsGroup
+                    events={msg.events}
+                    isStreaming={live}
+                    subagentStates={subagentSummary.byId}
+                    messageId={msg.id}
+                    onSelectSubagent={handleFocusSubagent}
+                  />
                 </>}
                 {brief && msg.content.length > 550 ? <details><summary className="cursor-pointer text-xs text-[var(--text-secondary)]">展开任务说明</summary><MarkdownContent content={msg.content} projectId={task.project_id} compact /></details> : <MarkdownContent content={assistant ? visibleContent : msg.content} projectId={task.project_id} streaming={Boolean(live)} compact />}
                 {errorReason && <ChatFailureNotice reason={errorReason} />}
@@ -543,6 +610,16 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
               </article>;
             })}
           </div>
+        </div>
+        <SubagentDock
+          summary={subagentSummary}
+          isStreaming={running}
+          open={subagentDockOpen}
+          onOpenChange={setSubagentDockOpen}
+          focusedId={focusedSubagentId}
+          onClearFocus={handleClearSubagentFocus}
+          onJumpToMessage={handleJumpToMessage}
+        />
         </div>
         <form className="shrink-0 border-t border-[var(--border-subtle)] bg-[var(--surface-canvas)] px-3 py-3 sm:px-4" onSubmit={e => { e.preventDefault(); send(); }}>
           <div className="mx-auto max-w-3xl space-y-2">

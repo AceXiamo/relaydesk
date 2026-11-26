@@ -4,7 +4,13 @@ import { accessSync, constants, existsSync, mkdirSync, statSync, unlinkSync, wri
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { chatImageAttachments } from "../../server/chat-image-attachments.ts";
-import { buildCliInvocation, createCliStreamParser, formatCliStdinPrompt, redactSecrets } from "../../server/cli-stream-parser.ts";
+import {
+  buildCliInvocation,
+  createCliStreamParser,
+  formatCliStdinPrompt,
+  redactSecrets,
+  type PriorSubagentSeed,
+} from "../../server/cli-stream-parser.ts";
 import type { RunChatTurnResult } from "../../server/codex-chat.ts";
 import {
   startRelaydeskMcpServer,
@@ -35,6 +41,38 @@ export interface ChatStart {
   datasource_env?: Record<string, unknown>;
   pg_read_only_enforced?: boolean;
   public_feedback?: boolean;
+  prior_subagents?: PriorSubagentSeed[];
+}
+
+const VALID_SUBAGENT_STATUS = new Set(["unknown", "running", "done", "error", "interrupted"]);
+
+function sanitizePriorSubagents(raw: unknown): PriorSubagentSeed[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PriorSubagentSeed[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const id = typeof rec.id === "string" ? rec.id.trim().slice(0, 256) : "";
+    const tool = typeof rec.tool === "string" ? rec.tool.trim().slice(0, 128) : "";
+    const summary = typeof rec.summary === "string" ? rec.summary.slice(0, 4096) : "";
+    const sa = rec.subagent && typeof rec.subagent === "object" ? (rec.subagent as Record<string, unknown>) : null;
+    const saStatus = typeof sa?.status === "string" && VALID_SUBAGENT_STATUS.has(sa.status)
+      ? (sa.status as PriorSubagentSeed["subagent"]["status"])
+      : null;
+    if (!id || !tool || !saStatus) continue;
+    const activity = typeof sa?.activity === "string" && sa.activity.trim()
+      ? sa.activity.trim().slice(0, 4096)
+      : undefined;
+    out.push({
+      id,
+      tool,
+      summary: summary || tool,
+      ...(rec.status === "running" || rec.status === "done" || rec.status === "error" ? { status: rec.status } : {}),
+      subagent: { status: saStatus, ...(activity ? { activity } : {}) },
+    });
+    if (out.length >= 50) break;
+  }
+  return out;
 }
 export function datasourceValues(input: ChatStart["datasource_env"]) {
   const env: Record<string, string> = Object.create(null);
@@ -326,6 +364,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
         };
       }
     : undefined;
+  const priorSubagents = p.resume_session_id ? sanitizePriorSubagents(p.prior_subagents) : [];
   const parser = createCliStreamParser(
     runtime,
     [],
@@ -338,7 +377,12 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     },
     saveToolImage,
     attachedImages.lookup,
-    { env, resumeId: p.resume_session_id || "", redact: clean },
+    {
+      env,
+      resumeId: p.resume_session_id || "",
+      redact: clean,
+      ...(priorSubagents.length ? { priorSubagents } : {}),
+    },
   );
   if (o.signal.aborted) return { status: "aborted", content: "", events: [], externalSessionId: p.resume_session_id || "" };
   const child = spawn(bin, args, { cwd: o.cwd, env, detached: true, stdio: "pipe" });

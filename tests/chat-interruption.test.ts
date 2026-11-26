@@ -68,8 +68,10 @@ describe("chat interruption and continuation", () => {
     const ids = { run_id, session_id: s.id };
     const event = (event: object) => conn.send("chat.event", { ...ids, event });
     const tool = { id: "t", tool: "read", summary: "Read file", status: "done" };
+    const subagent = { id: "sa-1", tool: "Agent", summary: "Inspect repo", status: "running", subagent: { status: "running", activity: "Grep" } };
     if (thread) event({ type: "status", message: "started", external_session_id: thread });
     event({ type: "tool", event: tool });
+    event({ type: "tool", event: subagent });
     event({ type: "text_delta", delta: "Partial result" });
     // An RPC on the same socket establishes that the hub observed all prior events.
     const barrier = conn.send("workspace.fetch", { project_id: p, path: "HANDBOOK.md" });
@@ -80,7 +82,15 @@ describe("chat interruption and continuation", () => {
     await conn.next("chat.abort"); // No terminal frame from the bridge.
     expect(await first.text()).toContain("event: done");
     const detail = await s.detail();
-    expect(detail.messages.at(-1)).toMatchObject({ content: "Partial result", events: [expect.objectContaining(tool)], status: "aborted", stop_reason: "follow_up" });
+    expect(detail.messages.at(-1)).toMatchObject({
+      content: "Partial result",
+      events: [
+        expect.objectContaining(tool),
+        expect.objectContaining({ id: "sa-1", status: "error", subagent: { status: "interrupted", activity: "Grep" } }),
+      ],
+      status: "aborted",
+      stop_reason: "follow_up",
+    });
     expect(detail.session.external_session_id).toBe(thread);
     expect((await send("first", original)).status).toBe(409);
     const second = await send("second", "ADDITIONAL CONDITION");

@@ -6,10 +6,12 @@ import { join } from "node:path";
 import { chatImageAttachments } from "./chat-image-attachments.ts";
 import {
   buildCliInvocation,
+  collectPriorSubagents,
   createCliStreamParser,
   formatCliStdinPrompt,
   redactSecrets,
   type CliStreamImageHandler,
+  type PriorSubagentSeed,
   type StreamParseState,
 } from "./cli-stream-parser.ts";
 import { canResumeExternalSession } from "./execution-router.ts";
@@ -449,6 +451,7 @@ function runSingleCliAttempt(params: {
   onEvent: (event: ChatStreamEvent) => void;
   onImage?: CliStreamImageHandler;
   lookupAttachment?: ReturnType<typeof chatImageAttachments>["lookup"];
+  priorSubagents?: readonly PriorSubagentSeed[];
 }): Promise<{
   exitCode: number | null;
   aborted: boolean;
@@ -457,7 +460,11 @@ function runSingleCliAttempt(params: {
 }> {
   const { sessionId, runtime, bin, args, cwd, env, stdinPrompt, secrets, signal, onEvent, onImage } = params;
   return new Promise((resolve) => {
-    const parser = createCliStreamParser(runtime, secrets, onEvent, onImage, params.lookupAttachment, { env, resumeId: params.resumeId });
+    const parser = createCliStreamParser(runtime, secrets, onEvent, onImage, params.lookupAttachment, {
+      env,
+      resumeId: params.resumeId,
+      ...(params.priorSubagents?.length ? { priorSubagents: params.priorSubagents } : {}),
+    });
     const { state } = parser;
     if (signal.aborted) {
       resolve({ exitCode: null, aborted: true, stderr: "", state });
@@ -724,6 +731,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
     if (mcpHandle && session.runtime === "codex") {
       invocation.env.RELAYDESK_MCP_TOKEN = mcpHandle.token;
     }
+    const priorSubagents = resumeId ? collectPriorSubagents(priorMessages) : [];
     return runSingleCliAttempt({
       sessionId: session.id,
       resumeId,
@@ -738,6 +746,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       onEvent: event => { clock.progress(); onEvent(event); },
       onImage: saveToolImage,
       lookupAttachment: attachedImages.lookup,
+      ...(priorSubagents.length ? { priorSubagents } : {}),
     });
   };
 
