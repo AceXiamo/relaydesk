@@ -398,6 +398,8 @@ describe("ToolChipsGroup subagent UI", () => {
       repos: [],
       automation_paused: false,
       delivery_mode: "direct_push",
+      target_branch: "",
+      branch_prefix: "relaydesk",
       deploy_policy: {
         runtime: null,
         model: null,

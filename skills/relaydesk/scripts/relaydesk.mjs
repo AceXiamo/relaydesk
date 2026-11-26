@@ -736,12 +736,16 @@ async function cmdClaim(flags, positional) {
   const task = data.task;
   const project = data.project || {};
   const delivery = ctx.binding.delivery_mode || project.delivery_mode || "direct_push";
+  const targetBranch = String(project.target_branch || "").trim();
+  const branchPrefix = String(project.branch_prefix || "").trim() || "relaydesk";
   const attempt = Math.max(1, Number(task.attempts || 1));
   const scriptPath = process.argv[1] || fileURLToPath(import.meta.url);
 
   const lines = [
     `TASK: ${taskCode(task.number)} | priority=${task.priority} | status=${task.status} | attempt=${attempt}/3`,
     `DELIVERY: ${delivery}`,
+    ...(targetBranch ? [`TARGET_BRANCH: ${targetBranch}`] : []),
+    ...(branchPrefix !== "relaydesk" ? [`BRANCH_PREFIX: ${branchPrefix}`] : []),
     `TITLE: ${task.title}`,
     "REPOS:",
     ...formatRepoLines(project, ctx.binding, ctx.workspaceDir),

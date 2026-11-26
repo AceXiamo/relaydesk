@@ -10,6 +10,8 @@ import {
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type {
+  GithubBranchItem,
+  GithubBranchesPayload,
   GithubConnectionSummary,
   GithubInspectPayload,
   GithubOwnerInfo,
@@ -1333,3 +1335,182 @@ export async function fetchGithubRepositoriesAcrossConnections(
     ...(surfaceWarnings ? { warnings: surfaceWarnings } : {}),
   };
 }
+
+interface RawGithubBranch {
+  name?: string;
+  protected?: boolean;
+}
+
+interface RawGithubRepoMeta {
+  default_branch?: string;
+  full_name?: string;
+}
+
+const VALID_GITHUB_REPO_RE = /^([\w.-]+)\/([\w.-]+)$/;
+
+export function parseGithubRepoSlug(raw: string): { owner: string; name: string; fullName: string } | null {
+  const cleaned = raw.trim().replace(/\.git$/i, "").replace(/\/+$/, "");
+  const match = cleaned.match(VALID_GITHUB_REPO_RE);
+  if (!match) return null;
+  const [, owner, name] = match;
+  if (!owner || !name || owner === "." || owner === ".." || name === "." || name === "..") {
+    return null;
+  }
+  return { owner, name, fullName: `${owner}/${name}` };
+}
+
+function hasNextPageLink(linkHeader: string): boolean {
+  return /<[^>]+>;\s*rel="next"/i.test(linkHeader);
+}
+
+export async function fetchGithubBranches(
+  token: string,
+  repo: string,
+  apiBaseOverride?: string,
+): Promise<GithubBranchesPayload> {
+  const parsed = parseGithubRepoSlug(repo);
+  if (!parsed) {
+    throw new GithubError("无效的仓库格式，请使用 owner/repo。");
+  }
+  const apiBase = getGithubApiBase(apiBaseOverride);
+  const encodedOwner = encodeURIComponent(parsed.owner);
+  const encodedName = encodeURIComponent(parsed.name);
+
+  const [repoRes, firstBranchesRes] = await Promise.all([
+    githubRequest<RawGithubRepoMeta>(token, `/repos/${encodedOwner}/${encodedName}`, apiBase),
+    githubRequest<RawGithubBranch[]>(
+      token,
+      `/repos/${encodedOwner}/${encodedName}/branches?per_page=100&page=1`,
+      apiBase,
+    ),
+  ]);
+
+  const checkErr = (status: number) => {
+    if (status === 401) {
+      throw new GithubError("GitHub Token 无效或已过期，请检查后重试。");
+    }
+    if (status === 403) {
+      throw new GithubError("GitHub 拒绝了请求，请检查 Token 权限或 API 配额。");
+    }
+    if (status === 404) {
+      throw new GithubError("未找到该仓库或当前 GitHub Key 无权访问。");
+    }
+    throw new GithubError(`GitHub 返回 ${status}，请稍后重试。`);
+  };
+
+  if (!firstBranchesRes.ok) {
+    checkErr(firstBranchesRes.status);
+  }
+
+  const defaultBranch =
+    repoRes.ok && typeof repoRes.data?.default_branch === "string"
+      ? repoRes.data.default_branch.trim()
+      : "";
+  const canonicalRepo =
+    repoRes.ok && typeof repoRes.data?.full_name === "string" && repoRes.data.full_name.includes("/")
+      ? repoRes.data.full_name
+      : parsed.fullName;
+
+  const branchMap = new Map<string, GithubBranchItem>();
+  const collect = (rawList: RawGithubBranch[] | null) => {
+    if (!Array.isArray(rawList)) return;
+    for (const raw of rawList) {
+      if (raw && typeof raw.name === "string" && raw.name.trim()) {
+        const name = raw.name.trim();
+        if (!branchMap.has(name)) {
+          branchMap.set(name, { name, protected: Boolean(raw.protected) });
+        }
+      }
+    }
+  };
+
+  collect(firstBranchesRes.data);
+
+  // Follow up to 2 additional pages (max 300 branches) if paginated
+  let page = 1;
+  let lastLink = firstBranchesRes.link;
+  while (page < 3 && hasNextPageLink(lastLink)) {
+    page += 1;
+    const nextRes = await githubRequest<RawGithubBranch[]>(
+      token,
+      `/repos/${encodedOwner}/${encodedName}/branches?per_page=100&page=${page}`,
+      apiBase,
+    );
+    if (!nextRes.ok) break;
+    collect(nextRes.data);
+    lastLink = nextRes.link;
+  }
+
+  if (defaultBranch && !branchMap.has(defaultBranch)) {
+    branchMap.set(defaultBranch, { name: defaultBranch, protected: false });
+  }
+
+  const items = Array.from(branchMap.values()).sort((a, b) => {
+    if (defaultBranch) {
+      if (a.name === defaultBranch) return -1;
+      if (b.name === defaultBranch) return 1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
+  return {
+    repo: canonicalRepo,
+    default_branch: defaultBranch,
+    branches: items.map((item) => item.name),
+    items,
+  };
+}
+
+export async function fetchGithubBranchesAcrossConnections(
+  connections: StoredGithubConnection[],
+  repo: string,
+  apiBaseOverride?: string,
+): Promise<GithubBranchesPayload> {
+  const parsed = parseGithubRepoSlug(repo);
+  if (!parsed) {
+    throw new GithubError("无效的仓库格式，请使用 owner/repo。");
+  }
+  if (connections.length === 0) {
+    throw new GithubError("尚未配置 GitHub Key。");
+  }
+
+  const ownerLower = parsed.owner.toLowerCase();
+  const scopedMatch = connections.filter(
+    (c) => c.scope_owner && c.scope_owner.login.toLowerCase() === ownerLower,
+  );
+  const unscopedMatch = connections.filter(
+    (c) =>
+      !c.scope_owner &&
+      c.owners.some((o) => o.login.toLowerCase() === ownerLower),
+  );
+  const unscopedOther = connections.filter(
+    (c) =>
+      !c.scope_owner &&
+      !c.owners.some((o) => o.login.toLowerCase() === ownerLower),
+  );
+  const scopedOther = connections.filter(
+    (c) => c.scope_owner && c.scope_owner.login.toLowerCase() !== ownerLower,
+  );
+
+  const ordered = [
+    ...scopedMatch,
+    ...unscopedMatch,
+    ...unscopedOther,
+    ...(scopedMatch.length === 0 && unscopedMatch.length === 0 && unscopedOther.length === 0
+      ? scopedOther
+      : []),
+  ];
+
+  let lastError: Error | null = null;
+  for (const conn of ordered) {
+    try {
+      return await fetchGithubBranches(conn.token, parsed.fullName, apiBaseOverride);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new GithubError("GitHub 请求失败");
+    }
+  }
+  throw lastError instanceof GithubError
+    ? lastError
+    : new GithubError(lastError?.message || "所有已配置的 GitHub Key 均无法读取该仓库的分支列表。");
+}
+

@@ -296,6 +296,8 @@ CREATE TABLE IF NOT EXISTS projects (
     agent_instructions TEXT NOT NULL DEFAULT '',
     automation_paused INTEGER NOT NULL DEFAULT 0,
     delivery_mode TEXT NOT NULL DEFAULT 'direct_push',
+    target_branch TEXT NOT NULL DEFAULT '',
+    branch_prefix TEXT NOT NULL DEFAULT 'relaydesk',
     widget_code_context INTEGER NOT NULL DEFAULT 1,
     execution_routing_json TEXT NOT NULL DEFAULT '{}',
     deploy_policy_json TEXT NOT NULL DEFAULT '{}'
@@ -597,6 +599,8 @@ export interface RawProjectRow {
   agent_instructions: string;
   automation_paused?: number;
   delivery_mode?: string;
+  target_branch?: string;
+  branch_prefix?: string;
   widget_code_context?: number;
   execution_routing_json: string;
   deploy_policy_json?: string;
@@ -659,6 +663,64 @@ export interface RawReleaseRow {
   finished_at: string | null;
 }
 
+export const DEFAULT_BRANCH_PREFIX = "relaydesk";
+
+export function isValidGitRefName(value: string): boolean {
+  if (!value) return false;
+  if (/[\x00-\x1f\x7f\s~^:?*[\]\\]/.test(value)) return false;
+  if (value === "@") return false;
+  if (value.startsWith("/") || value.endsWith("/")) return false;
+  if (value.startsWith(".") || value.endsWith(".")) return false;
+  if (value.includes("..") || value.includes("//") || value.includes("@{")) return false;
+  const parts = value.split("/");
+  for (const part of parts) {
+    if (!part || part.startsWith(".") || part.endsWith(".lock")) return false;
+  }
+  return true;
+}
+
+export function normalizeTargetBranch(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 120 || !isValidGitRefName(trimmed)) return "";
+  return trimmed;
+}
+
+export function parseTargetBranch(value: unknown): string {
+  if (value === null || value === "") return "";
+  if (typeof value !== "string") {
+    throw new ApiError(400, "Invalid target_branch");
+  }
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (trimmed.length > 120 || !isValidGitRefName(trimmed)) {
+    throw new ApiError(400, "Invalid target_branch: must be a valid git branch name");
+  }
+  return trimmed;
+}
+
+export function normalizeBranchPrefix(value: unknown): string {
+  if (typeof value !== "string") return DEFAULT_BRANCH_PREFIX;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 64 || !isValidGitRefName(trimmed)) {
+    return DEFAULT_BRANCH_PREFIX;
+  }
+  return trimmed;
+}
+
+export function parseBranchPrefix(value: unknown): string {
+  if (value === null || value === "") return DEFAULT_BRANCH_PREFIX;
+  if (typeof value !== "string") {
+    throw new ApiError(400, "Invalid branch_prefix");
+  }
+  const trimmed = value.trim();
+  if (!trimmed) return DEFAULT_BRANCH_PREFIX;
+  if (trimmed.length > 64 || !isValidGitRefName(trimmed)) {
+    throw new ApiError(400, "Invalid branch_prefix: must be a valid git ref prefix");
+  }
+  return trimmed;
+}
+
 function normalizeDeliveryMode(value: unknown): DeliveryMode {
   if (typeof value === "string" && DELIVERY_MODES.has(value as DeliveryMode)) {
     return value as DeliveryMode;
@@ -708,6 +770,8 @@ export function toProjectView(row: RawProjectRow, stats?: Partial<ProjectDeployS
     repos,
     automation_paused: Boolean(row.automation_paused),
     delivery_mode: normalizeDeliveryMode(row.delivery_mode),
+    target_branch: normalizeTargetBranch(row.target_branch),
+    branch_prefix: normalizeBranchPrefix(row.branch_prefix),
     deploy_policy: normalizeDeployPolicy(row.deploy_policy_json),
     pending_deploy_count: stats?.pending_deploy_count ?? 0,
     failed_deploy_count: stats?.failed_deploy_count ?? 0,
@@ -731,6 +795,8 @@ export function toAgentProject(row: RawProjectRow): AgentProjectInfo {
     repos,
     automation_paused: Boolean(row.automation_paused),
     delivery_mode: normalizeDeliveryMode(row.delivery_mode),
+    target_branch: normalizeTargetBranch(row.target_branch),
+    branch_prefix: normalizeBranchPrefix(row.branch_prefix),
     deploy_policy: normalizeDeployPolicy(row.deploy_policy_json),
     widget_code_context: row.widget_code_context === undefined ? true : Boolean(row.widget_code_context),
     agent_instructions: row.agent_instructions,
@@ -952,6 +1018,16 @@ export class Store {
     if (!cols.some((c) => c.name === "delivery_mode")) {
       this.db.exec(
         "ALTER TABLE projects ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'direct_push'",
+      );
+    }
+    if (!cols.some((c) => c.name === "target_branch")) {
+      this.db.exec(
+        "ALTER TABLE projects ADD COLUMN target_branch TEXT NOT NULL DEFAULT ''",
+      );
+    }
+    if (!cols.some((c) => c.name === "branch_prefix")) {
+      this.db.exec(
+        "ALTER TABLE projects ADD COLUMN branch_prefix TEXT NOT NULL DEFAULT 'relaydesk'",
       );
     }
     if (!cols.some((c) => c.name === "widget_code_context")) {
@@ -1268,7 +1344,7 @@ export class Store {
   listProjects(): ProjectSummary[] {
     const rows = this.db
       .prepare(
-        `SELECT id, name, repo, repos, automation_paused, delivery_mode, deploy_policy_json, widget_code_context, created_at
+        `SELECT id, name, repo, repos, automation_paused, delivery_mode, target_branch, branch_prefix, deploy_policy_json, widget_code_context, created_at
          FROM projects ORDER BY created_at`,
       )
       .all() as unknown as Array<{
@@ -1278,6 +1354,8 @@ export class Store {
       repos?: string;
       automation_paused?: number;
       delivery_mode?: string;
+      target_branch?: string;
+      branch_prefix?: string;
       deploy_policy_json?: string;
       widget_code_context?: number;
       created_at: string;
@@ -1320,6 +1398,8 @@ export class Store {
         repos,
         automation_paused: Boolean(row.automation_paused),
         delivery_mode: normalizeDeliveryMode(row.delivery_mode),
+        target_branch: normalizeTargetBranch(row.target_branch),
+        branch_prefix: normalizeBranchPrefix(row.branch_prefix),
         deploy_policy: normalizeDeployPolicy(row.deploy_policy_json),
         pending_deploy_count: counts?.pending ?? 0,
         failed_deploy_count: counts?.failed ?? 0,
@@ -1529,6 +1609,14 @@ export class Store {
       "delivery_mode" in data && data.delivery_mode !== undefined
         ? parseDeliveryMode(data.delivery_mode)
         : "direct_push";
+    const targetBranch =
+      "target_branch" in data && data.target_branch !== undefined
+        ? parseTargetBranch(data.target_branch)
+        : "";
+    const branchPrefix =
+      "branch_prefix" in data && data.branch_prefix !== undefined
+        ? parseBranchPrefix(data.branch_prefix)
+        : DEFAULT_BRANCH_PREFIX;
     const widgetCodeContext =
       "widget_code_context" in data && data.widget_code_context !== undefined
         ? (() => {
@@ -1542,8 +1630,8 @@ export class Store {
     const created = nowIso();
     this.db
       .prepare(
-        `INSERT INTO projects(id, name, repo, repos, intake_key, bot_key, agent_key, allowed_origins, created_at, agent_instructions, automation_paused, delivery_mode, widget_code_context)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO projects(id, name, repo, repos, intake_key, bot_key, agent_key, allowed_origins, created_at, agent_instructions, automation_paused, delivery_mode, target_branch, branch_prefix, widget_code_context)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         projectId,
@@ -1558,6 +1646,8 @@ export class Store {
         agentInstructions,
         automationPaused,
         deliveryMode,
+        targetBranch,
+        branchPrefix,
         widgetCodeContext,
       );
     return this.getProjectDetail(projectId);
@@ -1601,6 +1691,14 @@ export class Store {
       "delivery_mode" in data && data.delivery_mode !== undefined
         ? parseDeliveryMode(data.delivery_mode)
         : normalizeDeliveryMode(project.delivery_mode);
+    const targetBranch =
+      "target_branch" in data && data.target_branch !== undefined
+        ? parseTargetBranch(data.target_branch)
+        : normalizeTargetBranch(project.target_branch);
+    const branchPrefix =
+      "branch_prefix" in data && data.branch_prefix !== undefined
+        ? parseBranchPrefix(data.branch_prefix)
+        : normalizeBranchPrefix(project.branch_prefix);
     let widgetCodeContext =
       project.widget_code_context === undefined ? 1 : project.widget_code_context ? 1 : 0;
     if ("widget_code_context" in data && data.widget_code_context !== undefined) {
@@ -1622,7 +1720,7 @@ export class Store {
     }
     this.db
       .prepare(
-        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ?, automation_paused = ?, delivery_mode = ?, widget_code_context = ?, deploy_policy_json = ? WHERE id = ?",
+        "UPDATE projects SET name = ?, repo = ?, repos = ?, allowed_origins = ?, agent_instructions = ?, automation_paused = ?, delivery_mode = ?, target_branch = ?, branch_prefix = ?, widget_code_context = ?, deploy_policy_json = ? WHERE id = ?",
       )
       .run(
         name,
@@ -1632,6 +1730,8 @@ export class Store {
         instructions,
         automationPaused,
         deliveryMode,
+        targetBranch,
+        branchPrefix,
         widgetCodeContext,
         deployPolicyJson,
         projectId,

@@ -289,6 +289,8 @@ function ConsoleWorkspace() {
               repos: project.repos,
               automation_paused: project.automation_paused,
               delivery_mode: project.delivery_mode,
+              target_branch: project.target_branch,
+              branch_prefix: project.branch_prefix,
             }
           : p,
       ),
@@ -501,6 +503,8 @@ function ConsoleWorkspace() {
                   ...p,
                   automation_paused: updated.automation_paused,
                   delivery_mode: updated.delivery_mode,
+                  target_branch: updated.target_branch,
+                  branch_prefix: updated.branch_prefix,
                 }
               : p,
           ),
@@ -869,6 +873,8 @@ function ConsoleWorkspace() {
                         repos: updated.repos,
                         automation_paused: updated.automation_paused,
                         delivery_mode: updated.delivery_mode,
+                        target_branch: updated.target_branch,
+                        branch_prefix: updated.branch_prefix,
                         deploy_policy: updated.deploy_policy,
                       }
                     : p,
@@ -970,6 +976,8 @@ function ConsoleWorkspace() {
               repos: proj.repos,
               automation_paused: proj.automation_paused,
               delivery_mode: proj.delivery_mode,
+              target_branch: proj.target_branch,
+              branch_prefix: proj.branch_prefix,
               deploy_policy: proj.deploy_policy,
               pending_deploy_count: proj.pending_deploy_count ?? 0,
               widget_code_context: proj.widget_code_context,

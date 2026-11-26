@@ -143,6 +143,8 @@ export interface ProjectSummary {
   repos: string[];
   automation_paused: boolean;
   delivery_mode: DeliveryMode;
+  target_branch: string;
+  branch_prefix: string;
   deploy_policy: ProjectDeployPolicy;
   pending_deploy_count: number;
   failed_deploy_count?: number;
@@ -166,6 +168,8 @@ export interface AgentProjectInfo {
   repos: string[];
   automation_paused: boolean;
   delivery_mode: DeliveryMode;
+  target_branch?: string;
+  branch_prefix?: string;
   deploy_policy: ProjectDeployPolicy;
   widget_code_context: boolean;
   agent_instructions: string;
@@ -402,6 +406,18 @@ export interface GithubReposPayload {
   page: number;
   more: boolean;
   warnings?: GithubRepoWarning[];
+}
+
+export interface GithubBranchItem {
+  name: string;
+  protected: boolean;
+}
+
+export interface GithubBranchesPayload {
+  repo: string;
+  default_branch: string;
+  branches: string[];
+  items: GithubBranchItem[];
 }
 
 /* ── Project Space (Workspace) ─────────────────────────────────────────── */

@@ -8,6 +8,11 @@ import { UtilityAiSettingsCard } from "./UtilityAiSettingsCard.tsx";
 import { LocalAgentsSettingsCard } from "./LocalAgentsSettingsCard.tsx";
 import { Icon } from "./Icon.tsx";
 import {
+  DEFAULT_BRANCH_PREFIX,
+  DeliveryBranchFields,
+  validateGitRefInput,
+} from "./DeliveryBranchFields.tsx";
+import {
   GithubOwnerAvatar,
   GithubRepoPicker,
   parseManualRepoInput,
@@ -199,6 +204,12 @@ export function SettingsView({
   const [projDeliveryMode, setProjDeliveryMode] = useState<DeliveryMode>(
     project?.delivery_mode ?? "direct_push",
   );
+  const [projTargetBranch, setProjTargetBranch] = useState(
+    project?.target_branch ?? "",
+  );
+  const [projBranchPrefix, setProjBranchPrefix] = useState(
+    project?.branch_prefix ?? DEFAULT_BRANCH_PREFIX,
+  );
   const [savingProject, setSavingProject] = useState(false);
 
   // R2 object storage settings
@@ -234,6 +245,8 @@ export function SettingsView({
       setProjInstructions(project.agent_instructions);
       setProjPaused(project.automation_paused);
       setProjDeliveryMode(project.delivery_mode);
+      setProjTargetBranch(project.target_branch ?? "");
+      setProjBranchPrefix(project.branch_prefix || DEFAULT_BRANCH_PREFIX);
       setOriginsList(project.allowed_origins);
     }
   }, [
@@ -244,6 +257,8 @@ export function SettingsView({
     project?.agent_instructions,
     project?.automation_paused,
     project?.delivery_mode,
+    project?.target_branch,
+    project?.branch_prefix,
     project?.allowed_origins,
   ]);
 
@@ -516,6 +531,16 @@ export function SettingsView({
       toast.error("请至少绑定一个 GitHub 仓库");
       return;
     }
+    const targetBranchErr = validateGitRefInput(projTargetBranch, 120);
+    if (targetBranchErr) {
+      toast.error(`目标分支格式无效：${targetBranchErr}`);
+      return;
+    }
+    const branchPrefixErr = validateGitRefInput(projBranchPrefix, 64);
+    if (branchPrefixErr) {
+      toast.error(`工作分支前缀格式无效：${branchPrefixErr}`);
+      return;
+    }
     setSavingProject(true);
     try {
       const { project: updated } = await api.updateProject(project.id, {
@@ -525,6 +550,8 @@ export function SettingsView({
         agent_instructions: projInstructions,
         automation_paused: projPaused,
         delivery_mode: projDeliveryMode,
+        target_branch: projTargetBranch.trim(),
+        branch_prefix: projBranchPrefix.trim() || DEFAULT_BRANCH_PREFIX,
       });
       setProjRepoDraft("");
       onProjectUpdated(updated);
@@ -1633,6 +1660,16 @@ export function SettingsView({
                       );
                     })}
                   </div>
+
+                  <DeliveryBranchFields
+                    repo={effectiveProjRepos[0] ?? null}
+                    githubConfigured={githubConfigured}
+                    deliveryMode={projDeliveryMode}
+                    targetBranch={projTargetBranch}
+                    onTargetBranchChange={setProjTargetBranch}
+                    branchPrefix={projBranchPrefix}
+                    onBranchPrefixChange={setProjBranchPrefix}
+                  />
                 </div>
 
                 <label className="block space-y-1.5">

@@ -1,10 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon.tsx";
+import {
+  DEFAULT_BRANCH_PREFIX,
+  DeliveryBranchFields,
+  validateGitRefInput,
+} from "./DeliveryBranchFields.tsx";
 import { GithubRepoPicker, parseManualRepoInput } from "./GithubRepoPicker.tsx";
 import { Button, Kbd, Modal, PriorityBadge, StatusBadge, useToast } from "./ui.tsx";
 import { api } from "~/lib/api.ts";
-import { PRIORITY_LABELS, PRIORITY_ORDER, taskCode } from "~/lib/format.ts";
+import {
+  DELIVERY_MODE_LABELS,
+  PRIORITY_LABELS,
+  PRIORITY_ORDER,
+  taskCode,
+} from "~/lib/format.ts";
 import type {
+  DeliveryMode,
   GithubConnectionSummary,
   ProjectDetail,
   ProjectSummary,
@@ -37,6 +48,9 @@ export function CreateProjectModal({
   const [nameAutoFilled, setNameAutoFilled] = useState(false);
   const [repos, setRepos] = useState<string[]>([]);
   const [repoDraft, setRepoDraft] = useState("");
+  const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>("direct_push");
+  const [targetBranch, setTargetBranch] = useState("");
+  const [branchPrefix, setBranchPrefix] = useState(DEFAULT_BRANCH_PREFIX);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -45,6 +59,9 @@ export function CreateProjectModal({
       setNameAutoFilled(false);
       setRepos([]);
       setRepoDraft("");
+      setDeliveryMode("direct_push");
+      setTargetBranch("");
+      setBranchPrefix(DEFAULT_BRANCH_PREFIX);
     }
   }, [open]);
 
@@ -75,12 +92,25 @@ export function CreateProjectModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || effectiveRepos.length === 0) return;
+    const targetBranchErr = validateGitRefInput(targetBranch, 120);
+    if (targetBranchErr) {
+      toast.error(`目标分支格式无效：${targetBranchErr}`);
+      return;
+    }
+    const branchPrefixErr = validateGitRefInput(branchPrefix, 64);
+    if (branchPrefixErr) {
+      toast.error(`工作分支前缀格式无效：${branchPrefixErr}`);
+      return;
+    }
     setSubmitting(true);
     try {
       const { project } = await api.createProject({
         name: name.trim(),
         repo: effectiveRepos[0],
         repos: effectiveRepos,
+        delivery_mode: deliveryMode,
+        target_branch: targetBranch.trim(),
+        branch_prefix: branchPrefix.trim() || DEFAULT_BRANCH_PREFIX,
       });
       toast.success(`项目「${project.name}」已创建（绑定 ${project.repos.length} 个仓库）`);
       onCreated(project);
@@ -166,6 +196,45 @@ export function CreateProjectModal({
             className="w-full h-9.5 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15"
           />
         </label>
+
+        <div className="space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
+              代码交付配置
+            </span>
+            <div className="inline-flex items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-0.5">
+              {(["direct_push", "pr_automerge", "review_only"] as DeliveryMode[]).map((mode) => {
+                const active = deliveryMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setDeliveryMode(mode)}
+                    aria-pressed={active}
+                    className={`px-2 py-1 rounded-md text-[11.5px] font-medium transition cursor-pointer ${
+                      active
+                        ? "bg-[var(--surface-card)] text-indigo-600 dark:text-indigo-400 shadow-2xs"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    {DELIVERY_MODE_LABELS[mode]}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <DeliveryBranchFields
+            repo={effectiveRepos[0] ?? null}
+            githubConfigured={githubConfigured}
+            deliveryMode={deliveryMode}
+            targetBranch={targetBranch}
+            onTargetBranchChange={setTargetBranch}
+            branchPrefix={branchPrefix}
+            onBranchPrefixChange={setBranchPrefix}
+            compact
+          />
+        </div>
       </form>
     </Modal>
   );

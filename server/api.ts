@@ -44,10 +44,12 @@ import {
 } from "./wallet.ts";
 import {
   GithubError,
+  fetchGithubBranchesAcrossConnections,
   fetchGithubRepositories,
   fetchGithubRepositoriesAcrossConnections,
   inspectGithubToken,
   listGithubConnectionSummaries,
+  parseGithubRepoSlug,
   readGithubConnections,
   removeGithubConnection,
   resolveScopeOwner,
@@ -1474,6 +1476,26 @@ export class ApiRouter {
         connections,
       };
     }
+    if (subparts.length === 1 && subparts[0] === "branches" && method === "GET") {
+      const urlObj = new URL(req.url ?? "/", "http://127.0.0.1");
+      const rawRepo = urlObj.searchParams.get("repo") ?? "";
+      const parsed = parseGithubRepoSlug(rawRepo);
+      if (!parsed) {
+        throw new ApiError(400, "请提供有效的 GitHub 仓库（owner/repo）。");
+      }
+      const connections = readGithubConnections(this.store.dbPath);
+      if (connections.length === 0) {
+        throw new ApiError(409, "请先在设置中连接至少一个 GitHub Key。");
+      }
+      try {
+        return await fetchGithubBranchesAcrossConnections(connections, parsed.fullName);
+      } catch (err) {
+        if (err instanceof GithubError) {
+          throw new ApiError(502, err.message);
+        }
+        throw err;
+      }
+    }
     if (method !== "POST") {
       throw new ApiError(405, "Method not allowed");
     }
@@ -1689,6 +1711,18 @@ export class ApiRouter {
           ownerType,
           connectionId,
         });
+      }
+      if (subparts.length === 1 && subparts[0] === "branches") {
+        const rawRepo = typeof data.repo === "string" ? data.repo : "";
+        const parsed = parseGithubRepoSlug(rawRepo);
+        if (!parsed) {
+          throw new ApiError(400, "请提供有效的 GitHub 仓库（owner/repo）。");
+        }
+        const connections = readGithubConnections(this.store.dbPath);
+        if (connections.length === 0) {
+          throw new ApiError(409, "请先在设置中连接至少一个 GitHub Key。");
+        }
+        return await fetchGithubBranchesAcrossConnections(connections, parsed.fullName);
       }
     } catch (err) {
       if (err instanceof GithubError) {

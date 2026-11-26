@@ -66,19 +66,19 @@ Read the printed task brief (`TASK`, `DELIVERY`, `TITLE`, `REPOS`, `PROJECT_RULE
 
 ### Step 3: Autonomous Delivery
 
-Follow the `DELIVERY` mode printed in the claimed brief:
+Follow the `DELIVERY` mode (and optional `TARGET_BRANCH` / `BRANCH_PREFIX`, defaulting branch prefix to `relaydesk`) printed in the claimed brief:
 
 - **`direct_push` (default)**:
-  1. Ensure all relevant checks pass and `git status` contains no stray or untracked junk files.
+  1. Ensure all relevant checks pass and `git status` contains no stray or untracked junk files (if `TARGET_BRANCH` is specified, work on and push to that branch).
   2. Create a clean conventional commit (`fix:`, `feat:`, etc.).
-  3. Run `git push` to the active branch to trigger deployment.
+  3. Run `git push` to the target/active branch to trigger deployment.
 - **`pr_automerge`**:
-  1. Checkout a new branch `relaydesk/rd-XXX` (matching the task code in lowercase).
+  1. Checkout a new branch `<BRANCH_PREFIX>/rd-XXX` (matching the task code in lowercase; if `TARGET_BRANCH` is set, run `git fetch origin` and branch from `origin/<TARGET_BRANCH>`).
   2. Commit cleanly and push the branch.
-  3. Open a PR via `gh pr create --fill` (or explicit title/body) and enable auto-merge via `gh pr merge --auto --squash`.
+  3. Open a PR via `gh pr create --fill` (adding `--base <TARGET_BRANCH>` when `TARGET_BRANCH` is set) and enable auto-merge via `gh pr merge --auto --squash`.
 - **`review_only`**:
-  1. Checkout a new branch `relaydesk/rd-XXX`.
-  2. Commit cleanly on that branch without pushing to the main branch.
+  1. Checkout a new branch `<BRANCH_PREFIX>/rd-XXX` (from `origin/<TARGET_BRANCH>` when `TARGET_BRANCH` is set).
+  2. Commit cleanly on that branch without pushing to the target or main branch.
 
 ### Step 4: Close the Loop
 

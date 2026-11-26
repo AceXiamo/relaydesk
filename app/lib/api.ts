@@ -26,6 +26,7 @@ import type {
   DiscussResult,
   FeedbackAgentPatch,
   FeedbackAgentSettings,
+  GithubBranchesPayload,
   GithubConnectionSummary,
   GithubInspectPayload,
   GithubOwnerInfo,
@@ -159,7 +160,14 @@ export const api = {
   logout: () => request<{ ok: boolean }>("/api/auth/logout", "POST", {}),
 
   listProjects: () => request<{ projects: ProjectSummary[] }>("/api/projects"),
-  createProject: (payload: { name: string; repo?: string; repos?: string[] }) =>
+  createProject: (payload: {
+    name: string;
+    repo?: string;
+    repos?: string[];
+    delivery_mode?: DeliveryMode;
+    target_branch?: string;
+    branch_prefix?: string;
+  }) =>
     request<{ project: ProjectDetail }>("/api/projects", "POST", payload),
   getProject: (id: string) =>
     request<{ project: ProjectDetail }>(`/api/projects/${encodeURIComponent(id)}`),
@@ -173,6 +181,8 @@ export const api = {
       allowed_origins?: string[];
       automation_paused?: boolean;
       delivery_mode?: DeliveryMode;
+      target_branch?: string;
+      branch_prefix?: string;
       widget_code_context?: boolean;
     },
   ) =>
@@ -331,6 +341,13 @@ export const api = {
       "/api/github/repos",
       "POST",
       typeof params === "number" ? { page: params } : params,
+    ),
+  getGithubBranches: (repo: string, signal?: AbortSignal) =>
+    request<GithubBranchesPayload>(
+      `/api/github/branches?repo=${encodeURIComponent(repo)}`,
+      "GET",
+      undefined,
+      signal,
     ),
 
   getR2Config: () => request<R2ConfigStatus>("/api/r2"),

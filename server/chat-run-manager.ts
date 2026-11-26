@@ -105,25 +105,47 @@ export function buildTaskWorkflowSystemContext(
 ): string {
   const code = `RD-${taskNumber}`;
   const deliveryMode: DeliveryMode = project.delivery_mode || "direct_push";
+  const targetBranch = (project.target_branch || "").trim();
+  const branchPrefix = (project.branch_prefix || "").trim() || "relaydesk";
+  const workBranch = `${branchPrefix}/rd-${taskNumber}`;
   const deliverySteps =
     deliveryMode === "pr_automerge"
-      ? [
-          `1. Create and switch to branch \`relaydesk/rd-${taskNumber}\`.`,
-          `2. Commit cleanly with a conventional commit message and push the branch.`,
-          `3. Open a PR via \`gh pr create --fill\` and enable auto-merge via \`gh pr merge --auto --squash\`.`,
-          `4. Call MCP \`transition_task\` with \`task: "${code}", status: "done", resolution: "shipped", delivery_ref: "<pr_url>", comment: "<concise Markdown summary>"\`.`,
-        ].join("\n")
-      : deliveryMode === "review_only"
+      ? targetBranch
         ? [
-            `1. Create and switch to branch \`relaydesk/rd-${taskNumber}\`.`,
-            `2. Commit cleanly on that branch without pushing to the main branch.`,
-            `3. Call MCP \`transition_task\` with \`task: "${code}", status: "review", delivery_ref: "relaydesk/rd-${taskNumber}", comment: "<concise Markdown summary>"\`.`,
+            `1. Run \`git fetch origin\` and create/switch to branch \`${workBranch}\` based on \`origin/${targetBranch}\` (e.g. \`git checkout -B ${workBranch} origin/${targetBranch}\`).`,
+            `2. Commit cleanly with a conventional commit message and push the branch (\`git push -u origin ${workBranch}\`).`,
+            `3. Open a PR targeting \`${targetBranch}\` via \`gh pr create --base ${targetBranch} --fill\` and enable auto-merge via \`gh pr merge --auto --squash\`.`,
+            `4. Call MCP \`transition_task\` with \`task: "${code}", status: "done", resolution: "shipped", delivery_ref: "<pr_url>", comment: "<concise Markdown summary>"\`.`,
           ].join("\n")
         : [
-            `1. Ensure all relevant verification checks pass and \`git status\` has no stray junk files.`,
-            `2. Create a clean conventional commit (\`fix:\`, \`feat:\`, etc.) and run \`git push\`.`,
-            `3. Call MCP \`transition_task\` with \`task: "${code}", status: "done", resolution: "shipped", delivery_ref: "<branch>@<shortsha>", comment: "<concise Markdown summary>"\`.`,
-          ].join("\n");
+            `1. Create and switch to branch \`${workBranch}\`.`,
+            `2. Commit cleanly with a conventional commit message and push the branch.`,
+            `3. Open a PR via \`gh pr create --fill\` and enable auto-merge via \`gh pr merge --auto --squash\`.`,
+            `4. Call MCP \`transition_task\` with \`task: "${code}", status: "done", resolution: "shipped", delivery_ref: "<pr_url>", comment: "<concise Markdown summary>"\`.`,
+          ].join("\n")
+      : deliveryMode === "review_only"
+        ? targetBranch
+          ? [
+              `1. Run \`git fetch origin\` and create/switch to branch \`${workBranch}\` based on \`origin/${targetBranch}\` (e.g. \`git checkout -B ${workBranch} origin/${targetBranch}\`).`,
+              `2. Commit cleanly on \`${workBranch}\` without pushing to \`${targetBranch}\` or the default branch.`,
+              `3. Call MCP \`transition_task\` with \`task: "${code}", status: "review", delivery_ref: "${workBranch}", comment: "<concise Markdown summary>"\`.`,
+            ].join("\n")
+          : [
+              `1. Create and switch to branch \`${workBranch}\`.`,
+              `2. Commit cleanly on that branch without pushing to the main branch.`,
+              `3. Call MCP \`transition_task\` with \`task: "${code}", status: "review", delivery_ref: "${workBranch}", comment: "<concise Markdown summary>"\`.`,
+            ].join("\n")
+        : targetBranch
+          ? [
+              `1. Ensure you are on target branch \`${targetBranch}\` (sync via \`git fetch origin\` and \`git checkout ${targetBranch}\` if needed), all relevant verification checks pass, and \`git status\` has no stray junk files.`,
+              `2. Create a clean conventional commit (\`fix:\`, \`feat:\`, etc.) and push to \`${targetBranch}\` (\`git push origin ${targetBranch}\`).`,
+              `3. Call MCP \`transition_task\` with \`task: "${code}", status: "done", resolution: "shipped", delivery_ref: "${targetBranch}@<shortsha>", comment: "<concise Markdown summary>"\`.`,
+            ].join("\n")
+          : [
+              `1. Ensure all relevant verification checks pass and \`git status\` has no stray junk files.`,
+              `2. Create a clean conventional commit (\`fix:\`, \`feat:\`, etc.) and run \`git push\`.`,
+              `3. Call MCP \`transition_task\` with \`task: "${code}", status: "done", resolution: "shipped", delivery_ref: "<branch>@<shortsha>", comment: "<concise Markdown summary>"\`.`,
+            ].join("\n");
 
   const deployMode = project.deploy_policy?.mode ?? "none";
   const deployBoundary =
