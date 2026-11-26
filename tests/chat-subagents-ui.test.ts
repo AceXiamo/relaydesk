@@ -367,12 +367,26 @@ describe("ToolChipsGroup subagent UI", () => {
       await Promise.resolve();
     });
 
-    const taskTrigger = container.querySelector<HTMLButtonElement>("[data-subagent-dock-trigger]");
-    expect(taskTrigger).not.toBeNull();
-    expect(taskTrigger!.getAttribute("aria-expanded")).toBe("false");
-    expect(taskTrigger!.textContent).toContain("1 个子代理运行中");
-    expect(taskTrigger!.textContent).toContain("共 2");
+    const taskAvatars = [...container.querySelectorAll<HTMLButtonElement>("[data-subagent-avatar]")];
+    expect(taskAvatars).toHaveLength(2);
+    expect(container.querySelector("[data-subagent-dock-trigger]")).toBeNull();
+    expect(taskAvatars[0].dataset.subagentStatus).toBe("running");
+    expect(taskAvatars[1].dataset.subagentStatus).toBe("done");
     expect(container.querySelector('section[aria-label="并行子代理任务"]')).toBeNull();
+
+    // Hovering an avatar shows its work details card
+    await act(() => user.hover(taskAvatars[0]));
+    const taskHoverCard = container.querySelector<HTMLElement>("[data-subagent-hover-card]");
+    expect(taskHoverCard).not.toBeNull();
+    expect(taskHoverCard!.textContent).toContain("审查 server/cli-stream-parser.ts 解析逻辑");
+    expect(taskHoverCard!.textContent).toContain("运行中");
+
+    // Clicking an avatar directly jumps to the originating message
+    const taskOriginMsg = container.querySelector<HTMLElement>('[data-message-id="m-assistant"]')!;
+    const taskScrollIntoView = vi.fn();
+    taskOriginMsg.scrollIntoView = taskScrollIntoView;
+    await act(() => user.click(taskAvatars[0]));
+    expect(taskScrollIntoView).toHaveBeenCalled();
 
     // Lightweight inline references stay inside the message
     const taskRefs = container.querySelectorAll<HTMLButtonElement>("[data-subagent-ref-trigger]");
@@ -380,8 +394,8 @@ describe("ToolChipsGroup subagent UI", () => {
     expect(container.textContent).toContain("审查 server/cli-stream-parser.ts 解析逻辑");
     expect(container.textContent).toContain("补充 vitest 单元测试");
 
-    // Clicking the corner trigger opens the upward popover
-    await act(() => user.click(taskTrigger!));
+    // Clicking an inline reference opens the upward detail popover
+    await act(() => user.click(taskRefs[0]));
     expect(container.querySelector('section[aria-label="并行子代理任务"]')).not.toBeNull();
 
     // Escape closes the popover
@@ -500,9 +514,24 @@ describe("ToolChipsGroup subagent UI", () => {
       await Promise.resolve();
     });
 
-    const chatTrigger = container.querySelector<HTMLButtonElement>("[data-subagent-dock-trigger]");
-    expect(chatTrigger).not.toBeNull();
-    expect(chatTrigger!.textContent).toContain("子代理 · 1 已完成");
+    const chatAvatars = [...container.querySelectorAll<HTMLButtonElement>("[data-subagent-avatar]")];
+    expect(chatAvatars).toHaveLength(1);
+    expect(container.querySelector("[data-subagent-dock-trigger]")).toBeNull();
+    expect(chatAvatars[0].dataset.subagentStatus).toBe("done");
+
+    // Hovering the avatar previews the merged cross-turn work details
+    await act(() => user.hover(chatAvatars[0]));
+    const chatHoverCard = container.querySelector<HTMLElement>("[data-subagent-hover-card]");
+    expect(chatHoverCard).not.toBeNull();
+    expect(chatHoverCard!.textContent).toContain("排查跨轮次子代理生命周期");
+    expect(chatHoverCard!.textContent).toContain("已定位跨轮次状态丢失问题");
+
+    // Clicking the avatar directly scrolls to the originating message
+    const originMsg = container.querySelector<HTMLElement>('[data-message-id="m-assistant"]')!;
+    const avatarScrollIntoView = vi.fn();
+    originMsg.scrollIntoView = avatarScrollIntoView;
+    await act(() => user.click(chatAvatars[0]));
+    expect(avatarScrollIntoView).toHaveBeenCalled();
 
     // Inline reference in the earlier message reflects the live merged status ("done"), not stale "unknown"
     const inlineRefs = [...container.querySelectorAll<HTMLButtonElement>("[data-subagent-ref-trigger]")];
@@ -520,7 +549,6 @@ describe("ToolChipsGroup subagent UI", () => {
     expect(dockSection!.textContent).toContain("已定位跨轮次状态丢失问题");
 
     // Clicking "跳到发起消息" scrolls to the originating message
-    const originMsg = container.querySelector<HTMLElement>('[data-message-id="m-assistant"]')!;
     const scrollIntoView = vi.fn();
     originMsg.scrollIntoView = scrollIntoView;
     const jumpBtn = dockSection!.querySelector<HTMLButtonElement>('button[aria-label="跳到发起消息"]')!;
@@ -624,7 +652,7 @@ describe("ToolChipsGroup subagent UI", () => {
     expect(container.querySelector("[data-subagent-dock]")).toBeNull();
   });
 
-  it("renders stacked bot avatars above the composer, shows live hover status card, and focuses on avatar click", async () => {
+  it("renders frameless stacked bot avatars, shows live hover work details, and jumps on avatar click", async () => {
     const events: ChatToolEvent[] = [
       ...makeSubagentEvents(),
       {
@@ -638,6 +666,7 @@ describe("ToolChipsGroup subagent UI", () => {
     ];
     const summary = aggregateSessionSubagents(makeMessages(events));
     let dockOpen = false;
+    const onJumpToMessage = vi.fn();
     const renderDock = () => {
       root.render(
         createElement(SubagentDock, {
@@ -648,6 +677,7 @@ describe("ToolChipsGroup subagent UI", () => {
             dockOpen = next;
             renderDock();
           },
+          onJumpToMessage,
           align: "left",
         }),
       );
@@ -655,7 +685,8 @@ describe("ToolChipsGroup subagent UI", () => {
 
     act(() => renderDock());
 
-    // Shows up to 5 visible stacked avatars + "+1" overflow counter
+    // Shows up to 5 visible stacked avatars + "+1" overflow counter, without an outer summary capsule trigger
+    expect(container.querySelector("[data-subagent-dock-trigger]")).toBeNull();
     const avatarBtns = [...container.querySelectorAll<HTMLButtonElement>("[data-subagent-avatar]")];
     expect(avatarBtns).toHaveLength(5);
     expect(container.querySelector("[data-subagent-avatar-stack]")?.textContent).toContain("+1");
@@ -663,28 +694,37 @@ describe("ToolChipsGroup subagent UI", () => {
     expect(imgs.every((src) => src?.startsWith("/images/subagents/") && src.endsWith(".webp"))).toBe(true);
     expect(new Set(imgs).size).toBe(5);
 
-    // Hovering an avatar reveals the floating hover status card with that subagent's live status
+    // Hovering an avatar reveals the floating hover card with that subagent's work details
     await act(() => user.hover(avatarBtns[0]));
     const hoverCard1 = container.querySelector<HTMLElement>("[data-subagent-hover-card]");
     expect(hoverCard1).not.toBeNull();
     expect(hoverCard1!.dataset.subagentHoverId).toBe(avatarBtns[0].dataset.subagentAvatar);
     expect(hoverCard1!.textContent).toContain("审查 server/cli-stream-parser.ts 解析逻辑");
     expect(hoverCard1!.textContent).toContain("运行中");
+    expect(hoverCard1!.textContent).toContain("正在执行");
+    expect(hoverCard1!.textContent).toContain("Read");
 
-    // Hovering the second avatar transitions the preview card to the second subagent
+    // Hovering the second avatar transitions the hover work-detail card to the second subagent
     await act(() => user.hover(avatarBtns[1]));
     const hoverCard2 = container.querySelector<HTMLElement>("[data-subagent-hover-card]");
     expect(hoverCard2).not.toBeNull();
     expect(hoverCard2!.dataset.subagentHoverId).toBe(avatarBtns[1].dataset.subagentAvatar);
     expect(hoverCard2!.textContent).toContain("补充 vitest 单元测试");
     expect(hoverCard2!.textContent).toContain("已完成");
+    expect(hoverCard2!.textContent).toContain("已新增 6 个测试用例，全部通过。");
 
-    // Clicking an avatar opens the full detail panel and expands that specific item
+    // Clicking an avatar jumps directly to its originating message instead of opening the drawer
     await act(() => user.click(avatarBtns[1]));
-    expect(dockOpen).toBe(true);
+    expect(onJumpToMessage).toHaveBeenCalledWith("m-assistant");
+    expect(dockOpen).toBe(false);
     expect(container.querySelector("[data-subagent-hover-card]")).toBeNull();
+
+    // Clicking "+1" overflow badge still opens the full detail panel for all subagents
+    const overflowBtn = container.querySelector<HTMLButtonElement>("[data-subagent-overflow-trigger]")!;
+    await act(() => user.click(overflowBtn));
+    expect(dockOpen).toBe(true);
     const detailPanel = container.querySelector('section[aria-label="并行子代理任务"]');
     expect(detailPanel).not.toBeNull();
-    expect(detailPanel!.textContent).toContain("已新增 6 个测试用例，全部通过。");
+    expect(detailPanel!.textContent).toContain("检查静态资源体积");
   });
 });

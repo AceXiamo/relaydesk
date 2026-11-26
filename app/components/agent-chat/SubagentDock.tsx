@@ -533,16 +533,6 @@ export function SubagentTaskList({
   );
 }
 
-function buildSettledSummaryText(counts: Record<SubagentStatus, number>): string {
-  const parts: string[] = [];
-  for (const status of ["error", "interrupted", "unknown", "done"] as const) {
-    const count = counts[status];
-    if (!count) continue;
-    parts.push(`${count} ${SUBAGENT_STATUS_META[status].countLabel}`);
-  }
-  return parts.length > 0 ? `子代理 · ${parts.join(" · ")}` : "子代理";
-}
-
 function hasSubagentDetail(item: AggregatedSubagent): boolean {
   const taskText = formatSubagentTask(item.event);
   const activity = item.event.subagent.activity?.trim() || "";
@@ -561,7 +551,8 @@ function SubagentHoverCard({
   total,
   align,
   caretOffsetPx,
-  onSelect,
+  onJump,
+  onOpenDetail,
   onMouseEnter,
   onMouseLeave,
 }: {
@@ -570,7 +561,8 @@ function SubagentHoverCard({
   total: number;
   align: "left" | "right";
   caretOffsetPx: number | null;
-  onSelect: () => void;
+  onJump?: () => void;
+  onOpenDetail: () => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
@@ -578,7 +570,8 @@ function SubagentHoverCard({
   const statusMeta = SUBAGENT_STATUS_META[item.status];
   const taskText = formatSubagentTask(item.event);
   const activity = item.event.subagent.activity?.trim() || "";
-  const outputPreview = compactWhitespace(item.event.output ?? "");
+  const outputText = (item.event.output ?? "").trim();
+  const hasExitCode = typeof item.event.exit_code === "number";
   const isRunning = item.status === "running";
 
   return (
@@ -588,10 +581,10 @@ function SubagentHoverCard({
       data-subagent-hover-id={item.id}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      onClick={onSelect}
       className={cn(
-        "absolute bottom-full mb-3 z-40 w-[min(308px,calc(100vw-2rem))] cursor-pointer rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/96 backdrop-blur-xl shadow-[var(--rd-shadow-lg)] overflow-visible animate-rd-hover-card-in",
-        align === "right" ? "right-0" : "left-0",
+        "absolute bottom-full mb-3 z-40 w-[min(340px,calc(100vw-2rem))] rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/96 backdrop-blur-xl shadow-[var(--rd-shadow-lg)] overflow-visible animate-rd-hover-card-in",
+        "before:content-[''] before:absolute before:inset-x-0 before:-bottom-3 before:h-3",
+        align === "right" ? "-right-2" : "-left-2",
       )}
     >
       {/* Signature bot color hairline accent */}
@@ -605,7 +598,7 @@ function SubagentHoverCard({
         />
 
         <div key={item.id} className="p-3 space-y-2.5 animate-rd-content-swap">
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-start gap-2.5">
             <SubagentAvatar
               avatar={avatar}
               status={item.status}
@@ -633,16 +626,16 @@ function SubagentHoverCard({
                   <span>{statusMeta.label}</span>
                 </span>
               </div>
-              <p className="mt-0.5 text-[12px] font-medium leading-[1.35] text-[var(--text-secondary)] line-clamp-2 break-words">
+              <p className="mt-1 text-[12px] font-medium leading-[1.4] text-[var(--text-primary)] whitespace-pre-wrap break-words max-h-20 overflow-y-auto rd-scroll">
                 {taskText}
               </p>
             </div>
           </div>
 
-          {(activity || outputPreview) && (
+          {activity || outputText || hasExitCode ? (
             <div
               className={cn(
-                "rounded-xl border px-2.5 py-2 text-[11.5px] leading-[1.45] space-y-1",
+                "rounded-xl border px-2.5 py-2 text-[11.5px] leading-[1.5] space-y-1.5",
                 item.status === "error"
                   ? "border-rose-500/25 bg-rose-500/[0.06] dark:bg-rose-500/[0.09]"
                   : item.status === "interrupted"
@@ -660,28 +653,72 @@ function SubagentHoverCard({
                   </span>
                 </div>
               )}
-              {outputPreview && (
-                <p
-                  className={cn(
-                    "m-0 line-clamp-2 break-words",
-                    item.status === "error"
-                      ? "text-rose-700 dark:text-rose-300"
-                      : "text-[var(--text-secondary)]",
+              {(outputText || hasExitCode) && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2 text-[10.5px]">
+                    <span
+                      className={cn(
+                        "font-semibold",
+                        item.status === "error"
+                          ? "text-rose-600 dark:text-rose-400"
+                          : item.status === "interrupted"
+                            ? "text-amber-700 dark:text-amber-300"
+                            : item.status === "done"
+                              ? "text-emerald-700 dark:text-emerald-400"
+                              : "text-[var(--text-muted)]",
+                      )}
+                    >
+                      {statusMeta.outputLabel}
+                    </span>
+                    {hasExitCode && (
+                      <span className="font-mono text-[10px] text-[var(--text-muted)] tabular-nums">
+                        exit {item.event.exit_code}
+                      </span>
+                    )}
+                  </div>
+                  {outputText && (
+                    <pre
+                      className={cn(
+                        "m-0 max-h-36 overflow-y-auto rd-scroll font-mono text-[11px] leading-[1.5] whitespace-pre-wrap break-words",
+                        item.status === "error"
+                          ? "text-rose-700 dark:text-rose-300"
+                          : "text-[var(--text-secondary)]",
+                      )}
+                    >
+                      {outputText}
+                    </pre>
                   )}
-                >
-                  {outputPreview}
-                </p>
+                </div>
               )}
+            </div>
+          ) : (
+            <div className="rounded-xl border border-[var(--border-subtle)]/70 bg-[var(--surface-subtle)]/60 px-2.5 py-1.5 text-[11px] text-[var(--text-muted)]">
+              {isRunning ? "子代理正在后台推进任务…" : "暂无更多工作输出"}
             </div>
           )}
 
           <div className="flex items-center justify-between gap-2 pt-0.5 text-[10.5px] text-[var(--text-muted)]">
             <span className="tabular-nums">
-              {total > 1 ? `小队成员 ${index + 1} / ${total}` : "子代理实时状态"}
+              {total > 1 ? `小队成员 ${index + 1} / ${total}` : "点击头像跳转消息"}
             </span>
-            <span className="inline-flex items-center gap-1 font-medium text-[var(--text-secondary)]">
-              <span>点击查看详情</span>
-              <Icon name="arrow-up-right" size={11} />
+            <span className="inline-flex items-center gap-2 shrink-0">
+              {onJump && (
+                <button
+                  type="button"
+                  onClick={onJump}
+                  className="rd-focus-ring inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                >
+                  <span>跳到消息</span>
+                  <Icon name="arrow-up-right" size={11} />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onOpenDetail}
+                className="rd-focus-ring inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-medium text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+              >
+                <span>全部详情</span>
+              </button>
             </span>
           </div>
         </div>
@@ -696,8 +733,8 @@ function SubagentHoverCard({
         )}
         style={
           align === "right"
-            ? { right: `${caretOffsetPx ?? 22}px` }
-            : { left: `${caretOffsetPx ?? 22}px` }
+            ? { right: `${caretOffsetPx ?? 17}px` }
+            : { left: `${caretOffsetPx ?? 17}px` }
         }
       />
     </div>
@@ -765,23 +802,30 @@ export function SubagentDock({
     }
   }, [open, cancelHoverClose]);
 
-  const updateCaretForAvatar = useCallback(
-    (id: string) => {
+  const updateCaretForElement = useCallback(
+    (btnEl: HTMLElement | null | undefined) => {
       const dockEl = dockRef.current;
-      const btnEl = avatarBtnRefs.current.get(id);
       if (!dockEl || !btnEl) return;
       const dockRect = dockEl.getBoundingClientRect();
       const btnRect = btnEl.getBoundingClientRect();
       if (!dockRect.width || !btnRect.width) return;
       const btnCenter = btnRect.left + btnRect.width / 2;
+      // Hover card is shifted 8px outward (-left-2 / -right-2) so the caret stays inside the flat bottom edge
       const offset =
         align === "right"
-          ? dockRect.right - btnCenter - 5
-          : btnCenter - dockRect.left - 5;
-      const clamped = Math.max(14, Math.min(280, Math.round(offset)));
+          ? dockRect.right - btnCenter + 3
+          : btnCenter - dockRect.left + 3;
+      const clamped = Math.max(14, Math.min(308, Math.round(offset)));
       setCaretOffsetPx(clamped);
     },
     [align],
+  );
+
+  const updateCaretForAvatar = useCallback(
+    (id: string) => {
+      updateCaretForElement(avatarBtnRefs.current.get(id));
+    },
+    [updateCaretForElement],
   );
 
   useEffect(() => {
@@ -835,6 +879,19 @@ export function SubagentDock({
     };
   }, [open, onOpenChange]);
 
+  useEffect(() => {
+    if (!hoveredId || open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        cancelHoverClose();
+        setStackHovered(false);
+        setHoveredId(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [hoveredId, open, cancelHoverClose]);
+
   if (summary.total === 0) return null;
 
   const { counts, items, total } = summary;
@@ -872,15 +929,30 @@ export function SubagentDock({
     onOpenChange(true);
   };
 
+  const handleAvatarClick = (item: AggregatedSubagent) => {
+    cancelHoverClose();
+    setStackHovered(false);
+    setHoveredId(null);
+    const targetMsgId = item.sourceMessageId || item.latestMessageId;
+    if (onJumpToMessage && targetMsgId) {
+      if (open) onOpenChange(false);
+      onJumpToMessage(targetMsgId);
+      return;
+    }
+    handleOpenForItem(item.id);
+  };
+
+  const hoveredJumpMsgId = hoveredItem ? hoveredItem.sourceMessageId || hoveredItem.latestMessageId : "";
+
   return (
     <div
       ref={dockRef}
       data-subagent-dock="1"
       onMouseEnter={cancelHoverClose}
       onMouseLeave={scheduleHoverClose}
-      className={cn("relative inline-flex items-center max-w-full", className)}
+      className={cn("relative inline-flex h-7 items-center max-w-full overflow-visible", className)}
     >
-      {/* Gliding Hover Status Card (shown on avatar/stack hover when full panel is closed) */}
+      {/* Gliding Hover Work-Detail Card (shown on avatar hover when full panel is closed) */}
       {!open && hoveredItem && (
         <SubagentHoverCard
           item={hoveredItem}
@@ -888,7 +960,12 @@ export function SubagentDock({
           total={total}
           align={align}
           caretOffsetPx={caretOffsetPx}
-          onSelect={() => handleOpenForItem(hoveredItem.id)}
+          onJump={
+            onJumpToMessage && hoveredJumpMsgId
+              ? () => handleAvatarClick(hoveredItem)
+              : undefined
+          }
+          onOpenDetail={() => handleOpenForItem(hoveredItem.id)}
           onMouseEnter={cancelHoverClose}
           onMouseLeave={scheduleHoverClose}
         />
@@ -974,147 +1051,94 @@ export function SubagentDock({
         </section>
       )}
 
-      {/* Composer-anchored Avatar Stack + Live Status Capsule */}
+      {/* Frameless Composer-aligned Overlapping Avatar Stack (exact h-7 / 28px alignment) */}
       <div
-        className={cn(
-          "inline-flex items-center gap-1.5 rounded-full border pl-1 pr-1 py-0.5 transition-all duration-200 overflow-visible",
-          runningCount > 0
-            ? "border-indigo-500/35 bg-[var(--surface-card)]/92 shadow-[0_0_0_1px_rgba(99,102,241,0.08)]"
-            : counts.error > 0
-              ? "border-rose-500/30 bg-[var(--surface-card)]/90"
-              : "border-[var(--border-subtle)] bg-[var(--surface-card)]/85 hover:border-[var(--border-strong)]",
-        )}
+        role="group"
+        aria-label="子代理头像列表"
+        data-subagent-avatar-stack="1"
+        className="inline-flex h-7 items-center overflow-visible"
       >
-        {/* Rubbery Overlapping Avatar Pile */}
-        <div
-          role="group"
-          aria-label="子代理头像列表"
-          data-subagent-avatar-stack="1"
-          className="flex items-center overflow-visible py-0.5 pl-0.5"
-        >
-          {visibleItems.map((item, idx) => {
-            const avatar = resolveSubagentAvatar(item.id, item.launchIndex);
-            const isDirectHover = hoveredVisibleIndex === idx;
-            const isNeighborHover =
-              hoveredVisibleIndex !== -1 && Math.abs(hoveredVisibleIndex - idx) === 1;
-            const isOtherFocused = hoveredVisibleIndex !== -1 && !isDirectHover && !isNeighborHover;
-            const tiltDeg = idx % 2 === 0 ? -4 : 4;
-            const neighborTiltDeg = hoveredVisibleIndex > idx ? -2 : 2;
-            const transform = isDirectHover
-              ? `translateY(-7px) scale(1.24) rotate(${tiltDeg}deg)`
-              : isNeighborHover
-                ? `translateY(-2.5px) scale(1.08) rotate(${neighborTiltDeg}deg)`
-                : "translateY(0) scale(1) rotate(0deg)";
+        {visibleItems.map((item, idx) => {
+          const avatar = resolveSubagentAvatar(item.id, item.launchIndex);
+          const isDirectHover = hoveredVisibleIndex === idx;
+          const isNeighborHover =
+            hoveredVisibleIndex !== -1 && Math.abs(hoveredVisibleIndex - idx) === 1;
+          const isOtherFocused = hoveredVisibleIndex !== -1 && !isDirectHover && !isNeighborHover;
+          const tiltDeg = idx % 2 === 0 ? -4 : 4;
+          const neighborTiltDeg = hoveredVisibleIndex > idx ? -2 : 2;
+          const transform = isDirectHover
+            ? `translateY(-5px) scale(1.18) rotate(${tiltDeg}deg)`
+            : isNeighborHover
+              ? `translateY(-2px) scale(1.06) rotate(${neighborTiltDeg}deg)`
+              : "translateY(0) scale(1) rotate(0deg)";
 
-            return (
-              <button
-                key={item.id}
-                ref={(node) => {
-                  if (node) avatarBtnRefs.current.set(item.id, node);
-                  else avatarBtnRefs.current.delete(item.id);
-                }}
-                type="button"
-                data-subagent-avatar={item.id}
-                data-subagent-status={item.status}
-                aria-label={`${avatar.name} · ${SUBAGENT_STATUS_META[item.status].label} · ${formatSubagentTask(item.event)}`}
-                onMouseEnter={() => handlePreviewItem(item.id)}
-                onFocus={() => handlePreviewItem(item.id)}
-                onClick={() => handleOpenForItem(item.id)}
-                className={cn(
-                  "rd-focus-ring relative inline-flex items-center justify-center rounded-full cursor-pointer animate-rd-avatar-pop",
-                  idx > 0 && (stackHovered ? "ml-0.5" : "-ml-2"),
-                  isOtherFocused && "opacity-80",
-                )}
-                style={{
-                  transform,
-                  zIndex: isDirectHover ? 30 : isNeighborHover ? 20 : MAX_VISIBLE_AVATARS - idx,
-                  transition:
-                    "transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1), margin-left 280ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 180ms ease",
-                }}
-              >
-                <SubagentAvatar
-                  avatar={avatar}
-                  status={item.status}
-                  size="sm"
-                  bobbing={item.status === "running" && !isDirectHover}
-                  bobDelayMs={idx * 240}
-                  elevated={isDirectHover}
-                />
-              </button>
-            );
-          })}
-
-          {overflowCount > 0 && (
+          return (
             <button
-              type="button"
-              aria-label={`还有 ${overflowCount} 个子代理，点击展开全部`}
-              onMouseEnter={() => {
-                cancelHoverClose();
-                setStackHovered(true);
-                if (items[MAX_VISIBLE_AVATARS]) {
-                  setHoveredId(items[MAX_VISIBLE_AVATARS].id);
-                }
+              key={item.id}
+              ref={(node) => {
+                if (node) avatarBtnRefs.current.set(item.id, node);
+                else avatarBtnRefs.current.delete(item.id);
               }}
-              onClick={() => onOpenChange(!open)}
+              type="button"
+              data-subagent-avatar={item.id}
+              data-subagent-status={item.status}
+              aria-label={`${avatar.name} · ${SUBAGENT_STATUS_META[item.status].label} · ${formatSubagentTask(item.event)}`}
+              onMouseEnter={() => handlePreviewItem(item.id)}
+              onFocus={() => handlePreviewItem(item.id)}
+              onClick={() => handleAvatarClick(item)}
               className={cn(
-                "rd-focus-ring relative inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--surface-elevated)] ring-2 ring-[var(--surface-canvas)] text-[10px] font-semibold tabular-nums text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:-translate-y-1 hover:scale-110 cursor-pointer",
-                stackHovered ? "ml-0.5" : "-ml-2",
+                "rd-focus-ring relative inline-flex h-7 w-7 items-center justify-center rounded-full cursor-pointer animate-rd-avatar-pop",
+                idx > 0 && (stackHovered ? "ml-1" : "-ml-2"),
+                isOtherFocused && "opacity-80",
               )}
               style={{
+                transform,
+                zIndex: isDirectHover ? 30 : isNeighborHover ? 20 : MAX_VISIBLE_AVATARS - idx,
                 transition:
-                  "transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1), margin-left 280ms cubic-bezier(0.34, 1.56, 0.64, 1)",
+                  "transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1), margin-left 280ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 180ms ease",
               }}
             >
-              +{overflowCount}
+              <SubagentAvatar
+                avatar={avatar}
+                status={item.status}
+                size="sm"
+                bobbing={item.status === "running" && !isDirectHover}
+                bobDelayMs={idx * 240}
+                elevated={isDirectHover}
+              />
             </button>
-          )}
-        </div>
+          );
+        })}
 
-        {/* Status Summary & Drawer Toggle */}
-        <button
-          type="button"
-          data-subagent-dock-trigger="1"
-          aria-expanded={open}
-          aria-controls={panelId}
-          onMouseEnter={() => {
-            if (!open && items[0]) {
-              handlePreviewItem(items[0].id);
-            }
-          }}
-          onClick={() => onOpenChange(!open)}
-          className={cn(
-            "rd-focus-ring inline-flex items-center gap-1.5 h-6 max-w-[220px] px-2 rounded-full text-[11.5px] transition-colors cursor-pointer",
-            open
-              ? "bg-[var(--surface-hover)] text-[var(--text-primary)]"
-              : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
-          )}
-        >
-          {runningCount > 0 ? (
-            <>
-              <PixelGridMatrix variant="orbit" className="scale-[0.88]" />
-              <span className="rd-shimmer-text font-medium tabular-nums whitespace-nowrap">
-                {runningCount} 个子代理运行中
-              </span>
-              {total > runningCount && (
-                <span className="text-[10.5px] text-[var(--text-muted)] tabular-nums whitespace-nowrap">
-                  · 共 {total}
-                </span>
-              )}
-            </>
-          ) : (
-            <span className="font-medium tabular-nums truncate">
-              {buildSettledSummaryText(counts)}
-            </span>
-          )}
-          <Icon
-            name="chevron-down"
-            size={12}
+        {overflowCount > 0 && (
+          <button
+            type="button"
+            data-subagent-overflow-trigger="1"
+            aria-expanded={open}
+            aria-controls={panelId}
+            aria-label={`还有 ${overflowCount} 个子代理，点击展开全部`}
+            onMouseEnter={(e) => {
+              if (open) return;
+              cancelHoverClose();
+              setStackHovered(true);
+              if (items[MAX_VISIBLE_AVATARS]) {
+                setHoveredId(items[MAX_VISIBLE_AVATARS].id);
+                updateCaretForElement(e.currentTarget);
+              }
+            }}
+            onClick={() => onOpenChange(!open)}
             className={cn(
-              "text-[var(--text-muted)] transition-transform duration-200 shrink-0",
-              open ? "rotate-0" : "rotate-180",
+              "rd-focus-ring relative inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--surface-elevated)] ring-2 ring-[var(--surface-canvas)] text-[10px] font-semibold tabular-nums text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:-translate-y-1 hover:scale-110 cursor-pointer",
+              stackHovered ? "ml-1" : "-ml-2",
             )}
-          />
-        </button>
+            style={{
+              transition:
+                "transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1), margin-left 280ms cubic-bezier(0.34, 1.56, 0.64, 1)",
+            }}
+          >
+            +{overflowCount}
+          </button>
+        )}
       </div>
     </div>
   );
