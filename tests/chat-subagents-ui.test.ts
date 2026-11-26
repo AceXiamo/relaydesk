@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToolChipsGroup } from "../app/components/agent-chat/AgentPrimitives.tsx";
+import { SubagentDock } from "../app/components/agent-chat/SubagentDock.tsx";
 import { CodexChatView } from "../app/components/CodexChatView.tsx";
 import { TaskAgentSessionPanel } from "../app/components/TaskAgentSessionPanel.tsx";
 import { ToastProvider } from "../app/components/ui.tsx";
@@ -621,5 +622,69 @@ describe("ToolChipsGroup subagent UI", () => {
       await Promise.resolve();
     });
     expect(container.querySelector("[data-subagent-dock]")).toBeNull();
+  });
+
+  it("renders stacked bot avatars above the composer, shows live hover status card, and focuses on avatar click", async () => {
+    const events: ChatToolEvent[] = [
+      ...makeSubagentEvents(),
+      {
+        id: "sa-extra",
+        tool: "Agent",
+        summary: "检查静态资源体积",
+        status: "done",
+        output: "总计 59KB",
+        subagent: { status: "done", activity: "Done" },
+      },
+    ];
+    const summary = aggregateSessionSubagents(makeMessages(events));
+    let dockOpen = false;
+    const renderDock = () => {
+      root.render(
+        createElement(SubagentDock, {
+          summary,
+          isStreaming: true,
+          open: dockOpen,
+          onOpenChange: (next) => {
+            dockOpen = next;
+            renderDock();
+          },
+          align: "left",
+        }),
+      );
+    };
+
+    act(() => renderDock());
+
+    // Shows up to 5 visible stacked avatars + "+1" overflow counter
+    const avatarBtns = [...container.querySelectorAll<HTMLButtonElement>("[data-subagent-avatar]")];
+    expect(avatarBtns).toHaveLength(5);
+    expect(container.querySelector("[data-subagent-avatar-stack]")?.textContent).toContain("+1");
+    const imgs = avatarBtns.map((b) => b.querySelector("img")?.getAttribute("src"));
+    expect(imgs.every((src) => src?.startsWith("/images/subagents/") && src.endsWith(".webp"))).toBe(true);
+    expect(new Set(imgs).size).toBe(5);
+
+    // Hovering an avatar reveals the floating hover status card with that subagent's live status
+    await act(() => user.hover(avatarBtns[0]));
+    const hoverCard1 = container.querySelector<HTMLElement>("[data-subagent-hover-card]");
+    expect(hoverCard1).not.toBeNull();
+    expect(hoverCard1!.dataset.subagentHoverId).toBe(avatarBtns[0].dataset.subagentAvatar);
+    expect(hoverCard1!.textContent).toContain("审查 server/cli-stream-parser.ts 解析逻辑");
+    expect(hoverCard1!.textContent).toContain("运行中");
+
+    // Hovering the second avatar transitions the preview card to the second subagent
+    await act(() => user.hover(avatarBtns[1]));
+    const hoverCard2 = container.querySelector<HTMLElement>("[data-subagent-hover-card]");
+    expect(hoverCard2).not.toBeNull();
+    expect(hoverCard2!.dataset.subagentHoverId).toBe(avatarBtns[1].dataset.subagentAvatar);
+    expect(hoverCard2!.textContent).toContain("补充 vitest 单元测试");
+    expect(hoverCard2!.textContent).toContain("已完成");
+
+    // Clicking an avatar opens the full detail panel and expands that specific item
+    await act(() => user.click(avatarBtns[1]));
+    expect(dockOpen).toBe(true);
+    expect(container.querySelector("[data-subagent-hover-card]")).toBeNull();
+    const detailPanel = container.querySelector('section[aria-label="并行子代理任务"]');
+    expect(detailPanel).not.toBeNull();
+    expect(detailPanel!.textContent).toContain("已新增 6 个测试用例，全部通过。");
   });
 });

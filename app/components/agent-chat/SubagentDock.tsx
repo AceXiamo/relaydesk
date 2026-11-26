@@ -1,12 +1,14 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   SUBAGENT_STATUS_META,
   SUBAGENT_STATUS_ORDER,
   compactWhitespace,
   formatSubagentTask,
+  resolveSubagentAvatar,
   resolveSubagentStatus,
   type AggregatedSubagent,
   type SessionSubagentSummary,
+  type SubagentAvatarMeta,
   type SubagentStatus,
   type SubagentToolEvent,
 } from "~/lib/subagents.ts";
@@ -15,6 +17,167 @@ import { Icon } from "../Icon.tsx";
 
 function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
+}
+
+function SubagentStatusDot({
+  status,
+  size = "sm",
+}: {
+  status: SubagentStatus;
+  size?: "xs" | "sm" | "md";
+}) {
+  const dim =
+    size === "md"
+      ? "h-3.5 w-3.5 ring-[2px]"
+      : size === "xs"
+        ? "h-2.5 w-2.5 ring-[1.5px]"
+        : "h-3 w-3 ring-[2px]";
+
+  if (status === "running") {
+    return (
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute -bottom-0.5 -right-0.5 inline-flex items-center justify-center rounded-full bg-indigo-500 ring-[var(--surface-canvas)]",
+          dim,
+        )}
+      >
+        <span className="absolute inset-0 rounded-full bg-indigo-400 animate-ping opacity-75" />
+        <span className="relative h-1.5 w-1.5 rounded-full bg-white" />
+      </span>
+    );
+  }
+
+  if (status === "done") {
+    return (
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute -bottom-0.5 -right-0.5 inline-flex items-center justify-center rounded-full bg-emerald-500 text-white ring-[var(--surface-canvas)] animate-rd-badge-pop",
+          dim,
+        )}
+      >
+        <svg viewBox="0 0 12 12" className="h-[68%] w-[68%]" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M2.5 6.3 5 8.8 9.5 3.4" />
+        </svg>
+      </span>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute -bottom-0.5 -right-0.5 inline-flex items-center justify-center rounded-full bg-rose-500 text-white ring-[var(--surface-canvas)] animate-rd-badge-pop",
+          dim,
+        )}
+      >
+        <svg viewBox="0 0 12 12" className="h-[68%] w-[68%]" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round">
+          <path d="M3.3 3.3 8.7 8.7M8.7 3.3 3.3 8.7" />
+        </svg>
+      </span>
+    );
+  }
+
+  if (status === "interrupted") {
+    return (
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute -bottom-0.5 -right-0.5 inline-flex items-center justify-center rounded-full bg-amber-500 text-white ring-[var(--surface-canvas)] animate-rd-badge-pop",
+          dim,
+        )}
+      >
+        <svg viewBox="0 0 12 12" className="h-[64%] w-[64%]" fill="currentColor">
+          <rect x="3" y="2.8" width="2.1" height="6.4" rx="0.8" />
+          <rect x="6.9" y="2.8" width="2.1" height="6.4" rx="0.8" />
+        </svg>
+      </span>
+    );
+  }
+
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "pointer-events-none absolute -bottom-0.5 -right-0.5 inline-flex items-center justify-center rounded-full bg-zinc-400 dark:bg-zinc-500 ring-[var(--surface-canvas)]",
+        dim,
+      )}
+    />
+  );
+}
+
+export function SubagentAvatar({
+  avatar,
+  status,
+  size = "sm",
+  bobbing = false,
+  bobDelayMs = 0,
+  elevated = false,
+  showStatusBadge = true,
+  className,
+}: {
+  avatar: SubagentAvatarMeta;
+  status: SubagentStatus;
+  size?: "xs" | "sm" | "md";
+  bobbing?: boolean;
+  bobDelayMs?: number;
+  elevated?: boolean;
+  showStatusBadge?: boolean;
+  className?: string;
+}) {
+  const isRunning = status === "running";
+  const boxSize =
+    size === "md" ? "h-10 w-10" : size === "xs" ? "h-[22px] w-[22px]" : "h-7 w-7";
+
+  return (
+    <span
+      className={cn(
+        "relative inline-flex shrink-0 items-center justify-center rounded-full select-none",
+        boxSize,
+        bobbing && isRunning && "animate-rd-avatar-bob",
+        className,
+      )}
+      style={bobbing && isRunning ? { animationDelay: `${bobDelayMs}ms` } : undefined}
+    >
+      {isRunning && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute -inset-[2px] rounded-full animate-rd-avatar-orbit"
+          style={{
+            background: `conic-gradient(from 0deg, ${avatar.accentHex} 0deg, #38bdf8 110deg, transparent 210deg, transparent 360deg)`,
+            WebkitMask: "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
+            mask: "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
+          }}
+        />
+      )}
+      <span
+        className={cn(
+          "relative block h-full w-full overflow-hidden rounded-full bg-[var(--surface-elevated)] ring-2 ring-[var(--surface-canvas)] transition-shadow duration-200",
+        )}
+        style={
+          elevated
+            ? {
+                boxShadow: `0 8px 18px -4px ${avatar.glowRgba}, 0 0 0 2px ${avatar.accentHex}`,
+              }
+            : isRunning
+              ? {
+                  boxShadow: `0 0 12px -2px ${avatar.glowRgba}`,
+                }
+              : undefined
+        }
+      >
+        <img
+          src={avatar.src}
+          alt={avatar.name}
+          draggable={false}
+          className="h-full w-full object-cover"
+        />
+      </span>
+      {showStatusBadge && <SubagentStatusDot status={status} size={size} />}
+    </span>
+  );
 }
 
 const DRIVE_DELAYS: Array<number | null> = [0, 110, 220, 110, 220, 330, 220, 330, 440];
@@ -92,6 +255,7 @@ export interface SubagentListEntry {
   event: SubagentToolEvent;
   status?: SubagentStatus;
   sourceMessageId?: string;
+  launchIndex?: number;
 }
 
 export function SubagentTaskList({
@@ -162,13 +326,15 @@ export function SubagentTaskList({
               >
                 <span className="flex items-start justify-between gap-2.5">
                   <span className="flex items-start gap-2 min-w-0 flex-1">
-                    <Icon
-                      name={statusMeta.icon}
-                      size={13}
-                      className={cn("mt-[2px] shrink-0", statusMeta.iconClass)}
+                    <SubagentAvatar
+                      avatar={resolveSubagentAvatar(ev.id, entry.launchIndex)}
+                      status={status}
+                      size="xs"
+                      showStatusBadge={false}
+                      className="mt-[1px]"
                     />
                     {isParallel && (
-                      <span className="mt-[1px] shrink-0 rounded border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-1 py-0.5 font-mono text-[10px] leading-none text-[var(--text-muted)] tabular-nums">
+                      <span className="mt-[2px] shrink-0 rounded border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-1 py-0.5 font-mono text-[10px] leading-none text-[var(--text-muted)] tabular-nums">
                         #{idx + 1}
                       </span>
                     )}
@@ -387,6 +553,157 @@ function hasSubagentDetail(item: AggregatedSubagent): boolean {
   return hasOutput || hasExitCode || hasLongTask || hasLongActivity;
 }
 
+const MAX_VISIBLE_AVATARS = 5;
+
+function SubagentHoverCard({
+  item,
+  index,
+  total,
+  align,
+  caretOffsetPx,
+  onSelect,
+  onMouseEnter,
+  onMouseLeave,
+}: {
+  item: AggregatedSubagent;
+  index: number;
+  total: number;
+  align: "left" | "right";
+  caretOffsetPx: number | null;
+  onSelect: () => void;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
+}) {
+  const avatar = resolveSubagentAvatar(item.id, item.launchIndex);
+  const statusMeta = SUBAGENT_STATUS_META[item.status];
+  const taskText = formatSubagentTask(item.event);
+  const activity = item.event.subagent.activity?.trim() || "";
+  const outputPreview = compactWhitespace(item.event.output ?? "");
+  const isRunning = item.status === "running";
+
+  return (
+    <div
+      role="tooltip"
+      data-subagent-hover-card="1"
+      data-subagent-hover-id={item.id}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+      onClick={onSelect}
+      className={cn(
+        "absolute bottom-full mb-3 z-40 w-[min(308px,calc(100vw-2rem))] cursor-pointer rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/96 backdrop-blur-xl shadow-[var(--rd-shadow-lg)] overflow-visible animate-rd-hover-card-in",
+        align === "right" ? "right-0" : "left-0",
+      )}
+    >
+      {/* Signature bot color hairline accent */}
+      <div className="overflow-hidden rounded-2xl">
+        <div
+          aria-hidden="true"
+          className="h-[2.5px] w-full transition-colors duration-300"
+          style={{
+            background: `linear-gradient(90deg, ${avatar.accentHex}, color-mix(in srgb, ${avatar.accentHex} 28%, transparent))`,
+          }}
+        />
+
+        <div key={item.id} className="p-3 space-y-2.5 animate-rd-content-swap">
+          <div className="flex items-center gap-2.5">
+            <SubagentAvatar
+              avatar={avatar}
+              status={item.status}
+              size="md"
+              bobbing={isRunning}
+              elevated={isRunning}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-1.5">
+                <span className="inline-flex items-center gap-1.5 min-w-0">
+                  <span className="text-[12.5px] font-semibold tracking-[-0.01em] text-[var(--text-primary)] truncate">
+                    {avatar.name}
+                  </span>
+                  <span className="rounded bg-[var(--surface-subtle)] border border-[var(--border-subtle)] px-1 py-[1px] font-mono text-[10px] text-[var(--text-muted)] tabular-nums">
+                    #{item.launchIndex}
+                  </span>
+                </span>
+                <span
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10.5px] font-medium leading-none whitespace-nowrap shrink-0",
+                    statusMeta.badgeClass,
+                  )}
+                >
+                  {isRunning && <PixelGridMatrix variant="orbit" className="scale-[0.78] -ml-0.5" />}
+                  <span>{statusMeta.label}</span>
+                </span>
+              </div>
+              <p className="mt-0.5 text-[12px] font-medium leading-[1.35] text-[var(--text-secondary)] line-clamp-2 break-words">
+                {taskText}
+              </p>
+            </div>
+          </div>
+
+          {(activity || outputPreview) && (
+            <div
+              className={cn(
+                "rounded-xl border px-2.5 py-2 text-[11.5px] leading-[1.45] space-y-1",
+                item.status === "error"
+                  ? "border-rose-500/25 bg-rose-500/[0.06] dark:bg-rose-500/[0.09]"
+                  : item.status === "interrupted"
+                    ? "border-amber-500/25 bg-amber-500/[0.06]"
+                    : "border-[var(--border-subtle)]/80 bg-[var(--surface-subtle)]/75",
+              )}
+            >
+              {activity && (
+                <div className="flex items-center gap-1.5 min-w-0 text-[11px]">
+                  <span className="shrink-0 text-[var(--text-muted)]">
+                    {isRunning ? "正在执行" : "最近步骤"}
+                  </span>
+                  <span className="min-w-0 truncate rounded border border-[var(--border-subtle)] bg-[var(--surface-card)] px-1.5 py-0.5 font-mono text-[10.5px] text-[var(--text-primary)]">
+                    {compactWhitespace(activity)}
+                  </span>
+                </div>
+              )}
+              {outputPreview && (
+                <p
+                  className={cn(
+                    "m-0 line-clamp-2 break-words",
+                    item.status === "error"
+                      ? "text-rose-700 dark:text-rose-300"
+                      : "text-[var(--text-secondary)]",
+                  )}
+                >
+                  {outputPreview}
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between gap-2 pt-0.5 text-[10.5px] text-[var(--text-muted)]">
+            <span className="tabular-nums">
+              {total > 1 ? `小队成员 ${index + 1} / ${total}` : "子代理实时状态"}
+            </span>
+            <span className="inline-flex items-center gap-1 font-medium text-[var(--text-secondary)]">
+              <span>点击查看详情</span>
+              <Icon name="arrow-up-right" size={11} />
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Gliding pointer caret anchored under the hovered avatar */}
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute -bottom-[5px] h-2.5 w-2.5 rotate-45 rounded-[2px] border-r border-b border-[var(--border-subtle)] bg-[var(--surface-card)] duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]",
+          align === "right" ? "transition-[right]" : "transition-[left]",
+        )}
+        style={
+          align === "right"
+            ? { right: `${caretOffsetPx ?? 22}px` }
+            : { left: `${caretOffsetPx ?? 22}px` }
+        }
+      />
+    </div>
+  );
+}
+
 export function SubagentDock({
   summary,
   isStreaming = false,
@@ -395,6 +712,7 @@ export function SubagentDock({
   focusedId,
   onClearFocus,
   onJumpToMessage,
+  align = "left",
   className,
 }: {
   summary: SessionSubagentSummary;
@@ -404,44 +722,99 @@ export function SubagentDock({
   focusedId?: string | null;
   onClearFocus?: () => void;
   onJumpToMessage?: (messageId: string) => void;
+  align?: "left" | "right";
   className?: string;
 }) {
   const dockRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
+  const avatarBtnRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const hoverCloseTimerRef = useRef<number | null>(null);
   const panelId = useId();
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [localFocusId, setLocalFocusId] = useState<string | null>(null);
+  const [stackHovered, setStackHovered] = useState(false);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [caretOffsetPx, setCaretOffsetPx] = useState<number | null>(null);
+
+  const activeFocusId = focusedId || localFocusId;
+
+  const cancelHoverClose = useCallback(() => {
+    if (hoverCloseTimerRef.current !== null) {
+      window.clearTimeout(hoverCloseTimerRef.current);
+      hoverCloseTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleHoverClose = useCallback(() => {
+    cancelHoverClose();
+    hoverCloseTimerRef.current = window.setTimeout(() => {
+      setStackHovered(false);
+      setHoveredId(null);
+      hoverCloseTimerRef.current = null;
+    }, 150);
+  }, [cancelHoverClose]);
+
+  useEffect(() => () => cancelHoverClose(), [cancelHoverClose]);
 
   useEffect(() => {
-    if (!open || !focusedId) return;
-    const match = summary.byId.get(focusedId);
+    if (open) {
+      cancelHoverClose();
+      setStackHovered(false);
+      setHoveredId(null);
+    }
+  }, [open, cancelHoverClose]);
+
+  const updateCaretForAvatar = useCallback(
+    (id: string) => {
+      const dockEl = dockRef.current;
+      const btnEl = avatarBtnRefs.current.get(id);
+      if (!dockEl || !btnEl) return;
+      const dockRect = dockEl.getBoundingClientRect();
+      const btnRect = btnEl.getBoundingClientRect();
+      if (!dockRect.width || !btnRect.width) return;
+      const btnCenter = btnRect.left + btnRect.width / 2;
+      const offset =
+        align === "right"
+          ? dockRect.right - btnCenter - 5
+          : btnCenter - dockRect.left - 5;
+      const clamped = Math.max(14, Math.min(280, Math.round(offset)));
+      setCaretOffsetPx(clamped);
+    },
+    [align],
+  );
+
+  useEffect(() => {
+    if (!open || !activeFocusId) return;
+    const match = summary.byId.get(activeFocusId);
     if (match && hasSubagentDetail(match)) {
       setExpandedIds((prev) => {
-        if (prev.has(focusedId)) return prev;
+        if (prev.has(activeFocusId)) return prev;
         const next = new Set(prev);
-        next.add(focusedId);
+        next.add(activeFocusId);
         return next;
       });
     }
-    setHighlightedId(focusedId);
+    setHighlightedId(activeFocusId);
     const timer = window.setTimeout(() => {
-      setHighlightedId((curr) => (curr === focusedId ? null : curr));
+      setHighlightedId((curr) => (curr === activeFocusId ? null : curr));
     }, 1800);
 
     const raf = window.requestAnimationFrame(() => {
       const listItems = panelRef.current?.querySelectorAll<HTMLLIElement>("li[data-subagent-id]");
       const targetEl = listItems
-        ? Array.from(listItems).find((el) => el.dataset.subagentId === focusedId)
+        ? Array.from(listItems).find((el) => el.dataset.subagentId === activeFocusId)
         : undefined;
       targetEl?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
     });
 
-    onClearFocus?.();
+    if (focusedId) onClearFocus?.();
+    if (localFocusId) setLocalFocusId(null);
     return () => {
       window.clearTimeout(timer);
       window.cancelAnimationFrame(raf);
     };
-  }, [open, focusedId, summary.byId, onClearFocus]);
+  }, [open, activeFocusId, focusedId, localFocusId, summary.byId, onClearFocus]);
 
   useEffect(() => {
     if (!open) return;
@@ -467,10 +840,12 @@ export function SubagentDock({
   const { counts, items, total } = summary;
   const isParallel = total > 1;
   const runningCount = counts.running;
-  const singleRunning = runningCount === 1 ? items.find((item) => item.status === "running") : undefined;
-  const singleRunningHint = singleRunning
-    ? compactWhitespace(singleRunning.event.subagent.activity?.trim() || formatSubagentTask(singleRunning.event))
-    : "";
+  const visibleItems = items.slice(0, MAX_VISIBLE_AVATARS);
+  const overflowCount = Math.max(0, total - visibleItems.length);
+
+  const hoveredIndex = hoveredId ? items.findIndex((i) => i.id === hoveredId) : -1;
+  const hoveredItem = hoveredIndex >= 0 ? items[hoveredIndex] : null;
+  const hoveredVisibleIndex = hoveredId ? visibleItems.findIndex((i) => i.id === hoveredId) : -1;
 
   const toggleItem = (id: string) => {
     setExpandedIds((prev) => {
@@ -481,21 +856,54 @@ export function SubagentDock({
     });
   };
 
+  const handlePreviewItem = (id: string) => {
+    if (open) return;
+    cancelHoverClose();
+    setStackHovered(true);
+    setHoveredId(id);
+    updateCaretForAvatar(id);
+  };
+
+  const handleOpenForItem = (id: string) => {
+    cancelHoverClose();
+    setStackHovered(false);
+    setHoveredId(null);
+    setLocalFocusId(id);
+    onOpenChange(true);
+  };
+
   return (
     <div
       ref={dockRef}
       data-subagent-dock="1"
-      className={cn(
-        "pointer-events-none absolute right-3 sm:right-4 bottom-3 z-30 flex flex-col items-end max-w-[calc(100%-1.5rem)]",
-        className,
-      )}
+      onMouseEnter={cancelHoverClose}
+      onMouseLeave={scheduleHoverClose}
+      className={cn("relative inline-flex items-center max-w-full", className)}
     >
+      {/* Gliding Hover Status Card (shown on avatar/stack hover when full panel is closed) */}
+      {!open && hoveredItem && (
+        <SubagentHoverCard
+          item={hoveredItem}
+          index={hoveredIndex}
+          total={total}
+          align={align}
+          caretOffsetPx={caretOffsetPx}
+          onSelect={() => handleOpenForItem(hoveredItem.id)}
+          onMouseEnter={cancelHoverClose}
+          onMouseLeave={scheduleHoverClose}
+        />
+      )}
+
+      {/* Expanded Subagent Detail Panel (anchored cleanly above the composer stack) */}
       {open && (
         <section
           ref={panelRef}
           id={panelId}
           aria-label={isParallel ? "并行子代理任务" : "子代理任务"}
-          className="pointer-events-auto mb-2 w-[min(420px,calc(100vw-1.5rem))] sm:w-[min(440px,calc(100vw-2rem))] max-w-full rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/98 backdrop-blur-md shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up"
+          className={cn(
+            "absolute bottom-full mb-2.5 z-40 w-[min(420px,calc(100vw-1.5rem))] sm:w-[min(440px,calc(100vw-2rem))] rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/98 backdrop-blur-md shadow-[var(--rd-shadow-lg)] overflow-hidden animate-rd-panel-spring",
+            align === "right" ? "right-0" : "left-0",
+          )}
         >
           <header className="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3.5 py-2.5 bg-[var(--surface-subtle)]/40">
             <div className="flex items-center flex-wrap gap-x-2 gap-y-1 min-w-0">
@@ -554,6 +962,7 @@ export function SubagentDock({
                 event: item.event,
                 status: item.status,
                 sourceMessageId: item.sourceMessageId,
+                launchIndex: item.launchIndex,
               }))}
               isStreaming={isStreaming}
               expandedIds={expandedIds}
@@ -565,62 +974,148 @@ export function SubagentDock({
         </section>
       )}
 
-      <button
-        type="button"
-        data-subagent-dock-trigger="1"
-        aria-expanded={open}
-        aria-controls={panelId}
-        onClick={() => onOpenChange(!open)}
+      {/* Composer-anchored Avatar Stack + Live Status Capsule */}
+      <div
         className={cn(
-          "pointer-events-auto rd-focus-ring inline-flex items-center gap-2 h-8 max-w-full px-3 rounded-full border backdrop-blur-md shadow-[var(--rd-shadow-md)] transition-all cursor-pointer text-[12px]",
+          "inline-flex items-center gap-1.5 rounded-full border pl-1 pr-1 py-0.5 transition-all duration-200 overflow-visible",
           runningCount > 0
-            ? "border-indigo-500/35 bg-[var(--surface-card)]/95 text-[var(--text-primary)] hover:border-indigo-500/55"
+            ? "border-indigo-500/35 bg-[var(--surface-card)]/92 shadow-[0_0_0_1px_rgba(99,102,241,0.08)]"
             : counts.error > 0
-              ? "border-rose-500/30 bg-[var(--surface-card)]/95 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-rose-500/45"
-              : "border-[var(--border-subtle)] bg-[var(--surface-card)]/95 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)]",
+              ? "border-rose-500/30 bg-[var(--surface-card)]/90"
+              : "border-[var(--border-subtle)] bg-[var(--surface-card)]/85 hover:border-[var(--border-strong)]",
         )}
       >
-        {runningCount > 0 ? (
-          <>
-            <PixelGridMatrix variant="orbit" />
-            <span className="rd-shimmer-text font-medium tabular-nums whitespace-nowrap">
-              {runningCount} 个子代理运行中
-            </span>
-            {total > runningCount ? (
-              <span className="text-[11px] text-[var(--text-muted)] tabular-nums whitespace-nowrap">
-                · 共 {total}
+        {/* Rubbery Overlapping Avatar Pile */}
+        <div
+          role="group"
+          aria-label="子代理头像列表"
+          data-subagent-avatar-stack="1"
+          className="flex items-center overflow-visible py-0.5 pl-0.5"
+        >
+          {visibleItems.map((item, idx) => {
+            const avatar = resolveSubagentAvatar(item.id, item.launchIndex);
+            const isDirectHover = hoveredVisibleIndex === idx;
+            const isNeighborHover =
+              hoveredVisibleIndex !== -1 && Math.abs(hoveredVisibleIndex - idx) === 1;
+            const isOtherFocused = hoveredVisibleIndex !== -1 && !isDirectHover && !isNeighborHover;
+            const tiltDeg = idx % 2 === 0 ? -4 : 4;
+            const neighborTiltDeg = hoveredVisibleIndex > idx ? -2 : 2;
+            const transform = isDirectHover
+              ? `translateY(-7px) scale(1.24) rotate(${tiltDeg}deg)`
+              : isNeighborHover
+                ? `translateY(-2.5px) scale(1.08) rotate(${neighborTiltDeg}deg)`
+                : "translateY(0) scale(1) rotate(0deg)";
+
+            return (
+              <button
+                key={item.id}
+                ref={(node) => {
+                  if (node) avatarBtnRefs.current.set(item.id, node);
+                  else avatarBtnRefs.current.delete(item.id);
+                }}
+                type="button"
+                data-subagent-avatar={item.id}
+                data-subagent-status={item.status}
+                aria-label={`${avatar.name} · ${SUBAGENT_STATUS_META[item.status].label} · ${formatSubagentTask(item.event)}`}
+                onMouseEnter={() => handlePreviewItem(item.id)}
+                onFocus={() => handlePreviewItem(item.id)}
+                onClick={() => handleOpenForItem(item.id)}
+                className={cn(
+                  "rd-focus-ring relative inline-flex items-center justify-center rounded-full cursor-pointer animate-rd-avatar-pop",
+                  idx > 0 && (stackHovered ? "ml-0.5" : "-ml-2"),
+                  isOtherFocused && "opacity-80",
+                )}
+                style={{
+                  transform,
+                  zIndex: isDirectHover ? 30 : isNeighborHover ? 20 : MAX_VISIBLE_AVATARS - idx,
+                  transition:
+                    "transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1), margin-left 280ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 180ms ease",
+                }}
+              >
+                <SubagentAvatar
+                  avatar={avatar}
+                  status={item.status}
+                  size="sm"
+                  bobbing={item.status === "running" && !isDirectHover}
+                  bobDelayMs={idx * 240}
+                  elevated={isDirectHover}
+                />
+              </button>
+            );
+          })}
+
+          {overflowCount > 0 && (
+            <button
+              type="button"
+              aria-label={`还有 ${overflowCount} 个子代理，点击展开全部`}
+              onMouseEnter={() => {
+                cancelHoverClose();
+                setStackHovered(true);
+                if (items[MAX_VISIBLE_AVATARS]) {
+                  setHoveredId(items[MAX_VISIBLE_AVATARS].id);
+                }
+              }}
+              onClick={() => onOpenChange(!open)}
+              className={cn(
+                "rd-focus-ring relative inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--surface-elevated)] ring-2 ring-[var(--surface-canvas)] text-[10px] font-semibold tabular-nums text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:-translate-y-1 hover:scale-110 cursor-pointer",
+                stackHovered ? "ml-0.5" : "-ml-2",
+              )}
+              style={{
+                transition:
+                  "transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1), margin-left 280ms cubic-bezier(0.34, 1.56, 0.64, 1)",
+              }}
+            >
+              +{overflowCount}
+            </button>
+          )}
+        </div>
+
+        {/* Status Summary & Drawer Toggle */}
+        <button
+          type="button"
+          data-subagent-dock-trigger="1"
+          aria-expanded={open}
+          aria-controls={panelId}
+          onMouseEnter={() => {
+            if (!open && items[0]) {
+              handlePreviewItem(items[0].id);
+            }
+          }}
+          onClick={() => onOpenChange(!open)}
+          className={cn(
+            "rd-focus-ring inline-flex items-center gap-1.5 h-6 max-w-[220px] px-2 rounded-full text-[11.5px] transition-colors cursor-pointer",
+            open
+              ? "bg-[var(--surface-hover)] text-[var(--text-primary)]"
+              : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
+          )}
+        >
+          {runningCount > 0 ? (
+            <>
+              <PixelGridMatrix variant="orbit" className="scale-[0.88]" />
+              <span className="rd-shimmer-text font-medium tabular-nums whitespace-nowrap">
+                {runningCount} 个子代理运行中
               </span>
-            ) : singleRunningHint ? (
-              <span className="hidden sm:inline max-w-[160px] truncate text-[11px] text-[var(--text-muted)]">
-                · {singleRunningHint}
-              </span>
-            ) : null}
-          </>
-        ) : (
-          <>
-            {counts.error > 0 ? (
-              <Icon name="alert-circle" size={13} className="text-rose-500" />
-            ) : counts.interrupted > 0 ? (
-              <Icon name="pause-circle" size={13} className="text-amber-500" />
-            ) : counts.unknown > 0 ? (
-              <Icon name="circle-dashed" size={13} className="text-[var(--text-muted)]" />
-            ) : (
-              <Icon name="bot" size={13} className="text-emerald-500" />
-            )}
+              {total > runningCount && (
+                <span className="text-[10.5px] text-[var(--text-muted)] tabular-nums whitespace-nowrap">
+                  · 共 {total}
+                </span>
+              )}
+            </>
+          ) : (
             <span className="font-medium tabular-nums truncate">
               {buildSettledSummaryText(counts)}
             </span>
-          </>
-        )}
-        <Icon
-          name="chevron-down"
-          size={13}
-          className={cn(
-            "text-[var(--text-muted)] transition-transform duration-150 shrink-0",
-            open ? "rotate-0" : "rotate-180",
           )}
-        />
-      </button>
+          <Icon
+            name="chevron-down"
+            size={12}
+            className={cn(
+              "text-[var(--text-muted)] transition-transform duration-200 shrink-0",
+              open ? "rotate-0" : "rotate-180",
+            )}
+          />
+        </button>
+      </div>
     </div>
   );
 }

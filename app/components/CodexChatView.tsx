@@ -1287,14 +1287,12 @@ export function CodexChatView({
           </div>
         </header>
 
-        {/* Scrollable Conversation Thread + Corner Subagent Dock */}
+        {/* Scrollable Conversation Thread */}
         <div className="relative flex-1 min-h-0 flex flex-col">
         <div
           ref={scrollContainerRef}
           onScroll={handleThreadScroll}
-          className={`flex-1 overflow-y-auto rd-scroll px-3 sm:px-4 pt-4 sm:pt-6 ${
-            subagentSummary.total > 0 ? "pb-14 sm:pb-16" : "pb-6 sm:pb-8"
-          }`}
+          className="flex-1 overflow-y-auto rd-scroll px-3 sm:px-4 pt-4 sm:pt-6 pb-6 sm:pb-8"
         >
           <div className="max-w-[740px] mx-auto">
             {messagesLoading ? (
@@ -1644,11 +1642,7 @@ export function CodexChatView({
 
         {/* Floating Scroll-to-Bottom Pill */}
         {showScrollBottom && (
-          <div
-            className={`pointer-events-none absolute inset-x-0 flex justify-center z-20 animate-fade-in ${
-              subagentSummary.total > 0 ? "bottom-13 sm:bottom-3" : "bottom-3"
-            }`}
-          >
+          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center z-20 animate-fade-in">
             <button
               type="button"
               onClick={() => {
@@ -1663,16 +1657,6 @@ export function CodexChatView({
             </button>
           </div>
         )}
-
-        <SubagentDock
-          summary={subagentSummary}
-          isStreaming={streaming}
-          open={subagentDockOpen}
-          onOpenChange={setSubagentDockOpen}
-          focusedId={focusedSubagentId}
-          onClearFocus={handleClearSubagentFocus}
-          onJumpToMessage={handleJumpToMessage}
-        />
         </div>
 
         {/* Bottom Floating Prompt Bar */}
@@ -1717,6 +1701,20 @@ export function CodexChatView({
             {targetUnavailableReason && <p role="status" className="px-3 text-xs text-amber-700 dark:text-amber-300">{targetUnavailableReason}</p>}
             <PromptBar
               contextSession={activeSession}
+              subagentSlot={
+                subagentSummary.total > 0 ? (
+                  <SubagentDock
+                    summary={subagentSummary}
+                    isStreaming={streaming}
+                    open={subagentDockOpen}
+                    onOpenChange={setSubagentDockOpen}
+                    focusedId={focusedSubagentId}
+                    onClearFocus={handleClearSubagentFocus}
+                    onJumpToMessage={handleJumpToMessage}
+                    align="left"
+                  />
+                ) : null
+              }
               projectId={project.id}
               input={input}
               onInputChange={setInput}

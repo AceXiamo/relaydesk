@@ -5,6 +5,7 @@ import {
   SUBAGENT_STATUS_META,
   SUBAGENT_STATUS_ORDER,
   formatSubagentTask,
+  resolveSubagentAvatar,
   resolveSubagentStatus,
   stripToolPrefix,
   type AggregatedSubagent,
@@ -13,6 +14,7 @@ import {
 } from "~/lib/subagents.ts";
 import {
   PixelGridMatrix,
+  SubagentAvatar,
   SubagentDock,
   SubagentTaskList,
   renderToolOutputLines,
@@ -289,7 +291,12 @@ function SubagentInlineReferences({
             className="rd-focus-ring group w-full flex items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)]/70 hover:bg-[var(--surface-hover)]/80 hover:border-[var(--border-strong)] px-2.5 py-1.5 text-left transition-colors cursor-pointer"
           >
             <span className="flex items-center gap-2 min-w-0 flex-1">
-              <Icon name={meta.icon} size={12} className={meta.iconClass} />
+              <SubagentAvatar
+                avatar={resolveSubagentAvatar(ev.id, aggregated?.launchIndex)}
+                status={status}
+                size="xs"
+                showStatusBadge={false}
+              />
               <span className="text-[11.5px] font-medium text-[var(--text-muted)] shrink-0">
                 {isOrigin ? "派发子代理" : "子代理更新"}
               </span>
@@ -1421,6 +1428,7 @@ function ModelControls({
 
 export interface PromptBarProps extends ModelControlsProps {
   contextSession?: import("../../lib/types.ts").ChatSessionRecord | null;
+  subagentSlot?: React.ReactNode;
   input: string;
   onInputChange: (value: string) => void;
   attachments: ChatContextRef[];
@@ -1450,6 +1458,7 @@ export interface PromptBarProps extends ModelControlsProps {
 
 export function PromptBar({
   contextSession,
+  subagentSlot,
   projectId,
   input,
   onInputChange,
@@ -1846,7 +1855,7 @@ export function PromptBar({
 
       {/* Outer Execution Environment Bar (above composer card) */}
       <div className="mb-2 px-0.5 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 min-w-0">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
           {onChangeExecutionTarget && (
             <ExecutionTargetSelect
               projectId={projectId}
@@ -1857,6 +1866,14 @@ export function PromptBar({
               onChangeExecutionTarget={onChangeExecutionTarget}
               onOpenChange={() => setPopover("none")}
             />
+          )}
+          {subagentSlot && (
+            <>
+              {onChangeExecutionTarget && (
+                <span className="hidden sm:inline-block h-3.5 w-px bg-[var(--border-subtle)]" />
+              )}
+              {subagentSlot}
+            </>
           )}
         </div>
 

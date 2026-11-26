@@ -542,9 +542,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
         <div
           ref={transcript}
           onScroll={e => { const el = e.currentTarget; followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 72; }}
-          className={`rd-scroll min-h-0 flex-1 overflow-y-auto px-4 pt-5 sm:px-6 ${
-            subagentSummary.total > 0 ? "pb-14" : "pb-5"
-          }`}
+          className="rd-scroll min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6"
         >
           <div className="mx-auto max-w-3xl space-y-6">
             {messages.map((msg, index) => {
@@ -609,19 +607,11 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
             })}
           </div>
         </div>
-        <SubagentDock
-          summary={subagentSummary}
-          isStreaming={running}
-          open={subagentDockOpen}
-          onOpenChange={setSubagentDockOpen}
-          focusedId={focusedSubagentId}
-          onClearFocus={handleClearSubagentFocus}
-          onJumpToMessage={handleJumpToMessage}
-        />
         </div>
         <form className="shrink-0 border-t border-[var(--border-subtle)] bg-[var(--surface-canvas)] px-3 py-3 sm:px-4" onSubmit={e => { e.preventDefault(); send(); }}>
           <div className="mx-auto max-w-3xl space-y-2">
-            <div className="flex flex-wrap items-center gap-1.5" aria-label="会话执行配置">
+            <div className="flex flex-wrap items-center justify-between gap-2" aria-label="会话执行配置">
+              <div className="flex flex-wrap items-center gap-1.5 min-w-0">
               <LocalAgentTargetSelect
                 projectId={task.project_id}
                 runtime={activeRuntime}
@@ -672,6 +662,20 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                 ariaLabel="切换会话推理强度"
                 onChange={handleSelectEffort}
               />
+              </div>
+              {subagentSummary.total > 0 && (
+                <SubagentDock
+                  summary={subagentSummary}
+                  isStreaming={running}
+                  open={subagentDockOpen}
+                  onOpenChange={setSubagentDockOpen}
+                  focusedId={focusedSubagentId}
+                  onClearFocus={handleClearSubagentFocus}
+                  onJumpToMessage={handleJumpToMessage}
+                  align="right"
+                  className="ml-auto"
+                />
+              )}
             </div>
 
             <div

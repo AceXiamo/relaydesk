@@ -31,6 +31,76 @@ export interface SessionSubagentSummary {
   total: number;
 }
 
+export interface SubagentAvatarMeta {
+  id: string;
+  name: string;
+  src: string;
+  accentHex: string;
+  glowRgba: string;
+}
+
+export const SUBAGENT_AVATARS: readonly SubagentAvatarMeta[] = [
+  {
+    id: "scout",
+    name: "Scout",
+    src: "/images/subagents/scout.webp",
+    accentHex: "#6366f1",
+    glowRgba: "rgba(99, 102, 241, 0.42)",
+  },
+  {
+    id: "builder",
+    name: "Builder",
+    src: "/images/subagents/builder.webp",
+    accentHex: "#10b981",
+    glowRgba: "rgba(16, 185, 129, 0.42)",
+  },
+  {
+    id: "spark",
+    name: "Spark",
+    src: "/images/subagents/spark.webp",
+    accentHex: "#f59e0b",
+    glowRgba: "rgba(245, 158, 11, 0.42)",
+  },
+  {
+    id: "orbit",
+    name: "Orbit",
+    src: "/images/subagents/orbit.webp",
+    accentHex: "#8b5cf6",
+    glowRgba: "rgba(139, 92, 246, 0.42)",
+  },
+  {
+    id: "byte",
+    name: "Byte",
+    src: "/images/subagents/byte.webp",
+    accentHex: "#0ea5e9",
+    glowRgba: "rgba(14, 165, 233, 0.42)",
+  },
+  {
+    id: "coral",
+    name: "Coral",
+    src: "/images/subagents/coral.webp",
+    accentHex: "#f43f5e",
+    glowRgba: "rgba(244, 63, 94, 0.42)",
+  },
+];
+
+function hashSubagentKey(input: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+export function resolveSubagentAvatar(id: string, launchIndex?: number): SubagentAvatarMeta {
+  const index =
+    typeof launchIndex === "number" && launchIndex > 0
+      ? (launchIndex - 1) % SUBAGENT_AVATARS.length
+      : hashSubagentKey(id) % SUBAGENT_AVATARS.length;
+  return SUBAGENT_AVATARS[index];
+}
+
 export const SUBAGENT_STATUS_ORDER: readonly SubagentStatus[] = [
   "running",
   "done",

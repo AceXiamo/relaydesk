@@ -559,6 +559,127 @@
   .rd-caret-blink {
     animation: rd-caret-blink 0.9s step-end infinite;
   }
+
+  .animate-rd-avatar-pop {
+    animation: rd-avatar-pop 380ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+
+  .animate-rd-avatar-bob {
+    animation: rd-avatar-bob 2.2s ease-in-out infinite;
+  }
+
+  .animate-rd-avatar-orbit {
+    animation: rd-avatar-orbit 1.9s linear infinite;
+  }
+
+  .animate-rd-hover-card-in {
+    animation: rd-hover-card-in 240ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+
+  .animate-rd-content-swap {
+    animation: rd-content-swap 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .animate-rd-badge-pop {
+    animation: rd-badge-pop 300ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+
+  .animate-rd-panel-spring {
+    animation: rd-panel-spring 260ms cubic-bezier(0.22, 1.18, 0.36, 1) both;
+  }
+}
+
+@keyframes rd-avatar-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.45) rotate(-14deg);
+  }
+  70% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.08) rotate(3deg);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1) rotate(0deg);
+  }
+}
+
+@keyframes rd-avatar-bob {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  35% {
+    transform: translateY(-2.5px) rotate(-3deg);
+  }
+  70% {
+    transform: translateY(-1px) rotate(2.5deg);
+  }
+}
+
+@keyframes rd-avatar-orbit {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes rd-hover-card-in {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.92);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes rd-content-swap {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes rd-badge-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes rd-panel-spring {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rd-avatar-pop,
+  .animate-rd-avatar-bob,
+  .animate-rd-avatar-orbit,
+  .animate-rd-hover-card-in,
+  .animate-rd-content-swap,
+  .animate-rd-badge-pop,
+  .animate-rd-panel-spring {
+    animation: none !important;
+  }
 }
 
 @keyframes rd-portal-enter {
