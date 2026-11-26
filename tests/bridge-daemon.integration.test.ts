@@ -131,10 +131,12 @@ async function start(roots = true, concurrency = 1, timers: Pick<BridgeDaemonOpt
   writeFileSync(join(homeDir, ".codex", "config.toml"), 'model = "detected-codex"\nmodel_reasoning_effort = "medium"\n');
   const bin = join(f.root, "fake-codex.mjs");
   writeFileSync(bin, fakeCli, { mode: 0o755 });
+  const agyBin = join(f.root, "fake-agy.mjs");
+  if (includeAgy) writeFileSync(agyBin, readFileSync(new URL("./fixtures/agy-acp.mjs", import.meta.url)), { mode: 0o755 });
   const configPath = join(f.root, "config.json");
   const config = { server_url: f.wsUrl, agent_token: token, agent_name: "Fixture", auto_detect_cli_configs: true,
     allowed_roots: roots ? [allowed] : [], max_concurrency: concurrency,
-    projects: { [p]: { workdir: repo } }, runtimes: { codex: { bin }, claude: { bin }, ...(includeAgy ? { agy: { bin } } : {}) },
+    projects: { [p]: { workdir: repo } }, runtimes: { codex: { bin }, claude: { bin }, ...(includeAgy ? { agy: { bin: agyBin } } : {}) },
     models: [{ id: "detected-codex", runtime: "codex", context_window: 543210, effort_levels: ["low", "high"] }] };
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
   daemon = await startBridgeDaemon({ configPath, cacheDir, homeDir, ...timers, reconnectMinMs: 30, reconnectMaxMs: 100 });
@@ -700,7 +702,11 @@ describe("real bridge daemon + HTTP chat", () => {
     await f.ok(`${w}/handbook`, "POST", { content: "v2 handbook" });
     expect(await (await s1.turn("Resume agy turn")).text()).toContain("event: done");
     const secondFacts = facts(repo);
-    expect(secondFacts.args).toEqual(expect.arrayContaining(["--resume", "local-agy-thread"]));
+    expect(firstFacts.method).toBe("session/new");
+    expect(secondFacts.method).toBe("session/resume");
+    expect(secondFacts.resumeId).toBe("local-agy-thread");
+    expect(secondFacts.tokenHash).not.toBe(firstFacts.tokenHash);
+    expect(secondFacts.args).toContain("--process-per-session");
     expect(secondFacts.space).toBe(firstFacts.space);
     expect(secondFacts.handbook).toBe("v2 handbook");
     expect(existsSync(firstFacts.space)).toBe(true);

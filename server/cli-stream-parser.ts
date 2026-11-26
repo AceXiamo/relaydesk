@@ -1,3 +1,4 @@
+import type { AgyAcpOptions } from "./agy-acp.ts";
 import { isAgyOrchestrator } from "../app/lib/model-catalog.ts";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -115,8 +116,9 @@ export function buildCliInvocation(params: {
     url: string;
     tokenEnvVar: string;
     claudeConfigPath?: string;
+    agyToken?: string;
   };
-}): { args: string[]; env: NodeJS.ProcessEnv; secrets: string[] } {
+}): { args: string[]; env: NodeJS.ProcessEnv; secrets: string[]; acp?: AgyAcpOptions } {
   const {
     dbPath,
     runtime,
@@ -287,6 +289,15 @@ export function buildCliInvocation(params: {
       hasExplicitEffort && effectiveModel
         ? effectiveModel.replace(/-(low|medium|high|xhigh|max)$/, "")
         : effectiveModel;
+    if (params.mcp?.agyToken) {
+      return {
+        args: ["acp", "--process-per-session", ...(fullAccess ? ["--dangerously-skip-permissions"] : ["--sandbox"]), ...addDirArgs],
+        env, secrets,
+        acp: { url: params.mcp.url, token: params.mcp.agyToken, model: agyModel,
+          effort: hasExplicitEffort && !isEffortUnsupportedModel ? agyEffort[effort] : "",
+          mode: fullAccess ? undefined : sandboxMode === "workspace-write" ? "accept-edits" : "default" },
+      };
+    }
     const args = [
       "--input-format",
       "stream-json",

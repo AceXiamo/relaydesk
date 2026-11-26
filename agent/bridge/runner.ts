@@ -1,3 +1,4 @@
+import { agyAcpTurn } from "../../server/agy-acp.ts";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -253,7 +254,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   try {
   const spaceFilesRoot = resolve(join(o.spaceDir, "files"));
   const attachedImages = chatImageAttachments(p.project_id, o.spaceDir, o.cwd, p.image_paths ?? []);
-  const { args, env } = buildCliInvocation({
+  const { args, env, acp } = buildCliInvocation({
     dbPath: ":memory:",
     runtime,
     bin,
@@ -275,6 +276,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
           mcp: {
             url: mcpHandle.url,
             tokenEnvVar: "RELAYDESK_MCP_TOKEN",
+            ...(runtime === "agy" ? { agyToken: mcpHandle.token } : {}),
             ...(claudeMcpConfigPath ? { claudeConfigPath: claudeMcpConfigPath } : {}),
           },
         }
@@ -421,8 +423,9 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   let stderr = "",
     bytes = 0,
     overflow = false;
+  const turn = acp ? agyAcpTurn(acp, o.cwd, effectiveResumeSessionId || "", clean(o.prompt), child.stdin, parser.write) : null;
   child.stdout.setEncoding("utf8").on("data", (s: string) => {
-    if ((bytes += Buffer.byteLength(s)) <= 32 * 1024 * 1024) parser.write(s);
+    if ((bytes += Buffer.byteLength(s)) <= 32 * 1024 * 1024) (turn ?? parser).write(s);
     else {
       overflow = true;
       abort();
@@ -435,11 +438,13 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     child.once("error", reject);
     child.once("close", resolve);
   });
-  child.stdin.end(formatCliStdinPrompt(runtime, clean(o.prompt)), "utf8");
+  if (turn) turn.start();
+  else child.stdin.end(formatCliStdinPrompt(runtime, clean(o.prompt)), "utf8");
   try {
     const code = await closed;
     await stopGroup();
     const success = code === 0 && !o.signal.aborted && !overflow;
+    turn?.close();
     await parser.finish(success);
     emitText(true);
     const { state } = parser;

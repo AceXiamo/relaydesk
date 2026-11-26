@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chatWatchdog, type ChatTimeoutReason } from "../agent/bridge/chat-timeouts.ts";
@@ -35,6 +35,23 @@ describe("interrupted chat execution", () => {
   let f: Fixture;
   beforeEach(async () => { f = await fixture(); });
   afterEach(async () => { await f.close(); });
+
+  it("injects the current project MCP into a cloud Agy turn and streams its response", async () => {
+    const bin = join(f.root, "agy-fixture.mjs");
+    writeFileSync(bin, readFileSync(new URL("./fixtures/agy-acp.mjs", import.meta.url)), { mode: 0o755 });
+    vi.stubEnv("RELAYDESK_AGY_BIN", bin);
+    vi.stubEnv("RELAYDESK_SPACE_DIR", undefined);
+    const projectId = await f.project();
+    const stream: ChatStreamEvent[] = [];
+    const result = await runWebCliChatTurn({
+      dbPath: f.dbPath, project: toAgentProject(f.srv.store.getProjectRow(projectId)),
+      session: f.srv.store.createChatSession(projectId, { runtime: "agy" }),
+      attachments: [], priorMessages: [], prompt: "run", signal: new AbortController().signal,
+      onEvent: event => stream.push(event),
+    });
+    expect(result).toMatchObject({ status: "done", content: "fixture Agy reply", externalSessionId: "local-agy-thread" });
+    expect(stream).toContainEqual({ type: "text_delta", delta: "fixture Agy reply" });
+  });
 
   it.each(["codex", "claude"] as const)("keeps the first %s thread, text and tool result on cloud idle timeout", async runtime => {
     vi.stubEnv("RELAYDESK_CHAT_IDLE_TIMEOUT_MS", "1000");

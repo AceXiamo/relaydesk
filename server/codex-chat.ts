@@ -1,3 +1,4 @@
+import { agyAcpTurn, type AgyAcpOptions } from "./agy-acp.ts";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -446,6 +447,7 @@ function runSingleCliAttempt(params: {
   cwd: string;
   env: NodeJS.ProcessEnv;
   stdinPrompt: string;
+  acp?: AgyAcpOptions;
   secrets: string[];
   signal: AbortSignal;
   onEvent: (event: ChatStreamEvent) => void;
@@ -517,7 +519,8 @@ function runSingleCliAttempt(params: {
       signal.addEventListener("abort", onSignalAbort, { once: true });
     }
 
-    proc.stdout?.setEncoding("utf8").on("data", (chunk: string) => parser.write(chunk));
+    const turn = params.acp && proc.stdin ? agyAcpTurn(params.acp, cwd, params.resumeId, stdinPrompt, proc.stdin, parser.write) : null;
+    proc.stdout?.setEncoding("utf8").on("data", (chunk: string) => (turn ?? parser).write(chunk));
 
     proc.stderr?.on("data", (chunk: Buffer) => {
       if (stderrBuf.length < 8000) {
@@ -534,6 +537,8 @@ function runSingleCliAttempt(params: {
       if (activeSessionProcesses.get(sessionId)?.abort === doAbort) {
         activeSessionProcesses.delete(sessionId);
       }
+      turn?.close();
+      if (turn && state.errorMessage && exitCode === 0) exitCode = 1;
       await parser.finish(exitCode === 0 && !aborted);
       state.text = redactSecrets(state.text, secrets);
       resolve({
@@ -555,7 +560,8 @@ function runSingleCliAttempt(params: {
 
     proc.stdin?.on("error", () => { /* The CLI may exit before reading stdin. */ });
     try {
-      proc.stdin?.end(formatCliStdinPrompt(runtime, stdinPrompt), "utf8");
+      if (turn) turn.start();
+      else proc.stdin?.end(formatCliStdinPrompt(runtime, stdinPrompt), "utf8");
     } catch {
       // ignore EPIPE if process exited immediately
     }
@@ -648,6 +654,9 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       });
     }
   } catch {
+    if (session.runtime === "agy") {
+      return { ...interrupted, status: "error", error: "无法启动本轮 Relaydesk MCP 服务" };
+    }
     mcpHandle = null;
   }
 
@@ -723,6 +732,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
             mcp: {
               url: mcpHandle.url,
               tokenEnvVar: "RELAYDESK_MCP_TOKEN",
+              ...(session.runtime === "agy" ? { agyToken: mcpHandle.token } : {}),
               ...(claudeMcpConfigPath ? { claudeConfigPath: claudeMcpConfigPath } : {}),
             },
           }
@@ -738,6 +748,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       runtime: session.runtime,
       bin,
       args: invocation.args,
+      acp: invocation.acp,
       cwd: workspace.workspaceDir,
       env: invocation.env,
       stdinPrompt,
