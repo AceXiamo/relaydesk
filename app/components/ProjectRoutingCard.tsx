@@ -431,20 +431,18 @@ export function ProjectRoutingCard({
                   }
                 />
               </div>
-              <div className="space-y-1.5">
-                <p className="text-xs text-[var(--text-secondary)]">推理强度</p>
-                <LocalAgentEffortSelect
-                  runtime={effectiveTaskRuntime}
-                  agent={resolvedTaskAgent.agent}
-                  model={routing.task_model ?? ""}
-                  value={routing.task_reasoning_effort ?? "default"}
-                  disabled={savingRouting}
-                  size="sm"
-                  fullWidth
-                  ariaLabel="任务推理强度"
-                  onChange={(value) => void saveRouting({ task_reasoning_effort: value })}
-                />
-              </div>
+              <LocalAgentEffortSelect
+                showLabel
+                runtime={effectiveTaskRuntime}
+                agent={resolvedTaskAgent.agent}
+                model={routing.task_model ?? ""}
+                value={routing.task_reasoning_effort ?? "default"}
+                disabled={savingRouting}
+                size="sm"
+                fullWidth
+                ariaLabel="任务推理强度"
+                onChange={(value) => void saveRouting({ task_reasoning_effort: value })}
+              />
               <p className="text-[11px] text-[var(--text-muted)] sm:col-span-2 lg:col-span-3">
                 {resolvedTaskAgent.agent
                   ? `模型目录来自本机节点「${resolvedTaskAgent.agent.name}」${resolvedTaskAgent.ready ? "（在线就绪）" : resolvedTaskAgent.reason ? `（${resolvedTaskAgent.reason}）` : ""}；每个任务也可以在「Agent 执行」页单独指定节点、Harness 与模型。`

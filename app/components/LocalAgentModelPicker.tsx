@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import {
   effortLabels,
+  showEffortControl,
   resolveDefaultModelForTarget,
   resolveLocalTaskAgent,
   resolveLocalTaskModelCatalog,
@@ -636,6 +637,7 @@ export function LocalAgentEffortSelect({
   fullWidth = false,
   ariaLabel = "推理强度",
   className,
+  showLabel,
   onChange,
 }: {
   runtime: ChatRuntime;
@@ -647,6 +649,7 @@ export function LocalAgentEffortSelect({
   fullWidth?: boolean;
   ariaLabel?: string;
   className?: string;
+  showLabel?: boolean;
   onChange: (effort: ChatReasoningEffort) => void;
 }) {
   const catalog = useMemo(
@@ -695,7 +698,9 @@ export function LocalAgentEffortSelect({
     return list;
   }, [levels, agent, runtime]);
 
-  return (
+  if (!showEffortControl(runtime, current)) return null;
+
+  const select = (
     <Select
       value={displayed}
       onChange={onChange}
@@ -715,4 +720,10 @@ export function LocalAgentEffortSelect({
       className={className}
     />
   );
+  return showLabel ? (
+    <div className="space-y-1.5">
+      <p className="text-xs text-[var(--text-secondary)]">推理强度</p>
+      {select}
+    </div>
+  ) : select;
 }

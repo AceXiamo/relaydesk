@@ -503,20 +503,18 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                     onChange={handleSelectModel}
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <p className="text-[11.5px] font-medium text-[var(--text-secondary)]">推理强度</p>
-                  <LocalAgentEffortSelect
-                    runtime={activeRuntime}
-                    agent={resolvedAgent.agent}
-                    model={activeModel}
-                    value={activeEffort}
-                    disabled={dispatching}
-                    size="sm"
-                    fullWidth
-                    ariaLabel="任务推理强度"
-                    onChange={handleSelectEffort}
-                  />
-                </div>
+                <LocalAgentEffortSelect
+                  showLabel
+                  runtime={activeRuntime}
+                  agent={resolvedAgent.agent}
+                  model={activeModel}
+                  value={activeEffort}
+                  disabled={dispatching}
+                  size="sm"
+                  fullWidth
+                  ariaLabel="任务推理强度"
+                  onChange={handleSelectEffort}
+                />
               </div>
 
               {routing !== undefined && !resolvedAgent.ready && resolvedAgent.reason && (

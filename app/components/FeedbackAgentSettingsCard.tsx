@@ -481,25 +481,21 @@ export function FeedbackAgentSettingsCard({
               />
             </div>
 
-            <div className="space-y-1.5">
-              <p className="text-[12px] font-medium text-[var(--text-secondary)]">
-                推理强度
-              </p>
-              <LocalAgentEffortSelect
-                runtime={runtime}
-                agent={activeAgent}
-                model={model}
-                value={reasoningEffort}
-                disabled={saving}
-                size="sm"
-                fullWidth
-                ariaLabel="反馈诊断推理强度"
-                onChange={(next) => {
-                  setReasoningEffort(next);
-                  setSaveError(null);
-                }}
-              />
-            </div>
+            <LocalAgentEffortSelect
+              showLabel
+              runtime={runtime}
+              agent={activeAgent}
+              model={model}
+              value={reasoningEffort}
+              disabled={saving}
+              size="sm"
+              fullWidth
+              ariaLabel="反馈诊断推理强度"
+              onChange={(next) => {
+                setReasoningEffort(next);
+                setSaveError(null);
+              }}
+            />
           </div>
 
           {/* System Prompt */}

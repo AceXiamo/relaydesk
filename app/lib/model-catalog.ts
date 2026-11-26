@@ -144,6 +144,12 @@ export function resolveActiveLocalAgent(
   return null;
 }
 
+export function showEffortControl(runtime: ChatRuntime, entry?: ModelCatalogItem): boolean {
+  if (runtime !== "agy") return true;
+  if (entry?.supports_effort === false) return false;
+  return entry?.effort_levels ? entry.effort_levels.length > 0 : entry?.supports_effort === true;
+}
+
 export function fastSupportForTarget(
   entry: ModelCatalogItem | undefined,
   agent: BridgeAgentSummary | null,

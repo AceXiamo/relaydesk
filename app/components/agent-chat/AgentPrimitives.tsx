@@ -19,6 +19,7 @@ import {
 } from "./SubagentDock.tsx";
 import {
   effortLabels,
+  showEffortControl,
   fastSupportForTarget,
   resolveActiveLocalAgent,
   resolveCatalogForTarget,
@@ -1063,14 +1064,14 @@ function ModelControls({
     () => new Set(strictTargetCatalog.map((item) => item.id)),
     [strictTargetCatalog],
   );
-  const current = catalog.find((item) => item.id === model);
+  const configuredModel = resolveDefaultModelForTarget(runtime, activeLocalAgent, settings);
+  const current = catalog.find((item) => item.id === (model || configuredModel));
   const levels = current?.effort_levels ?? effortLevels;
   const adjustable = current?.supports_effort !== false && levels.length > 0;
   const fastSupported = fastSupportForTarget(current, activeLocalAgent, executionTarget, runtimeInfo);
   const harnessFast = activeLocalAgent?.runtimes.codex?.default_fast_mode;
   const displayedEffort =
     adjustable && (effort === "default" || levels.includes(effort)) ? effort : "default";
-  const configuredModel = resolveDefaultModelForTarget(runtime, activeLocalAgent, settings);
   const search = query.trim();
   const matches = catalog.filter((item) =>
     `${item.id} ${item.label ?? ""}`.toLowerCase().includes(search.toLowerCase()),
@@ -1386,32 +1387,34 @@ function ModelControls({
           }}
         />
       )}
-      <Select
-        value={displayedEffort}
-        onChange={(next) => {
-          setOpen(false);
-          onChangeEffort(next);
-        }}
-        options={effortOptions}
-        disabled={!adjustable || disabled}
-        size="xs"
-        variant="default"
-        minMenuWidth={268}
-        maxMenuWidth={300}
-        leadingIcon="sparkles"
-        leadingIconClassName={
-          displayedEffort !== "default" && displayedEffort !== "off"
-            ? "text-indigo-500"
-            : "text-[var(--text-muted)]"
-        }
-        ariaLabel={adjustable ? "思考强度" : "该模型不支持调节思考强度"}
-        className={cn(
-          "!border-transparent !bg-transparent hover:!bg-[var(--surface-hover)] hover:!border-[var(--border-subtle)] !px-2 shrink-0",
-          displayedEffort !== "default" &&
-            displayedEffort !== "off" &&
-            "!bg-indigo-500/8 !text-indigo-700 dark:!text-indigo-300",
-        )}
-      />
+      {showEffortControl(runtime, current) && (
+        <Select
+          value={displayedEffort}
+          onChange={(next) => {
+            setOpen(false);
+            onChangeEffort(next);
+          }}
+          options={effortOptions}
+          disabled={!adjustable || disabled}
+          size="xs"
+          variant="default"
+          minMenuWidth={268}
+          maxMenuWidth={300}
+          leadingIcon="sparkles"
+          leadingIconClassName={
+            displayedEffort !== "default" && displayedEffort !== "off"
+              ? "text-indigo-500"
+              : "text-[var(--text-muted)]"
+          }
+          ariaLabel={adjustable ? "思考强度" : "该模型不支持调节思考强度"}
+          className={cn(
+            "!border-transparent !bg-transparent hover:!bg-[var(--surface-hover)] hover:!border-[var(--border-subtle)] !px-2 shrink-0",
+            displayedEffort !== "default" &&
+              displayedEffort !== "off" &&
+              "!bg-indigo-500/8 !text-indigo-700 dark:!text-indigo-300",
+          )}
+        />
+      )}
     </div>
   );
 }
