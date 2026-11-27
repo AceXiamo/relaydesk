@@ -67,6 +67,20 @@ describe("local bridge model discovery", () => {
     expect(JSON.stringify(result)).not.toMatch(/private-value|in-a-description|not-a-model|claude-sonnet-4-6|my codex/);
   });
 
+  it("discovers listed Codex cache entries while preserving explicit models and defaults", async () => {
+    await writeFile(join(homeDir, ".codex/config.toml"), 'model = "gpt-6.2-astra"');
+    await json(join(homeDir, ".codex/models_cache.json"), { models: [
+      { slug: "gpt-6.2-sol", visibility: "list", context_window: 272000, additional_speed_tiers: ["fast"] },
+      { slug: "gpt-6.2-astra", visibility: "list", context_window: 272000 },
+      { slug: "internal", visibility: "hide" }, { slug: "legacy" }, { slug: "-invalid", visibility: "list" },
+    ] });
+    const { models } = await detectBridgeCatalog({}, { homeDir, configDir });
+    expect(models).toEqual([
+      { runtime: "codex", id: "gpt-6.2-astra", source: "cli_config", is_default: true, context_window: 272000 },
+      { runtime: "codex", id: "gpt-6.2-sol", source: "detected", context_window: 272000, supports_fast: true },
+    ]);
+  });
+
   it("distinguishes Fast capability, configured tier, and absent telemetry", async () => {
     const config = { models: ["legacy", "standard", "unknown", "confirmed", "manual"].map(id => ({ runtime: "codex", id, ...(id === "manual" && { supports_fast: false }) })) };
     await json(join(homeDir, ".codex/models_cache.json"), { models: [

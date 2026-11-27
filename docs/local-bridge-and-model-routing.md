@@ -265,7 +265,7 @@ Bridge 启动及文件变更时按以下优先级合并模型目录（高优先�
 1. **用户显式配置**：`config.json` 中的 `models`（最高优先级，支持声明自定义网关/代理的所有模型、自定义 `context_window` 与 `effort_levels`）。
 2. **本机 CLI 原生配置解析（只读解析，绝不上报任何密钥/Token）**：
    - **Claude Code**：读取 `~/.claude/settings.json`（及 `~/.claude/settings.local.json`），提取 `model`、`availableModels` / `models`（如存在）、`env.ANTHROPIC_MODEL`、`env.ANTHROPIC_DEFAULT_OPUS_MODEL` / `SONNET` / `HAIKU`、`effortLevel` 等非敏感字段。
-   - **Codex CLI**：读取 `~/.codex/config.toml`，提取顶级 `model`、`model_reasoning_effort`、各 `[profiles.*]` 下的 `model` 与 `model_reasoning_effort`。
+   - **Codex CLI**：读取 `~/.codex/config.toml`，提取顶级 `model`、`model_reasoning_effort`、各 `[profiles.*]` 下的 `model` 与 `model_reasoning_effort`。同时收录同目录 `models_cache.json` 中 `visibility` 为 `list` 的模型，保留显式配置的默认模型。
    - **可选自定义模型表路径**：支持在 `config.json` 指定 `model_catalog_files: ["~/.claude/models.json"]`，方便用户复用已维护的本地模型清单。
 3. **上下文窗口**按运行时和完整模型 ID 匹配。Bridge 优先保留显式填写的容量。Codex 读取顶级或对应 profile 的 `model_context_window`，其次读取 `models_cache.json` 的 `context_window`。Claude 可读取模型条目和选择器显式声明的窗口，也可从 `cache/model-capabilities.json` 的 `max_input_tokens` 补全。缓存变化会触发目录刷新。缺少可靠容量时，模型行省略窗口。内置表仍可补全 `effort_levels` 等其他元数据。
 4. **热更新**：Bridge 使用 `fs.watch`（500ms 防抖）监听 `config.json` 与上述 CLI 配置文件，变更后自动推送 `catalog.sync` 给云端，无需重启；Web 端也提供「刷新目录」按钮触发 `catalog.refresh`。

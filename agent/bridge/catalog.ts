@@ -300,7 +300,6 @@ export async function detectBridgeCatalog(config: BridgeCatalogConfig, options: 
   if (agyDetectedModels.length > 0) {
     add(agyDetectedModels, "detected");
   }
-  // Caches describe capabilities. They do not select models or grant access to them.
   for (const { runtime, models } of caches) {
     if (!Array.isArray(models)) continue;
     for (const entry of models) {
@@ -308,6 +307,7 @@ export async function detectBridgeCatalog(config: BridgeCatalogConfig, options: 
       const id = runtime === "codex" ? row.slug : row.id;
       const window = runtime === "codex" ? row.context_window : row.max_input_tokens;
       if (typeof id !== "string") continue;
+      if (runtime === "codex" && row.visibility === "list") add([{ runtime, id }], "detected");
       const model = items.get(`${runtime}:${id}`);
       if (!model) continue;
       if (model.context_window === undefined && validCatalogTokenLimit(window)) model.context_window = window;
