@@ -19,6 +19,11 @@ import type {
   GithubRepoWarning,
   GithubReposPayload,
   GithubTokenType,
+  RepoBranchChangedFile,
+  RepoBranchCommitItem,
+  RepoBranchComparison,
+  RepoBranchDetailPayload,
+  RepoBranchPullRequest,
 } from "../app/lib/types.ts";
 
 export class GithubError extends Error {
@@ -1339,11 +1344,75 @@ export async function fetchGithubRepositoriesAcrossConnections(
 interface RawGithubBranch {
   name?: string;
   protected?: boolean;
+  commit?: { sha?: string };
 }
 
 interface RawGithubRepoMeta {
   default_branch?: string;
   full_name?: string;
+  html_url?: string;
+  private?: boolean;
+}
+
+interface RawGithubPull {
+  number?: number;
+  title?: string;
+  html_url?: string;
+  draft?: boolean;
+  updated_at?: string;
+  created_at?: string;
+  user?: { login?: string } | null;
+  head?: {
+    ref?: string;
+    sha?: string;
+    repo?: { full_name?: string } | null;
+  } | null;
+  base?: {
+    ref?: string;
+  } | null;
+}
+
+interface RawGithubCommit {
+  sha?: string;
+  html_url?: string;
+  commit?: {
+    message?: string;
+    author?: { name?: string; date?: string } | null;
+    committer?: { date?: string } | null;
+  } | null;
+  author?: { login?: string; avatar_url?: string } | null;
+}
+
+interface RawGithubCompareFile {
+  filename?: string;
+  status?: string;
+  additions?: number;
+  deletions?: number;
+}
+
+interface RawGithubCompare {
+  status?: string;
+  ahead_by?: number;
+  behind_by?: number;
+  total_commits?: number;
+  html_url?: string;
+  files?: RawGithubCompareFile[];
+}
+
+export interface GithubRemoteBranchItem {
+  name: string;
+  protected: boolean;
+  sha: string;
+}
+
+export interface GithubRepoBranchOverview {
+  repo: string;
+  html_url: string;
+  private: boolean;
+  default_branch: string;
+  branches: GithubRemoteBranchItem[];
+  pulls_by_branch: Record<string, RepoBranchPullRequest>;
+  prs_unavailable: boolean;
 }
 
 const VALID_GITHUB_REPO_RE = /^([\w.-]+)\/([\w.-]+)$/;
@@ -1361,6 +1430,151 @@ export function parseGithubRepoSlug(raw: string): { owner: string; name: string;
 
 function hasNextPageLink(linkHeader: string): boolean {
   return /<[^>]+>;\s*rel="next"/i.test(linkHeader);
+}
+
+function throwGithubHttpError(status: number): never {
+  if (status === 401) {
+    throw new GithubError("GitHub Token 无效或已过期，请检查后重试。");
+  }
+  if (status === 403) {
+    throw new GithubError("GitHub 拒绝了请求，请检查 Token 权限或 API 配额。");
+  }
+  if (status === 404) {
+    throw new GithubError("未找到该仓库或当前 GitHub Key 无权访问。");
+  }
+  throw new GithubError(`GitHub 返回 ${status}，请稍后重试。`);
+}
+
+function normalizeGithubWebUrl(raw: unknown, fallback: string): string {
+  if (typeof raw !== "string" || !raw.trim()) return fallback;
+  try {
+    const parsed = new URL(raw.trim());
+    if (parsed.protocol === "https:") return parsed.toString();
+  } catch {
+    // fallback
+  }
+  return fallback;
+}
+
+function isSafeGithubRefInput(value: string): boolean {
+  if (!value || value.length > 160 || value.startsWith("-")) return false;
+  if (/[\x00-\x1f\x7f\s~^:?*[\]\\]/.test(value)) return false;
+  if (value === "@" || value.startsWith("/") || value.endsWith("/")) return false;
+  if (value.startsWith(".") || value.endsWith(".") || value.includes("..") || value.includes("//") || value.includes("@{")) {
+    return false;
+  }
+  return value.split("/").every((part) => Boolean(part) && !part.startsWith(".") && !part.endsWith(".lock"));
+}
+
+function encodeGithubRefPath(ref: string): string {
+  return ref
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+}
+
+function orderConnectionsForOwner(
+  connections: StoredGithubConnection[],
+  owner: string,
+): StoredGithubConnection[] {
+  const ownerLower = owner.toLowerCase();
+  const scopedMatch = connections.filter(
+    (c) => c.scope_owner && c.scope_owner.login.toLowerCase() === ownerLower,
+  );
+  const unscopedMatch = connections.filter(
+    (c) =>
+      !c.scope_owner &&
+      c.owners.some((o) => o.login.toLowerCase() === ownerLower),
+  );
+  const unscopedOther = connections.filter(
+    (c) =>
+      !c.scope_owner &&
+      !c.owners.some((o) => o.login.toLowerCase() === ownerLower),
+  );
+  const scopedOther = connections.filter(
+    (c) => c.scope_owner && c.scope_owner.login.toLowerCase() !== ownerLower,
+  );
+
+  return [
+    ...scopedMatch,
+    ...unscopedMatch,
+    ...unscopedOther,
+    ...(scopedMatch.length === 0 && unscopedMatch.length === 0 && unscopedOther.length === 0
+      ? scopedOther
+      : []),
+  ];
+}
+
+async function runAcrossOrderedConnections<T>(
+  connections: StoredGithubConnection[],
+  repo: string,
+  fn: (token: string, canonicalRepo: string) => Promise<T>,
+  fallbackError: string,
+): Promise<T> {
+  const parsed = parseGithubRepoSlug(repo);
+  if (!parsed) {
+    throw new GithubError("无效的仓库格式，请使用 owner/repo。");
+  }
+  if (connections.length === 0) {
+    throw new GithubError("尚未配置 GitHub Key。");
+  }
+  const ordered = orderConnectionsForOwner(connections, parsed.owner);
+  let lastError: Error | null = null;
+  for (const conn of ordered) {
+    try {
+      return await fn(conn.token, parsed.fullName);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new GithubError("GitHub 请求失败");
+    }
+  }
+  throw lastError instanceof GithubError
+    ? lastError
+    : new GithubError(lastError?.message || fallbackError);
+}
+
+async function collectPaginatedBranches(
+  token: string,
+  encodedOwner: string,
+  encodedName: string,
+  apiBase: string,
+  firstRes: { ok: boolean; status: number; data: RawGithubBranch[] | null; link: string },
+): Promise<Map<string, GithubRemoteBranchItem>> {
+  if (!firstRes.ok) {
+    throwGithubHttpError(firstRes.status);
+  }
+
+  const branchMap = new Map<string, GithubRemoteBranchItem>();
+  const collect = (rawList: RawGithubBranch[] | null) => {
+    if (!Array.isArray(rawList)) return;
+    for (const raw of rawList) {
+      if (raw && typeof raw.name === "string" && raw.name.trim()) {
+        const name = raw.name.trim();
+        if (!branchMap.has(name)) {
+          const sha = typeof raw.commit?.sha === "string" ? raw.commit.sha.trim() : "";
+          branchMap.set(name, { name, protected: Boolean(raw.protected), sha });
+        }
+      }
+    }
+  };
+
+  collect(firstRes.data);
+
+  // Follow up to 2 additional pages (max 300 branches) if paginated
+  let page = 1;
+  let lastLink = firstRes.link;
+  while (page < 3 && hasNextPageLink(lastLink)) {
+    page += 1;
+    const nextRes = await githubRequest<RawGithubBranch[]>(
+      token,
+      `/repos/${encodedOwner}/${encodedName}/branches?per_page=100&page=${page}`,
+      apiBase,
+    );
+    if (!nextRes.ok) break;
+    collect(nextRes.data);
+    lastLink = nextRes.link;
+  }
+
+  return branchMap;
 }
 
 export async function fetchGithubBranches(
@@ -1385,22 +1599,13 @@ export async function fetchGithubBranches(
     ),
   ]);
 
-  const checkErr = (status: number) => {
-    if (status === 401) {
-      throw new GithubError("GitHub Token 无效或已过期，请检查后重试。");
-    }
-    if (status === 403) {
-      throw new GithubError("GitHub 拒绝了请求，请检查 Token 权限或 API 配额。");
-    }
-    if (status === 404) {
-      throw new GithubError("未找到该仓库或当前 GitHub Key 无权访问。");
-    }
-    throw new GithubError(`GitHub 返回 ${status}，请稍后重试。`);
-  };
-
-  if (!firstBranchesRes.ok) {
-    checkErr(firstBranchesRes.status);
-  }
+  const branchMap = await collectPaginatedBranches(
+    token,
+    encodedOwner,
+    encodedName,
+    apiBase,
+    firstBranchesRes,
+  );
 
   const defaultBranch =
     repoRes.ok && typeof repoRes.data?.default_branch === "string"
@@ -1411,47 +1616,19 @@ export async function fetchGithubBranches(
       ? repoRes.data.full_name
       : parsed.fullName;
 
-  const branchMap = new Map<string, GithubBranchItem>();
-  const collect = (rawList: RawGithubBranch[] | null) => {
-    if (!Array.isArray(rawList)) return;
-    for (const raw of rawList) {
-      if (raw && typeof raw.name === "string" && raw.name.trim()) {
-        const name = raw.name.trim();
-        if (!branchMap.has(name)) {
-          branchMap.set(name, { name, protected: Boolean(raw.protected) });
-        }
-      }
-    }
-  };
-
-  collect(firstBranchesRes.data);
-
-  // Follow up to 2 additional pages (max 300 branches) if paginated
-  let page = 1;
-  let lastLink = firstBranchesRes.link;
-  while (page < 3 && hasNextPageLink(lastLink)) {
-    page += 1;
-    const nextRes = await githubRequest<RawGithubBranch[]>(
-      token,
-      `/repos/${encodedOwner}/${encodedName}/branches?per_page=100&page=${page}`,
-      apiBase,
-    );
-    if (!nextRes.ok) break;
-    collect(nextRes.data);
-    lastLink = nextRes.link;
-  }
-
   if (defaultBranch && !branchMap.has(defaultBranch)) {
-    branchMap.set(defaultBranch, { name: defaultBranch, protected: false });
+    branchMap.set(defaultBranch, { name: defaultBranch, protected: false, sha: "" });
   }
 
-  const items = Array.from(branchMap.values()).sort((a, b) => {
-    if (defaultBranch) {
-      if (a.name === defaultBranch) return -1;
-      if (b.name === defaultBranch) return 1;
-    }
-    return a.name.localeCompare(b.name);
-  });
+  const items: GithubBranchItem[] = Array.from(branchMap.values())
+    .sort((a, b) => {
+      if (defaultBranch) {
+        if (a.name === defaultBranch) return -1;
+        if (b.name === defaultBranch) return 1;
+      }
+      return a.name.localeCompare(b.name);
+    })
+    .map((item) => ({ name: item.name, protected: item.protected }));
 
   return {
     repo: canonicalRepo,
@@ -1466,51 +1643,282 @@ export async function fetchGithubBranchesAcrossConnections(
   repo: string,
   apiBaseOverride?: string,
 ): Promise<GithubBranchesPayload> {
+  return runAcrossOrderedConnections(
+    connections,
+    repo,
+    (token, fullName) => fetchGithubBranches(token, fullName, apiBaseOverride),
+    "所有已配置的 GitHub Key 均无法读取该仓库的分支列表。",
+  );
+}
+
+export async function fetchGithubRepoBranchOverview(
+  token: string,
+  repo: string,
+  apiBaseOverride?: string,
+): Promise<GithubRepoBranchOverview> {
   const parsed = parseGithubRepoSlug(repo);
   if (!parsed) {
     throw new GithubError("无效的仓库格式，请使用 owner/repo。");
   }
-  if (connections.length === 0) {
-    throw new GithubError("尚未配置 GitHub Key。");
+  const apiBase = getGithubApiBase(apiBaseOverride);
+  const encodedOwner = encodeURIComponent(parsed.owner);
+  const encodedName = encodeURIComponent(parsed.name);
+
+  const [repoRes, firstBranchesRes, pullsRes] = await Promise.all([
+    githubRequest<RawGithubRepoMeta>(token, `/repos/${encodedOwner}/${encodedName}`, apiBase),
+    githubRequest<RawGithubBranch[]>(
+      token,
+      `/repos/${encodedOwner}/${encodedName}/branches?per_page=100&page=1`,
+      apiBase,
+    ),
+    githubRequest<RawGithubPull[]>(
+      token,
+      `/repos/${encodedOwner}/${encodedName}/pulls?state=open&per_page=100`,
+      apiBase,
+    ).catch(() => ({ ok: false, status: 0, data: null as RawGithubPull[] | null, link: "" })),
+  ]);
+
+  const branchMap = await collectPaginatedBranches(
+    token,
+    encodedOwner,
+    encodedName,
+    apiBase,
+    firstBranchesRes,
+  );
+
+  const defaultBranch =
+    repoRes.ok && typeof repoRes.data?.default_branch === "string"
+      ? repoRes.data.default_branch.trim()
+      : "";
+  const canonicalRepo =
+    repoRes.ok && typeof repoRes.data?.full_name === "string" && repoRes.data.full_name.includes("/")
+      ? repoRes.data.full_name
+      : parsed.fullName;
+  const htmlUrl = normalizeGithubWebUrl(
+    repoRes.ok ? repoRes.data?.html_url : undefined,
+    `https://github.com/${canonicalRepo}`,
+  );
+  const isPrivate = repoRes.ok ? Boolean(repoRes.data?.private) : false;
+
+  if (defaultBranch && !branchMap.has(defaultBranch)) {
+    branchMap.set(defaultBranch, { name: defaultBranch, protected: false, sha: "" });
   }
 
-  const ownerLower = parsed.owner.toLowerCase();
-  const scopedMatch = connections.filter(
-    (c) => c.scope_owner && c.scope_owner.login.toLowerCase() === ownerLower,
-  );
-  const unscopedMatch = connections.filter(
-    (c) =>
-      !c.scope_owner &&
-      c.owners.some((o) => o.login.toLowerCase() === ownerLower),
-  );
-  const unscopedOther = connections.filter(
-    (c) =>
-      !c.scope_owner &&
-      !c.owners.some((o) => o.login.toLowerCase() === ownerLower),
-  );
-  const scopedOther = connections.filter(
-    (c) => c.scope_owner && c.scope_owner.login.toLowerCase() !== ownerLower,
-  );
+  const prsUnavailable = !pullsRes.ok || !Array.isArray(pullsRes.data);
+  const pullsByBranch: Record<string, RepoBranchPullRequest> = {};
+  if (!prsUnavailable && Array.isArray(pullsRes.data)) {
+    for (const raw of pullsRes.data) {
+      if (!raw || typeof raw.number !== "number") continue;
+      const headRef = typeof raw.head?.ref === "string" ? raw.head.ref.trim() : "";
+      if (!headRef) continue;
+      const headRepoName = typeof raw.head?.repo?.full_name === "string" ? raw.head.repo.full_name : "";
+      if (headRepoName && headRepoName.toLowerCase() !== canonicalRepo.toLowerCase()) continue;
 
-  const ordered = [
-    ...scopedMatch,
-    ...unscopedMatch,
-    ...unscopedOther,
-    ...(scopedMatch.length === 0 && unscopedMatch.length === 0 && unscopedOther.length === 0
-      ? scopedOther
-      : []),
-  ];
+      const updatedAt =
+        (typeof raw.updated_at === "string" && raw.updated_at) ||
+        (typeof raw.created_at === "string" && raw.created_at) ||
+        "";
+      const prev = pullsByBranch[headRef];
+      if (prev && prev.updated_at >= updatedAt) continue;
 
-  let lastError: Error | null = null;
-  for (const conn of ordered) {
-    try {
-      return await fetchGithubBranches(conn.token, parsed.fullName, apiBaseOverride);
-    } catch (err) {
-      lastError = err instanceof Error ? err : new GithubError("GitHub 请求失败");
+      pullsByBranch[headRef] = {
+        number: raw.number,
+        title: typeof raw.title === "string" ? raw.title.trim() : `PR #${raw.number}`,
+        html_url: normalizeGithubWebUrl(
+          raw.html_url,
+          `${htmlUrl}/pull/${raw.number}`,
+        ),
+        draft: Boolean(raw.draft),
+        base_ref: typeof raw.base?.ref === "string" ? raw.base.ref.trim() : defaultBranch,
+        author: typeof raw.user?.login === "string" ? raw.user.login.trim() : "",
+        updated_at: updatedAt,
+      };
     }
   }
-  throw lastError instanceof GithubError
-    ? lastError
-    : new GithubError(lastError?.message || "所有已配置的 GitHub Key 均无法读取该仓库的分支列表。");
+
+  const branches = Array.from(branchMap.values()).sort((a, b) => {
+    if (defaultBranch) {
+      if (a.name === defaultBranch) return -1;
+      if (b.name === defaultBranch) return 1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
+  return {
+    repo: canonicalRepo,
+    html_url: htmlUrl,
+    private: isPrivate,
+    default_branch: defaultBranch,
+    branches,
+    pulls_by_branch: pullsByBranch,
+    prs_unavailable: prsUnavailable,
+  };
+}
+
+export async function fetchGithubRepoBranchOverviewAcrossConnections(
+  connections: StoredGithubConnection[],
+  repo: string,
+  apiBaseOverride?: string,
+): Promise<GithubRepoBranchOverview> {
+  return runAcrossOrderedConnections(
+    connections,
+    repo,
+    (token, fullName) => fetchGithubRepoBranchOverview(token, fullName, apiBaseOverride),
+    "所有已配置的 GitHub Key 均无法读取该仓库的分支信息。",
+  );
+}
+
+export async function fetchGithubBranchDetail(
+  token: string,
+  repo: string,
+  branch: string,
+  baseBranch = "",
+  apiBaseOverride?: string,
+): Promise<RepoBranchDetailPayload> {
+  const parsed = parseGithubRepoSlug(repo);
+  if (!parsed) {
+    throw new GithubError("无效的仓库格式，请使用 owner/repo。");
+  }
+  const cleanBranch = branch.trim();
+  if (!isSafeGithubRefInput(cleanBranch)) {
+    throw new GithubError("无效的分支名称。");
+  }
+  const cleanBase = baseBranch.trim();
+  if (cleanBase && !isSafeGithubRefInput(cleanBase)) {
+    throw new GithubError("无效的基线分支名称。");
+  }
+
+  const apiBase = getGithubApiBase(apiBaseOverride);
+  const encodedOwner = encodeURIComponent(parsed.owner);
+  const encodedName = encodeURIComponent(parsed.name);
+  const shouldCompare = Boolean(cleanBase && cleanBase !== cleanBranch);
+
+  const [commitsRes, compareRes] = await Promise.all([
+    githubRequest<RawGithubCommit[]>(
+      token,
+      `/repos/${encodedOwner}/${encodedName}/commits?sha=${encodeURIComponent(cleanBranch)}&per_page=12`,
+      apiBase,
+    ),
+    shouldCompare
+      ? githubRequest<RawGithubCompare>(
+          token,
+          `/repos/${encodedOwner}/${encodedName}/compare/${encodeGithubRefPath(cleanBase)}...${encodeGithubRefPath(cleanBranch)}`,
+          apiBase,
+        ).catch(() => null)
+      : Promise.resolve(null),
+  ]);
+
+  if (!commitsRes.ok) {
+    throwGithubHttpError(commitsRes.status);
+  }
+
+  const commits: RepoBranchCommitItem[] = [];
+  if (Array.isArray(commitsRes.data)) {
+    for (const raw of commitsRes.data.slice(0, 12)) {
+      if (!raw || typeof raw.sha !== "string" || !raw.sha.trim()) continue;
+      const sha = raw.sha.trim();
+      const fullMsg = typeof raw.commit?.message === "string" ? raw.commit.message.trim() : "";
+      const firstLine = fullMsg.split(/\r?\n/, 1)[0]?.trim() ?? "";
+      const authorLogin =
+        typeof raw.author?.login === "string" ? raw.author.login.trim() : undefined;
+      const authorAvatar = normalizeAvatarUrl(raw.author?.avatar_url);
+      const authorName =
+        (typeof raw.commit?.author?.name === "string" && raw.commit.author.name.trim()) ||
+        authorLogin ||
+        "";
+      const date =
+        (typeof raw.commit?.author?.date === "string" && raw.commit.author.date) ||
+        (typeof raw.commit?.committer?.date === "string" && raw.commit.committer.date) ||
+        "";
+      const htmlUrl = normalizeGithubWebUrl(
+        raw.html_url,
+        `https://github.com/${parsed.fullName}/commit/${sha}`,
+      );
+      commits.push({
+        sha,
+        short_sha: sha.slice(0, 7),
+        message: firstLine || sha.slice(0, 7),
+        author_name: authorName,
+        ...(authorLogin ? { author_login: authorLogin } : {}),
+        ...(authorAvatar ? { author_avatar: authorAvatar } : {}),
+        date,
+        html_url: htmlUrl,
+      });
+    }
+  }
+
+  let compare: RepoBranchComparison | null = null;
+  if (compareRes && compareRes.ok && compareRes.data) {
+    const raw = compareRes.data;
+    const rawFiles = Array.isArray(raw.files) ? raw.files : [];
+    let additions = 0;
+    let deletions = 0;
+    const files: RepoBranchChangedFile[] = [];
+    for (let i = 0; i < rawFiles.length; i += 1) {
+      const f = rawFiles[i];
+      if (!f || typeof f.filename !== "string" || !f.filename.trim()) continue;
+      const add = typeof f.additions === "number" && Number.isFinite(f.additions) ? Math.max(0, f.additions) : 0;
+      const del = typeof f.deletions === "number" && Number.isFinite(f.deletions) ? Math.max(0, f.deletions) : 0;
+      additions += add;
+      deletions += del;
+      if (files.length < 20) {
+        files.push({
+          filename: f.filename,
+          status: typeof f.status === "string" && f.status ? f.status : "modified",
+          additions: add,
+          deletions: del,
+        });
+      }
+    }
+    const rawStatus = raw.status;
+    const status: RepoBranchComparison["status"] =
+      rawStatus === "ahead" ||
+      rawStatus === "behind" ||
+      rawStatus === "diverged" ||
+      rawStatus === "identical"
+        ? rawStatus
+        : "identical";
+    compare = {
+      base: cleanBase,
+      status,
+      ahead_by: typeof raw.ahead_by === "number" && Number.isFinite(raw.ahead_by) ? Math.max(0, raw.ahead_by) : 0,
+      behind_by: typeof raw.behind_by === "number" && Number.isFinite(raw.behind_by) ? Math.max(0, raw.behind_by) : 0,
+      total_commits:
+        typeof raw.total_commits === "number" && Number.isFinite(raw.total_commits)
+          ? Math.max(0, raw.total_commits)
+          : 0,
+      files_count: rawFiles.length,
+      additions,
+      deletions,
+      files,
+      html_url: normalizeGithubWebUrl(
+        raw.html_url,
+        `https://github.com/${parsed.fullName}/compare/${encodeGithubRefPath(cleanBase)}...${encodeGithubRefPath(cleanBranch)}`,
+      ),
+    };
+  }
+
+  return {
+    repo: parsed.fullName,
+    branch: cleanBranch,
+    source: "remote",
+    commits,
+    compare,
+  };
+}
+
+export async function fetchGithubBranchDetailAcrossConnections(
+  connections: StoredGithubConnection[],
+  repo: string,
+  branch: string,
+  baseBranch = "",
+  apiBaseOverride?: string,
+): Promise<RepoBranchDetailPayload> {
+  return runAcrossOrderedConnections(
+    connections,
+    repo,
+    (token, fullName) => fetchGithubBranchDetail(token, fullName, branch, baseBranch, apiBaseOverride),
+    "所有已配置的 GitHub Key 均无法读取该分支详情。",
+  );
 }
 

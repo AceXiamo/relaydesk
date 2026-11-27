@@ -6,6 +6,8 @@ import type {
   ChatContextRef,
   ProjectDetail,
   ProjectReposSyncStatus,
+  RepoBranchesOverviewPayload,
+  TaskRecord,
   WorkspaceDatabaseEntry,
   WorkspaceDatabaseKind,
   WorkspaceDbClientInfo,
@@ -25,6 +27,8 @@ import {
 } from "~/lib/workspace-media.ts";
 import { Icon } from "./Icon.tsx";
 import { MarkdownContent } from "./MarkdownContent.tsx";
+import { SegmentedDetent } from "./MotionPrimitives.tsx";
+import { RepoBranchesPanel } from "./RepoBranchesPanel.tsx";
 import { Select } from "./Select.tsx";
 import { WorkspaceMediaPreview } from "./WorkspaceMediaPreview.tsx";
 import { Button, EmptyState, Modal, useToast } from "./ui.tsx";
@@ -35,9 +39,11 @@ export type WorkspaceTab = "files" | "databases" | "handbook" | "deploy" | "repo
 
 interface ProjectWorkspaceViewProps {
   project: ProjectDetail | null;
+  tasks?: TaskRecord[];
   initialTab?: WorkspaceTab | null;
   onConsumeInitialTab?: () => void;
   onNewProject: () => void;
+  onSelectTask?: (taskId: string) => void;
   onOpenChatWithContext: (
     ref?: ChatContextRef,
     initialPrompt?: string,
@@ -226,9 +232,11 @@ function findMatchingDbClient(
 
 export function ProjectWorkspaceView({
   project,
+  tasks,
   initialTab,
   onConsumeInitialTab,
   onNewProject,
+  onSelectTask,
   onOpenChatWithContext,
 }: ProjectWorkspaceViewProps) {
   const toast = useToast();
@@ -319,11 +327,16 @@ export function ProjectWorkspaceView({
   const [reposStatus, setReposStatus] = useState<ProjectReposSyncStatus | null>(null);
   const [repoSyncing, setRepoSyncing] = useState(false);
   const [activeRepo, setActiveRepo] = useState("");
+  const [repoSubView, setRepoSubView] = useState<"branches" | "code">("branches");
+  const [repoBranches, setRepoBranches] = useState<RepoBranchesOverviewPayload | null>(null);
+  const [repoBranchesLoading, setRepoBranchesLoading] = useState(false);
+  const [repoBranchesError, setRepoBranchesError] = useState("");
   const [repoSubpath, setRepoSubpath] = useState("");
   const [repoEntries, setRepoEntries] = useState<WorkspaceRepoFileEntry[]>([]);
   const [repoListLoading, setRepoListLoading] = useState(false);
   const [repoFile, setRepoFile] = useState<WorkspaceRepoFileContent | null>(null);
   const [repoFileLoading, setRepoFileLoading] = useState(false);
+  const repoBranchesSeqRef = useRef(0);
 
   const fileUploadInputRef = useRef<HTMLInputElement>(null);
   const sqliteUploadInputRef = useRef<HTMLInputElement>(null);
@@ -431,6 +444,9 @@ export function ProjectWorkspaceView({
     setQueryError("");
     setRepoFile(null);
     setRepoSubpath("");
+    setRepoBranches(null);
+    setRepoBranchesError("");
+    setRepoSubView("branches");
     if (!projectId) return;
     void refreshFiles();
     void refreshDatabases();
@@ -822,7 +838,50 @@ export function ProjectWorkspaceView({
     }
   };
 
-  // Repo browsing
+  // Repo branches & code browsing
+  const loadRepoBranches = useCallback(
+    async (repo: string, signal?: AbortSignal) => {
+      if (!projectId || !repo) {
+        setRepoBranches(null);
+        setRepoBranchesError("");
+        return;
+      }
+      const seq = ++repoBranchesSeqRef.current;
+      setRepoBranchesLoading(true);
+      setRepoBranchesError("");
+      try {
+        const res = await api.getWorkspaceRepoBranches(projectId, repo, signal);
+        if (seq !== repoBranchesSeqRef.current) return;
+        setRepoBranches(res);
+      } catch (err) {
+        if (seq !== repoBranchesSeqRef.current) return;
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setRepoBranchesError(err instanceof Error ? err.message : "加载分支面板失败");
+      } finally {
+        if (seq === repoBranchesSeqRef.current) {
+          setRepoBranchesLoading(false);
+        }
+      }
+    },
+    [projectId],
+  );
+
+  const taskBranchDigest = useMemo(
+    () =>
+      (tasks ?? [])
+        .filter((t) => !t.merged_into)
+        .map((t) => `${t.id}:${t.status}:${t.delivery_ref}`)
+        .join("|"),
+    [tasks],
+  );
+
+  useEffect(() => {
+    if (tab !== "repos" || !activeRepo) return;
+    const controller = new AbortController();
+    void loadRepoBranches(activeRepo, controller.signal);
+    return () => controller.abort();
+  }, [tab, activeRepo, loadRepoBranches, taskBranchDigest]);
+
   const loadRepoDir = useCallback(
     async (repo: string, subpath: string) => {
       if (!projectId || !repo) {
@@ -846,14 +905,14 @@ export function ProjectWorkspaceView({
   );
 
   useEffect(() => {
-    if (tab !== "repos" || !activeRepo) return;
+    if (tab !== "repos" || repoSubView !== "code" || !activeRepo) return;
     const ready = reposStatus?.repos.find((r) => r.repo === activeRepo)?.ready;
     if (!ready) {
       setRepoEntries([]);
       return;
     }
     void loadRepoDir(activeRepo, repoSubpath);
-  }, [tab, activeRepo, repoSubpath, reposStatus, loadRepoDir]);
+  }, [tab, repoSubView, activeRepo, repoSubpath, reposStatus, loadRepoDir]);
 
   const handleSyncRepos = async () => {
     if (!projectId || repoSyncing) return;
@@ -862,11 +921,52 @@ export function ProjectWorkspaceView({
       const st = await api.syncProjectRepos(projectId);
       setReposStatus(st);
       const firstReady = st.repos.find((r) => r.ready)?.repo;
+      const target = activeRepo || firstReady || "";
       if (firstReady && !activeRepo) setActiveRepo(firstReady);
-      toast.success("仓库镜像已同步");
-      if (firstReady) void loadRepoDir(activeRepo || firstReady, repoSubpath);
+      const failedRepo = st.repos.find((r) => r.error);
+      if (failedRepo?.error) {
+        toast.error(`同步部分失败（${failedRepo.repo}）：${failedRepo.error}`);
+      } else {
+        toast.success("仓库镜像已同步");
+      }
+      if (firstReady && repoSubView === "code") void loadRepoDir(target, repoSubpath);
+      if (target) void loadRepoBranches(target);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "同步仓库失败");
+    } finally {
+      setRepoSyncing(false);
+    }
+  };
+
+  const handleBrowseBranchCode = async (branch: string) => {
+    if (!projectId || !activeRepo || repoSyncing) return;
+    const currentMirror = reposStatus?.repos.find(
+      (r) => r.repo.toLowerCase() === activeRepo.toLowerCase(),
+    );
+    if (currentMirror?.ready && currentMirror.branch === branch) {
+      setRepoSubView("code");
+      setMobilePane("list");
+      return;
+    }
+    setRepoSyncing(true);
+    try {
+      const st = await api.syncProjectRepos(projectId, { repo: activeRepo, branch });
+      setReposStatus(st);
+      const updatedMirror = st.repos.find(
+        (r) => r.repo.toLowerCase() === activeRepo.toLowerCase(),
+      );
+      if (updatedMirror?.error) {
+        toast.error(`切换分支镜像失败：${updatedMirror.error}`);
+        return;
+      }
+      setRepoSubpath("");
+      setRepoFile(null);
+      setRepoSubView("code");
+      setMobilePane("list");
+      toast.success(`已将 ${activeRepo} 镜像切换到 ${branch}`);
+      void loadRepoBranches(activeRepo);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "切换分支镜像失败");
     } finally {
       setRepoSyncing(false);
     }
@@ -2249,197 +2349,268 @@ export function ProjectWorkspaceView({
       )}
 
       {/* TAB 4: BOUND REPOSITORIES */}
-      {tab === "repos" && (
-        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          <div className="shrink-0 px-3.5 sm:px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1 sm:flex-initial">
-              {reposStatus && reposStatus.repos.length > 0 ? (
-                <div className="w-full sm:w-[260px]">
-                  <Select
-                    ariaLabel="选择绑定仓库"
-                    fullWidth
-                    value={activeRepo}
-                    options={reposStatus.repos.map((r) => ({
-                      value: r.repo,
-                      label: `${r.repo}${r.ready ? "" : "（未同步）"}`,
-                    }))}
-                    onChange={(val) => {
-                      setActiveRepo(val);
-                      setRepoSubpath("");
-                      setRepoFile(null);
-                      setMobilePane("list");
-                    }}
-                  />
-                </div>
-              ) : (
-                <span className="text-[12.5px] text-[var(--text-muted)]">尚未绑定 GitHub 仓库</span>
-              )}
-              {reposStatus?.synced_at && (
-                <span className="text-[11.5px] text-[var(--text-muted)]">
-                  最近同步：{formatRelativeTime(reposStatus.synced_at)}
-                </span>
-              )}
-            </div>
-            <Button
-              size="xs"
-              variant="secondary"
-              icon="refresh-cw"
-              loading={repoSyncing}
-              onClick={() => void handleSyncRepos()}
-            >
-              立即同步代码镜像
-            </Button>
-          </div>
-
-          <div className="flex-1 flex min-h-0 overflow-hidden">
-            {/* Repo File Tree */}
-            <div
-              className={`${
-                mobilePane === "detail" && (repoFile || repoFileLoading)
-                  ? "hidden md:flex"
-                  : "flex"
-              } w-full md:w-[300px] shrink-0 md:border-r border-[var(--border-subtle)] bg-[var(--surface-card)] flex-col min-h-0`}
-            >
-              {repoSubpath && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const parts = repoSubpath.split("/");
-                    parts.pop();
-                    setRepoSubpath(parts.join("/"));
-                  }}
-                  className="shrink-0 px-3 py-2 border-b border-[var(--border-subtle)] flex items-center gap-1.5 text-[12px] text-indigo-600 dark:text-indigo-400 hover:bg-[var(--surface-hover)] cursor-pointer"
-                >
-                  <Icon name="arrow-left" size={13} />
-                  <span className="font-mono truncate">../ ({repoSubpath})</span>
-                </button>
-              )}
-              <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-                {repoListLoading ? (
-                  <div className="p-6 text-center text-[12.5px] text-[var(--text-muted)]">
-                    加载目录…
-                  </div>
-                ) : repoEntries.length === 0 ? (
-                  <div className="p-6 text-center space-y-2">
-                    <p className="text-[12.5px] text-[var(--text-muted)]">
-                      {readyRepoCount === 0
-                        ? "当前仓库尚未同步到本地镜像，请点击上方「立即同步代码镜像」。"
-                        : "当前目录为空"}
-                    </p>
+      {tab === "repos" && (() => {
+        const activeMirror =
+          reposStatus?.repos.find(
+            (r) => r.repo.toLowerCase() === activeRepo.toLowerCase(),
+          ) ?? null;
+        return (
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            <div className="shrink-0 px-3.5 sm:px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1 sm:flex-initial">
+                {reposStatus && reposStatus.repos.length > 0 ? (
+                  <div className="w-full sm:w-[250px]">
+                    <Select
+                      ariaLabel="选择绑定仓库"
+                      fullWidth
+                      value={activeRepo}
+                      options={reposStatus.repos.map((r) => ({
+                        value: r.repo,
+                        label: `${r.repo}${r.ready ? "" : "（未同步）"}`,
+                      }))}
+                      onChange={(val) => {
+                        setActiveRepo(val);
+                        setRepoSubpath("");
+                        setRepoFile(null);
+                        setRepoBranches(null);
+                        setRepoBranchesError("");
+                        setMobilePane("list");
+                      }}
+                    />
                   </div>
                 ) : (
-                  repoEntries.map((item) => (
-                    <button
-                      key={`${item.repo}:${item.path}`}
-                      type="button"
-                      onClick={() => {
-                        if (item.type === "dir") {
-                          setRepoSubpath(item.path);
-                        } else {
-                          setMobilePane("detail");
-                          void openRepoFile(item.repo, item.path);
-                        }
-                      }}
-                      className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-left text-[12.5px] transition-colors cursor-pointer ${
-                        repoFile?.path === item.path && repoFile?.repo === item.repo
-                          ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 font-medium"
-                          : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
-                      }`}
-                    >
-                      <span className="flex items-center gap-2 min-w-0">
-                        <Icon
-                          name={item.type === "dir" ? "folder" : "file-code-2"}
-                          size={14}
-                          className={
-                            item.type === "dir" ? "text-amber-500" : "text-[var(--text-muted)]"
-                          }
-                        />
-                        <span className="font-mono text-[12px] truncate">
-                          {item.path.split("/").pop()}
-                        </span>
-                      </span>
-                      {item.size !== undefined && (
-                        <span className="text-[10.5px] font-mono text-[var(--text-muted)] shrink-0">
-                          {formatBytes(item.size)}
-                        </span>
-                      )}
-                    </button>
-                  ))
+                  <span className="text-[12.5px] text-[var(--text-muted)]">尚未绑定 GitHub 仓库</span>
                 )}
+                <SegmentedDetent<"branches" | "code">
+                  size="sm"
+                  ariaLabel="绑定仓库视图切换"
+                  value={repoSubView}
+                  onChange={(next) => {
+                    setRepoSubView(next);
+                    setMobilePane("list");
+                  }}
+                  options={[
+                    {
+                      value: "branches",
+                      label: "分支面板",
+                      icon: "git-branch",
+                      badge: repoBranches?.counts.total || undefined,
+                    },
+                    {
+                      value: "code",
+                      label: "代码浏览",
+                      icon: "code-2",
+                      badge: activeMirror?.ready ? activeMirror.branch || undefined : undefined,
+                    },
+                  ]}
+                />
+                {activeMirror?.ready && (activeMirror.branch || activeMirror.commit) && (
+                  <span className="hidden lg:inline-flex items-center gap-1 text-[11.5px] font-mono px-2 py-0.5 rounded-md bg-[var(--surface-subtle)] text-[var(--text-secondary)] border border-[var(--border-subtle)]">
+                    <Icon name="git-commit-horizontal" size={11.5} className="text-[var(--text-muted)]" />
+                    <span>
+                      {activeMirror.branch ? `${activeMirror.branch}` : "mirror"}
+                      {activeMirror.commit ? ` @ ${activeMirror.commit.slice(0, 7)}` : ""}
+                    </span>
+                  </span>
+                )}
+                {reposStatus?.synced_at && (
+                  <span className="hidden xl:inline text-[11.5px] text-[var(--text-muted)]">
+                    最近同步：{formatRelativeTime(reposStatus.synced_at)}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {repoSubView === "branches" && activeRepo && (
+                  <Button
+                    size="xs"
+                    variant="secondary"
+                    icon="refresh-cw"
+                    loading={repoBranchesLoading}
+                    onClick={() => void loadRepoBranches(activeRepo)}
+                  >
+                    刷新分支
+                  </Button>
+                )}
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  icon="refresh-cw"
+                  loading={repoSyncing}
+                  onClick={() => void handleSyncRepos()}
+                >
+                  {repoSubView === "code" ? "同步当前分支镜像" : "同步镜像"}
+                </Button>
               </div>
             </div>
 
-            {/* Repo File Content */}
-            <div
-              className={`${
-                mobilePane === "detail" && (repoFile || repoFileLoading)
-                  ? "flex"
-                  : "hidden md:flex"
-              } flex-1 flex-col min-w-0 min-h-0`}
-            >
-              {repoFileLoading ? (
-                <div className="flex-1 flex items-center justify-center text-[13px] text-[var(--text-muted)] gap-2">
-                  <Icon name="loader-2" size={15} className="animate-spin text-indigo-500" />
-                  读取仓库文件…
-                </div>
-              ) : !repoFile ? (
-                <div className="flex-1 flex items-center justify-center p-8">
-                  <EmptyState
-                    icon="code-2"
-                    title="浏览绑定仓库源码"
-                    description="已同步的仓库镜像会同时以只读方式挂载到 Codex 对话工作区的 repos/ 目录，方便随时结合代码排查问题。"
-                  />
-                </div>
-              ) : (
-                <>
-                  <div className="shrink-0 px-3 sm:px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <button
-                        type="button"
-                        onClick={() => setMobilePane("list")}
-                        className="md:hidden inline-flex items-center gap-1 h-8 px-2 -ml-1 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] shrink-0 cursor-pointer"
-                      >
-                        <Icon name="arrow-left" size={14} />
-                        <span>列表</span>
-                      </button>
-                      <span className="font-mono text-[12.5px] text-[var(--text-primary)] truncate">
-                        {repoFile.repo} / {repoFile.path}
-                      </span>
-                    </div>
-                    <Button
-                      size="xs"
-                      variant="primary"
-                      icon="sparkles"
-                      onClick={() =>
-                        onOpenChatWithContext(
-                          {
-                            kind: "repo_file",
-                            label: `${repoFile.repo}:${repoFile.path}`,
-                            ref: repoFile.path,
-                            repo: repoFile.repo,
-                          },
-                          `请结合仓库文件 ${repoFile.repo}:${repoFile.path} 帮我分析：`,
-                        )
-                      }
+            {repoSubView === "branches" ? (
+              <RepoBranchesPanel
+                project={project}
+                repo={activeRepo}
+                mirror={activeMirror}
+                repoSyncing={repoSyncing}
+                overview={repoBranches}
+                overviewLoading={repoBranchesLoading}
+                overviewError={repoBranchesError}
+                mobilePane={mobilePane}
+                onMobilePaneChange={setMobilePane}
+                onRefresh={() => activeRepo && void loadRepoBranches(activeRepo)}
+                onBrowseBranchCode={(branch) => void handleBrowseBranchCode(branch)}
+                onSelectTask={onSelectTask}
+                onOpenChatWithContext={(ref, prompt) => onOpenChatWithContext(ref, prompt)}
+              />
+            ) : (
+              <div className="flex-1 flex min-h-0 overflow-hidden">
+                {/* Repo File Tree */}
+                <div
+                  className={`${
+                    mobilePane === "detail" && (repoFile || repoFileLoading)
+                      ? "hidden md:flex"
+                      : "flex"
+                  } w-full md:w-[300px] shrink-0 md:border-r border-[var(--border-subtle)] bg-[var(--surface-card)] flex-col min-h-0`}
+                >
+                  {repoSubpath && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const parts = repoSubpath.split("/");
+                        parts.pop();
+                        setRepoSubpath(parts.join("/"));
+                      }}
+                      className="shrink-0 px-3 py-2 border-b border-[var(--border-subtle)] flex items-center gap-1.5 text-[12px] text-indigo-600 dark:text-indigo-400 hover:bg-[var(--surface-hover)] cursor-pointer"
                     >
-                      在 Codex 中讨论此文件
-                    </Button>
-                  </div>
-                  <div className="flex-1 overflow-auto p-4">
-                    {repoFile.error ? (
-                      <div className="text-[13px] text-rose-500">{repoFile.error}</div>
+                      <Icon name="arrow-left" size={13} />
+                      <span className="font-mono truncate">../ ({repoSubpath})</span>
+                    </button>
+                  )}
+                  <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+                    {repoListLoading ? (
+                      <div className="p-6 text-center text-[12.5px] text-[var(--text-muted)]">
+                        加载目录…
+                      </div>
+                    ) : repoEntries.length === 0 ? (
+                      <div className="p-6 text-center space-y-2">
+                        <p className="text-[12.5px] text-[var(--text-muted)]">
+                          {readyRepoCount === 0
+                            ? "当前仓库尚未同步到本地镜像，请点击上方「同步当前分支镜像」。"
+                            : "当前目录为空"}
+                        </p>
+                      </div>
                     ) : (
-                      <pre className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-4 font-mono text-[12px] leading-relaxed text-[var(--text-primary)] overflow-x-auto whitespace-pre">
-                        {repoFile.content}
-                      </pre>
+                      repoEntries.map((item) => (
+                        <button
+                          key={`${item.repo}:${item.path}`}
+                          type="button"
+                          onClick={() => {
+                            if (item.type === "dir") {
+                              setRepoSubpath(item.path);
+                            } else {
+                              setMobilePane("detail");
+                              void openRepoFile(item.repo, item.path);
+                            }
+                          }}
+                          className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-left text-[12.5px] transition-colors cursor-pointer ${
+                            repoFile?.path === item.path && repoFile?.repo === item.repo
+                              ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 font-medium"
+                              : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+                          }`}
+                        >
+                          <span className="flex items-center gap-2 min-w-0">
+                            <Icon
+                              name={item.type === "dir" ? "folder" : "file-code-2"}
+                              size={14}
+                              className={
+                                item.type === "dir" ? "text-amber-500" : "text-[var(--text-muted)]"
+                              }
+                            />
+                            <span className="font-mono text-[12px] truncate">
+                              {item.path.split("/").pop()}
+                            </span>
+                          </span>
+                          {item.size !== undefined && (
+                            <span className="text-[10.5px] font-mono text-[var(--text-muted)] shrink-0">
+                              {formatBytes(item.size)}
+                            </span>
+                          )}
+                        </button>
+                      ))
                     )}
                   </div>
-                </>
-              )}
-            </div>
+                </div>
+
+                {/* Repo File Content */}
+                <div
+                  className={`${
+                    mobilePane === "detail" && (repoFile || repoFileLoading)
+                      ? "flex"
+                      : "hidden md:flex"
+                  } flex-1 flex-col min-w-0 min-h-0`}
+                >
+                  {repoFileLoading ? (
+                    <div className="flex-1 flex items-center justify-center text-[13px] text-[var(--text-muted)] gap-2">
+                      <Icon name="loader-2" size={15} className="animate-spin text-indigo-500" />
+                      读取仓库文件…
+                    </div>
+                  ) : !repoFile ? (
+                    <div className="flex-1 flex items-center justify-center p-8">
+                      <EmptyState
+                        icon="code-2"
+                        title="浏览绑定仓库源码"
+                        description="已同步的仓库镜像会同时以只读方式挂载到 Codex 对话工作区的 repos/ 目录，方便随时结合代码排查问题。"
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <div className="shrink-0 px-3 sm:px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => setMobilePane("list")}
+                            className="md:hidden inline-flex items-center gap-1 h-8 px-2 -ml-1 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] shrink-0 cursor-pointer"
+                          >
+                            <Icon name="arrow-left" size={14} />
+                            <span>列表</span>
+                          </button>
+                          <span className="font-mono text-[12.5px] text-[var(--text-primary)] truncate">
+                            {repoFile.repo} / {repoFile.path}
+                          </span>
+                        </div>
+                        <Button
+                          size="xs"
+                          variant="primary"
+                          icon="sparkles"
+                          onClick={() =>
+                            onOpenChatWithContext(
+                              {
+                                kind: "repo_file",
+                                label: `${repoFile.repo}:${repoFile.path}`,
+                                ref: repoFile.path,
+                                repo: repoFile.repo,
+                              },
+                              `请结合仓库文件 ${repoFile.repo}:${repoFile.path} 帮我分析：`,
+                            )
+                          }
+                        >
+                          在 Codex 中讨论此文件
+                        </Button>
+                      </div>
+                      <div className="flex-1 overflow-auto p-4">
+                        {repoFile.error ? (
+                          <div className="text-[13px] text-rose-500">{repoFile.error}</div>
+                        ) : (
+                          <pre className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-4 font-mono text-[12px] leading-relaxed text-[var(--text-primary)] overflow-x-auto whitespace-pre">
+                            {repoFile.content}
+                          </pre>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Modal: New File / Dir */}
       <Modal

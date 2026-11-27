@@ -102,7 +102,7 @@ export interface ReadyRepoRoot {
 
 interface SyncMeta {
   synced_at: string;
-  repos: Record<string, { commit: string; updated_at: string; error?: string }>;
+  repos: Record<string, { commit: string; branch?: string; updated_at: string; error?: string }>;
 }
 
 const inFlightSyncs = new Map<string, Promise<ProjectReposSyncStatus>>();
@@ -216,9 +216,54 @@ async function runGit(
   return stdout.trim();
 }
 
+function isValidSyncBranchName(value: string): boolean {
+  if (!value || value.length > 120 || value.startsWith("-")) return false;
+  if (/[\x00-\x1f\x7f\s~^:?*[\]\\]/.test(value)) return false;
+  if (value === "@" || value.startsWith("/") || value.endsWith("/")) return false;
+  if (value.startsWith(".") || value.endsWith(".") || value.includes("..") || value.includes("//") || value.includes("@{")) {
+    return false;
+  }
+  return value.split("/").every((part) => Boolean(part) && !part.startsWith(".") && !part.endsWith(".lock"));
+}
+
+export function validateSyncBranch(branch?: string): string | undefined {
+  if (branch === undefined) return undefined;
+  const trimmed = branch.trim();
+  if (!trimmed) return undefined;
+  if (!isValidSyncBranchName(trimmed)) {
+    throw new Error(`Invalid branch name: ${branch}`);
+  }
+  return trimmed;
+}
+
 async function readHeadCommit(repoDir: string): Promise<string> {
   try {
     return await runGit(["rev-parse", "--short", "HEAD"], { cwd: repoDir, timeoutMs: 5000 });
+  } catch {
+    return "";
+  }
+}
+
+async function readHeadBranch(repoDir: string): Promise<string> {
+  try {
+    return await runGit(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: repoDir, timeoutMs: 5000 });
+  } catch {
+    return readHeadBranchSync(repoDir);
+  }
+}
+
+export function readHeadBranchSync(repoDir: string): string {
+  try {
+    const headFile = join(repoDir, ".git", "HEAD");
+    if (!existsSync(headFile)) return "";
+    const head = readFileSync(headFile, "utf8").trim();
+    if (head.startsWith("ref:")) {
+      const refName = head.slice(4).trim();
+      if (refName.startsWith("refs/heads/")) {
+        return refName.slice("refs/heads/".length);
+      }
+    }
+    return "";
   } catch {
     return "";
   }
@@ -300,9 +345,11 @@ export function getProjectReposStatus(
     }
     const ready = Boolean(dir && existsSync(dir));
     const repoMeta = meta?.repos?.[repo];
+    const branch = (ready ? readHeadBranchSync(dir) : "") || repoMeta?.branch || "";
     return {
       repo,
       ready,
+      ...(branch ? { branch } : {}),
       commit: (ready ? readHeadCommitSync(dir) : "") || repoMeta?.commit || "",
       updated_at: repoMeta?.updated_at ?? null,
       ...(repoMeta?.error ? { error: repoMeta.error } : {}),
@@ -320,10 +367,26 @@ export function getProjectReposStatus(
 export async function syncProjectRepos(
   dbPath: string,
   project: Pick<AgentProjectInfo, "id" | "repos" | "widget_code_context">,
-  options: { baseDirOverride?: string } = {},
+  options: { baseDirOverride?: string; repo?: string; branch?: string } = {},
 ): Promise<ProjectReposSyncStatus> {
+  const requestedBranch = validateSyncBranch(options.branch);
+  const requestedRepoRaw = options.repo?.trim() || "";
+  const scopedRepos = project.repos.slice(0, MAX_SYNCED_REPOS);
+  let matchedRepo: string | undefined;
+  if (requestedRepoRaw) {
+    matchedRepo = scopedRepos.find((r) => r.toLowerCase() === requestedRepoRaw.toLowerCase());
+    if (!matchedRepo) {
+      throw new Error("Specified repository is not bound to this project");
+    }
+  }
+
   const existingPromise = inFlightSyncs.get(project.id);
-  if (existingPromise) return existingPromise;
+  if (existingPromise && !matchedRepo && !requestedBranch) {
+    return existingPromise;
+  }
+  while (inFlightSyncs.has(project.id)) {
+    await inFlightSyncs.get(project.id)!.catch(() => undefined);
+  }
 
   const task = (async (): Promise<ProjectReposSyncStatus> => {
     const projectDir = getProjectReposDir(dbPath, project.id, options.baseDirOverride);
@@ -332,10 +395,12 @@ export async function syncProjectRepos(
     }
     mkdirSync(projectDir, { recursive: true });
     const connections = readGithubConnections(dbPath);
-    const targetRepos = project.repos.slice(0, MAX_SYNCED_REPOS);
+    const targetRepos = matchedRepo ? [matchedRepo] : scopedRepos;
     const expectedDirs = new Set<string>();
     const prevMeta = readSyncMeta(projectDir);
-    const nextReposMeta: SyncMeta["repos"] = {};
+    const nextReposMeta: SyncMeta["repos"] = matchedRepo
+      ? { ...(prevMeta?.repos ?? {}) }
+      : {};
 
     for (const repo of targetRepos) {
       let slug: string;
@@ -350,47 +415,114 @@ export async function syncProjectRepos(
       const remoteUrl = `https://github.com/${repo}.git`;
       try {
         if (existsSync(join(repoDir, ".git"))) {
-          await runGit(["fetch", "--depth", "1", "origin"], {
-            cwd: repoDir,
-            token,
-          });
-          await runGit(["reset", "--hard", "FETCH_HEAD"], { cwd: repoDir });
+          if (requestedBranch) {
+            await runGit(
+              [
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                "--",
+                `refs/heads/${requestedBranch}:refs/remotes/origin/${requestedBranch}`,
+              ],
+              { cwd: repoDir, token },
+            );
+            await runGit(["checkout", "-f", "-B", requestedBranch, "FETCH_HEAD"], {
+              cwd: repoDir,
+            });
+          } else {
+            const currentBranch = readHeadBranchSync(repoDir);
+            let syncedCurrentBranch = false;
+            if (currentBranch && isValidSyncBranchName(currentBranch)) {
+              try {
+                await runGit(
+                  [
+                    "fetch",
+                    "--depth",
+                    "1",
+                    "origin",
+                    "--",
+                    `refs/heads/${currentBranch}:refs/remotes/origin/${currentBranch}`,
+                  ],
+                  { cwd: repoDir, token },
+                );
+                await runGit(["reset", "--hard", "FETCH_HEAD"], { cwd: repoDir });
+                syncedCurrentBranch = true;
+              } catch {
+                syncedCurrentBranch = false;
+              }
+            }
+            if (!syncedCurrentBranch) {
+              await runGit(["fetch", "--depth", "1", "origin"], {
+                cwd: repoDir,
+                token,
+              });
+              await runGit(["reset", "--hard", "FETCH_HEAD"], { cwd: repoDir });
+            }
+          }
         } else {
           if (existsSync(repoDir)) {
             rmSync(repoDir, { recursive: true, force: true });
           }
-          await runGit(["clone", "--depth", "1", "--single-branch", remoteUrl, repoDir], {
-            token,
-          });
+          if (requestedBranch) {
+            await runGit(
+              [
+                "clone",
+                "--depth",
+                "1",
+                "--single-branch",
+                "--branch",
+                requestedBranch,
+                "--",
+                remoteUrl,
+                repoDir,
+              ],
+              { token },
+            );
+          } else {
+            await runGit(["clone", "--depth", "1", "--single-branch", "--", remoteUrl, repoDir], {
+              token,
+            });
+          }
         }
         const commit = await readHeadCommit(repoDir);
+        const branch = (await readHeadBranch(repoDir)) || readHeadBranchSync(repoDir) || requestedBranch || "";
         nextReposMeta[repo] = {
           commit,
+          ...(branch ? { branch } : {}),
           updated_at: new Date().toISOString(),
         };
       } catch (err) {
         const message =
           err instanceof Error
-            ? err.message.replace(/basic [A-Za-z0-9+/=]+/gi, "basic ***").slice(0, 240)
+            ? err.message
+                .replace(/basic [A-Za-z0-9+/=]+/gi, "basic ***")
+                .replace(/https?:\/\/[^@\s]+@/gi, "https://***@")
+                .slice(0, 240)
             : "Git sync failed";
+        const fallbackBranch =
+          readHeadBranchSync(repoDir) || prevMeta?.repos?.[repo]?.branch || "";
         nextReposMeta[repo] = {
           commit: prevMeta?.repos?.[repo]?.commit ?? readHeadCommitSync(repoDir),
+          ...(fallbackBranch ? { branch: fallbackBranch } : {}),
           updated_at: prevMeta?.repos?.[repo]?.updated_at ?? "",
           error: message,
         };
       }
     }
 
-    // Prune unbound repo directories
-    try {
-      for (const entry of readdirSync(projectDir)) {
-        if (entry === ".sync-meta.json") continue;
-        if (!expectedDirs.has(entry)) {
-          rmSync(join(projectDir, entry), { recursive: true, force: true });
+    // Prune unbound repo directories only during full project sync
+    if (!matchedRepo) {
+      try {
+        for (const entry of readdirSync(projectDir)) {
+          if (entry === ".sync-meta.json") continue;
+          if (!expectedDirs.has(entry)) {
+            rmSync(join(projectDir, entry), { recursive: true, force: true });
+          }
         }
+      } catch {
+        // ignore cleanup error
       }
-    } catch {
-      // ignore cleanup error
     }
 
     writeSyncMeta(projectDir, {

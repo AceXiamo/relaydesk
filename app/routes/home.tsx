@@ -806,9 +806,11 @@ function ConsoleWorkspace() {
         {view === "workspace" ? (
           <ProjectWorkspaceView
             project={currentProject}
+            tasks={tasks}
             initialTab={pendingWorkspaceTab}
             onConsumeInitialTab={() => setPendingWorkspaceTab(null)}
             onNewProject={() => setProjectModalOpen(true)}
+            onSelectTask={(id) => void openTaskDetail(id, false)}
             onOpenChatWithContext={(ref, prompt, opts) => {
               if (ref || prompt || opts?.enableNetwork) {
                 setPendingChatContext({

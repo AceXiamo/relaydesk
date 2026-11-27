@@ -5,7 +5,16 @@ import { chatWatchdog, chatTimeoutMessage, type ChatTimeoutReason } from "../age
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { sanitizeBridgeModels } from "../app/lib/model-catalog.ts";
-import type { BridgeAgentSummary, ChatFastMode, ChatReasoningEffort, ChatRuntime, ChatSandboxMode, ChatStreamEvent } from "../app/lib/types.ts";
+import type {
+  BridgeAgentSummary,
+  ChatFastMode,
+  ChatReasoningEffort,
+  ChatRuntime,
+  ChatSandboxMode,
+  ChatStreamEvent,
+  RepoBranchDetailPayload,
+  RepoLocalWorkdirStatus,
+} from "../app/lib/types.ts";
 import type { RunChatTurnResult } from "./codex-chat.ts";
 import { redactSecrets, type PriorSubagentSeed } from "./cli-stream-parser.ts";
 import { ApiError } from "./errors.ts";
@@ -60,6 +69,7 @@ const text = (max: number) => z.string().max(max);
 const report = z.object({
   project_id: text(64).min(1), workdir: text(4096).regex(/^[^\x00-\x1f]*$/),
   path_ok: z.boolean(), path_error: text(1024).default(""),
+  git_branch: text(200).optional(), has_dirty_files: z.boolean().optional(),
 });
 type Report = z.infer<typeof report>;
 type Binding = Omit<Report, "project_id">;
@@ -71,6 +81,64 @@ const catalog = z.object({
   runtimes: z.object({ claude: runtime.optional(), codex: runtime.optional(), agy: runtime.optional() }).optional(),
   projects: z.array(report).max(1000).optional(), models: z.unknown().optional(),
   allowed_roots_enabled: z.boolean().optional(), db_clients: z.array(text(64)).max(64).optional(),
+  git_inspect: z.boolean().optional(),
+});
+const localBranchInfoSchema = z.object({
+  name: text(200).min(1),
+  current: z.boolean(),
+  sha: text(64).default(""),
+  committed_at: text(64).default(""),
+  upstream: text(200).default(""),
+  ahead: z.number().int().min(0).default(0),
+  behind: z.number().int().min(0).default(0),
+  upstream_gone: z.boolean().default(false),
+  author: text(120).default(""),
+  subject: text(240).default(""),
+});
+const gitStatusResultSchema = z.object({
+  ok: z.boolean(),
+  workdir: text(4096).default(""),
+  repo_dir: text(4096).default(""),
+  remote_repo: text(200).default(""),
+  current_branch: text(200).default(""),
+  detached: z.boolean().default(false),
+  head_sha: text(64).default(""),
+  has_dirty_files: z.boolean().default(false),
+  staged_count: z.number().int().min(0).default(0),
+  unstaged_count: z.number().int().min(0).default(0),
+  untracked_count: z.number().int().min(0).default(0),
+  branches: z.array(localBranchInfoSchema).max(200).default([]),
+  error: text(1024).optional(),
+});
+const gitBranchDetailResultSchema = z.object({
+  ok: z.boolean(),
+  repo: text(200).default(""),
+  branch: text(200).default(""),
+  source: z.literal("local").default("local"),
+  commits: z.array(z.object({
+    sha: text(64).min(1),
+    short_sha: text(16).min(1),
+    message: text(400),
+    author_name: text(120).default(""),
+    date: text(64).default(""),
+  })).max(30).default([]),
+  compare: z.object({
+    base: text(200),
+    status: z.enum(["ahead", "behind", "diverged", "identical"]),
+    ahead_by: z.number().int().min(0),
+    behind_by: z.number().int().min(0),
+    total_commits: z.number().int().min(0),
+    files_count: z.number().int().min(0),
+    additions: z.number().int().min(0),
+    deletions: z.number().int().min(0),
+    files: z.array(z.object({
+      filename: text(400),
+      status: text(32),
+      additions: z.number().int().min(0),
+      deletions: z.number().int().min(0),
+    })).max(50),
+  }).nullable().default(null),
+  error: text(1024).optional(),
 });
 const frame = z.object({ type: text(64), id: text(128).min(1).optional(), payload: z.record(z.string(), z.unknown()) });
 type Payload = z.infer<typeof frame>["payload"];
@@ -223,6 +291,7 @@ interface Connection {
   accounts: Map<AccountProvider, NonNullable<ReturnType<typeof sanitizeSidebarAccount>>>;
   id: string; ws: WebSocket; ready: boolean; lastPong: number; projects: Map<string, Binding>;
   binds: Map<string, { project: string; workdir: string; settle: (value: Binding | Error) => void }>;
+  gitQueries: Map<string, { project: string; settle: (value: unknown | Error) => void }>;
 }
 
 export class BridgeHub {
@@ -270,7 +339,7 @@ export class BridgeHub {
         this.drop(previous, "本机节点连接已被替换", true);
         previous.ws.close(4001, "Replaced by newer connection");
       }
-      const conn: Connection = { id: agent.id, ws, ready: false, accounts: new Map(), lastPong: Date.now(), projects: new Map(), binds: new Map() };
+      const conn: Connection = { id: agent.id, ws, ready: false, accounts: new Map(), lastPong: Date.now(), projects: new Map(), binds: new Map(), gitQueries: new Map() };
       this.connections.set(conn.id, conn);
       ws.on("pong", () => {
         if (this.connections.get(conn.id) !== conn || !conn.ready) return;
@@ -303,6 +372,7 @@ export class BridgeHub {
     if (this.connections.get(conn.id) !== conn) return;
     this.connections.delete(conn.id);
     for (const bind of conn.binds.values()) bind.settle(new ApiError(409, reason));
+    for (const query of conn.gitQueries.values()) query.settle(new ApiError(409, reason));
     for (const run of this.runs.values()) if (run.owner === conn) {
       console.info(`[bridge] ${reason}; run=${run.id} last_pong_ms=${Date.now() - conn.lastPong} buffered_bytes=${conn.ws.bufferedAmount}`);
       if (!transient || !conn.instance || this.reconnectMs <= 0) run.stop(reason);
@@ -348,9 +418,21 @@ export class BridgeHub {
     });
   }
   describe(agent: BridgeAgentSummary): BridgeAgentSummary {
+    const conn = this.live(agent.id);
     const chatCount = Array.from(this.runs.values()).filter(run => run.owner.id === agent.id).length;
     const cliCount = Array.from(this.cliRuns.values()).filter(run => run.owner.id === agent.id).length;
-    return { ...agent, online: !!this.live(agent.id), active_runs: chatCount + cliCount };
+    const bindings = conn
+      ? agent.bindings.map((b) => {
+          const live = conn.projects.get(b.project_id);
+          if (!live) return b;
+          return {
+            ...b,
+            ...(live.git_branch !== undefined ? { git_branch: live.git_branch } : {}),
+            ...(live.has_dirty_files !== undefined ? { has_dirty_files: live.has_dirty_files } : {}),
+          };
+        })
+      : agent.bindings;
+    return { ...agent, bindings, online: !!conn, active_runs: chatCount + cliCount };
   }
   onAvailabilityChange(listener: (projectIds?: string[]) => void): () => void {
     this.availabilityListeners.add(listener);
@@ -376,13 +458,19 @@ export class BridgeHub {
     this.send(conn, "catalog.refresh", {});
   }
   private saveReport(conn: Connection, value: Report) {
-    const { project_id, workdir, path_error } = value;
+    const { project_id, workdir, path_error, git_branch, has_dirty_files } = value;
     const path_ok = value.path_ok && !!workdir.trim();
     const old = this.store.getProjectAgentBinding(project_id, conn.id);
     // Device reports can revoke an obsolete grant, but never create or restore one.
     this.store.upsertProjectAgentBinding(project_id, conn.id, { workdir, path_error, path_ok,
       ...(old && old.workdir !== workdir && { allow_datasource_secrets: false }) });
-    conn.projects.set(project_id, { workdir, path_error, path_ok });
+    conn.projects.set(project_id, {
+      workdir,
+      path_error,
+      path_ok,
+      ...(git_branch !== undefined ? { git_branch } : {}),
+      ...(has_dirty_files !== undefined ? { has_dirty_files } : {}),
+    });
     for (const run of this.runs.values()) {
       if (run.owner === conn && run.project === project_id && (!path_ok || run.workdir !== workdir)) run.stop("项目目录绑定已变更");
     }
@@ -416,12 +504,14 @@ export class BridgeHub {
         for (const cli of this.cliRuns.values()) if (cli.owner === conn && cli.project === old.project_id) cli.stop("项目目录绑定已移除");
       }
     }
+    const gitInspect = p.git_inspect === true || (!hello && current.capabilities.git_inspect === true);
     this.store.updateBridgeAgentTelemetry(conn.id, {
       hostname: p.hostname ?? current.hostname, platform: p.platform ?? current.platform, bridge_version: p.bridge_version ?? current.bridge_version,
       max_concurrency: p.max_concurrency ?? current.max_concurrency, accept_cli_runs: p.accept_cli_runs ?? current.accept_cli_runs,
       runtimes: p.runtimes ?? (hello ? {} : current.runtimes), models: p.models !== undefined ? sanitizeBridgeModels(p.models) : hello ? [] : current.models,
       capabilities: { allowed_roots_enabled: p.allowed_roots_enabled ?? (!hello && current.capabilities.allowed_roots_enabled === true),
-        db_clients: p.db_clients ?? (hello ? [] : current.capabilities.db_clients) }, last_seen_at: new Date().toISOString(),
+        db_clients: p.db_clients ?? (hello ? [] : current.capabilities.db_clients),
+        ...(gitInspect ? { git_inspect: true } : {}) }, last_seen_at: new Date().toISOString(),
     });
   }
   private receive(conn: Connection, type: string, id: string | undefined, p: Payload) {
@@ -578,6 +668,14 @@ export class BridgeHub {
         this.notifyAvailability([value.project_id]);
       }
       pending.settle({ workdir: value.workdir, path_error: value.path_error, path_ok: value.path_ok });
+    } else if (type === "repo.git_status.result" || type === "repo.git_branch_detail.result") {
+      const pending = id && conn.gitQueries.get(id);
+      if (!pending) return;
+      if (type === "repo.git_status.result") {
+        pending.settle(gitStatusResultSchema.parse(p));
+      } else {
+        pending.settle(gitBranchDetailResultSchema.parse(p));
+      }
     } else if (type === "chat.lost" && conn.instance) {
       const run = typeof p.run_id === "string" && this.runs.get(p.run_id);
       if (run && run.owner === conn) run.stop("重连时原执行已结束；不会自动重跑。");
@@ -635,6 +733,111 @@ export class BridgeHub {
       try { this.send(conn, "project.bind", { project_id: projectId, workdir }, id); }
       catch { settle(new ApiError(409, "本机节点离线")); }
     });
+  }
+  private sendGitQuery<T>(conn: Connection, projectId: string, type: string, payload: Record<string, unknown>, timeoutMs = 4000): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const id = randomUUID();
+      const settle = (value: unknown | Error) => {
+        clearTimeout(timer);
+        conn.gitQueries.delete(id);
+        if (value instanceof Error) reject(value);
+        else resolve(value as T);
+      };
+      const timer = setTimeout(() => settle(new ApiError(504, "本机节点 Git 查询超时")), timeoutMs).unref();
+      conn.gitQueries.set(id, { project: projectId, settle });
+      try { this.send(conn, type, payload, id); }
+      catch { settle(new ApiError(409, "本机节点已离线")); }
+    });
+  }
+  async inspectProjectGit(
+    agentId: string,
+    projectId: string,
+    repo?: string,
+  ): Promise<Omit<RepoLocalWorkdirStatus, "agent_id" | "agent_name" | "online"> | null> {
+    const conn = this.live(agentId);
+    if (!conn) return null;
+    const binding = this.assertWorkspaceAccess(agentId, projectId);
+    const liveReport = conn.projects.get(projectId);
+    const agent = this.agent(agentId);
+    const fallbackStatus = (error?: string): Omit<RepoLocalWorkdirStatus, "agent_id" | "agent_name" | "online"> => ({
+      workdir: binding.workdir,
+      current_branch: liveReport?.git_branch ?? "",
+      detached: false,
+      head_sha: "",
+      has_dirty_files: Boolean(liveReport?.has_dirty_files),
+      staged_count: 0,
+      unstaged_count: 0,
+      untracked_count: 0,
+      branches: [],
+      detailed: false,
+      ...(error ? { error } : {}),
+    });
+    if (!agent.capabilities.git_inspect) {
+      return fallbackStatus();
+    }
+    try {
+      const res = await this.sendGitQuery<z.infer<typeof gitStatusResultSchema>>(
+        conn,
+        projectId,
+        "repo.git_status",
+        { project_id: projectId, ...(repo ? { repo } : {}) },
+      );
+      if (!res.ok) {
+        return fallbackStatus(res.error || "本机节点无法读取 Git 状态");
+      }
+      return {
+        workdir: res.workdir || binding.workdir,
+        ...(res.repo_dir ? { repo_dir: res.repo_dir } : {}),
+        ...(res.remote_repo ? { remote_repo: res.remote_repo } : {}),
+        current_branch: res.current_branch,
+        detached: res.detached,
+        head_sha: res.head_sha,
+        has_dirty_files: res.has_dirty_files,
+        staged_count: res.staged_count,
+        unstaged_count: res.unstaged_count,
+        untracked_count: res.untracked_count,
+        branches: res.branches,
+        detailed: true,
+        ...(res.error ? { error: res.error } : {}),
+      };
+    } catch (err) {
+      return fallbackStatus(err instanceof Error ? err.message : "本机节点 Git 状态查询失败");
+    }
+  }
+  async inspectProjectBranchDetail(
+    agentId: string,
+    projectId: string,
+    params: { repo?: string; branch: string; baseBranch?: string },
+  ): Promise<RepoBranchDetailPayload | null> {
+    const conn = this.live(agentId);
+    if (!conn) return null;
+    this.assertWorkspaceAccess(agentId, projectId);
+    const agent = this.agent(agentId);
+    if (!agent.capabilities.git_inspect) {
+      return null;
+    }
+    const res = await this.sendGitQuery<z.infer<typeof gitBranchDetailResultSchema>>(
+      conn,
+      projectId,
+      "repo.git_branch_detail",
+      {
+        project_id: projectId,
+        branch: params.branch,
+        ...(params.repo ? { repo: params.repo } : {}),
+        ...(params.baseBranch ? { base_branch: params.baseBranch } : {}),
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(400, res.error || "本机节点无法读取该分支详情");
+    }
+    return {
+      repo: res.repo || params.repo || "",
+      branch: res.branch || params.branch,
+      source: "local",
+      commits: res.commits,
+      compare: res.compare,
+      ...(res.error ? { error: res.error } : {}),
+    };
   }
   assertWorkspaceAccess(agentId: string, projectId: string) {
     const reported = this.live(agentId)?.projects.get(projectId);

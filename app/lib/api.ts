@@ -39,6 +39,8 @@ import type {
   R2ConfigStatus,
   R2TestResult,
   ReleaseRecord,
+  RepoBranchDetailPayload,
+  RepoBranchesOverviewPayload,
   TaskDetailPayload,
   TaskMessage,
   TaskPriority,
@@ -390,11 +392,11 @@ export const api = {
     request<ProjectReposSyncStatus>(
       `/api/projects/${encodeURIComponent(projectId)}/repos/status`,
     ),
-  syncProjectRepos: (projectId: string) =>
+  syncProjectRepos: (projectId: string, payload?: { repo?: string; branch?: string }) =>
     request<ProjectReposSyncStatus>(
       `/api/projects/${encodeURIComponent(projectId)}/repos/sync`,
       "POST",
-      {},
+      payload ?? {},
     ),
 
   /* ── Project Space (Workspace) ──────────────────────────────────────── */
@@ -668,6 +670,38 @@ export const api = {
     if (params.end_line) qs.set("end_line", String(params.end_line));
     return request<{ file: WorkspaceRepoFileContent }>(
       `/api/projects/${encodeURIComponent(projectId)}/workspace/repos/file?${qs.toString()}`,
+    );
+  },
+  getWorkspaceRepoBranches: (
+    projectId: string,
+    repo?: string,
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams();
+    if (repo) qs.set("repo", repo);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<RepoBranchesOverviewPayload>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/repos/branches${suffix}`,
+      "GET",
+      undefined,
+      signal,
+    );
+  },
+  getWorkspaceRepoBranchDetail: (
+    projectId: string,
+    params: { repo?: string; branch: string; source?: "remote" | "local"; base?: string },
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.repo) qs.set("repo", params.repo);
+    qs.set("branch", params.branch);
+    if (params.source) qs.set("source", params.source);
+    if (params.base) qs.set("base", params.base);
+    return request<RepoBranchDetailPayload>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/repos/branch-detail?${qs.toString()}`,
+      "GET",
+      undefined,
+      signal,
     );
   },
 

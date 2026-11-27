@@ -44,7 +44,9 @@ import {
 } from "./wallet.ts";
 import {
   GithubError,
+  fetchGithubBranchDetailAcrossConnections,
   fetchGithubBranchesAcrossConnections,
+  fetchGithubRepoBranchOverviewAcrossConnections,
   fetchGithubRepositories,
   fetchGithubRepositoriesAcrossConnections,
   inspectGithubToken,
@@ -55,6 +57,7 @@ import {
   resolveScopeOwner,
   toGithubConnectionSummary,
   upsertGithubConnection,
+  type GithubRepoBranchOverview,
 } from "./github.ts";
 import { isLoopbackHost } from "./loopback.ts";
 import { intakeReply, prescreenFeedback } from "./assistant.ts";
@@ -93,6 +96,7 @@ import {
   testUtilityAiConnection,
 } from "./utility-ai.ts";
 import { getProjectReposStatus, syncProjectRepos } from "./repo-workspace.ts";
+import { isSafeGitBranchQuery, mergeRepoBranches } from "./repo-branches.ts";
 import { getWorkspaceInlineMime } from "../app/lib/workspace-media.ts";
 import {
   addWorkspaceExternalDatasource,
@@ -149,6 +153,8 @@ import type {
   ChatStreamEvent,
   GithubOwnerInfo,
   ProjectRoutingConfig,
+  RepoBranchDetailPayload,
+  RepoLocalWorkdirStatus,
   WidgetConfigPayload,
   WorkspaceDatabaseKind,
 } from "../app/lib/types.ts";
@@ -748,7 +754,7 @@ export class ApiRouter {
         parts[2] === "repos" &&
         (parts[3] === "status" || parts[3] === "sync")
       ) {
-        const result = await this.handleProjectRepos(method, parts[1], parts[3]);
+        const result = await this.handleProjectRepos(req, method, parts[1], parts[3]);
         this.sendJson(req, res, 200, result, meta);
         return;
       }
@@ -1866,6 +1872,7 @@ export class ApiRouter {
   }
 
   private async handleProjectRepos(
+    req: IncomingMessage,
     method: string,
     projectId: string,
     action: string,
@@ -1877,9 +1884,48 @@ export class ApiRouter {
       return getProjectReposStatus(this.store.dbPath, projectInfo);
     }
     if (action === "sync" && method === "POST") {
-      return await syncProjectRepos(this.store.dbPath, projectInfo);
+      const hasBody =
+        Number(req.headers["content-length"]) > 0 ||
+        req.headers["transfer-encoding"] !== undefined;
+      const body = hasBody ? await this.readJson(req, 16 * 1024) : {};
+      let repo: string | undefined;
+      if (typeof body.repo === "string" && body.repo.trim()) {
+        const requested = body.repo.trim();
+        const matched = projectInfo.repos.find((r) => r.toLowerCase() === requested.toLowerCase());
+        if (!matched) {
+          throw new ApiError(400, "指定仓库未绑定到当前项目");
+        }
+        repo = matched;
+      }
+      let branch: string | undefined;
+      if (typeof body.branch === "string" && body.branch.trim()) {
+        const trimmed = body.branch.trim();
+        if (!isSafeGitBranchQuery(trimmed)) {
+          throw new ApiError(400, "无效的分支名称");
+        }
+        branch = trimmed;
+      }
+      return await syncProjectRepos(this.store.dbPath, projectInfo, { repo, branch });
     }
     throw new ApiError(405, "Method not allowed");
+  }
+
+  private resolveProjectLocalGitCandidate(projectId: string): BridgeAgentSummary | null {
+    if (!this.bridgeHub) return null;
+    const routing = this.store.getProjectExecutionRouting(projectId);
+    const agents = this.store.listBridgeAgents().map((a) => this.describeBridgeAgent(a));
+    const priority = normalizeExecutionPriority(routing, agents);
+    const agentMap = new Map(agents.map((a) => [a.id, a]));
+    for (const candidate of priority) {
+      if (!candidate.startsWith("local:")) continue;
+      const agentId = candidate.slice("local:".length);
+      const agent = agentMap.get(agentId);
+      if (!agent || !agent.online) continue;
+      const binding = agent.bindings.find((b) => b.project_id === projectId);
+      if (!binding || !binding.enabled || !binding.path_ok) continue;
+      return agent;
+    }
+    return null;
   }
 
   private getQueryParams(req: IncomingMessage): URLSearchParams {
@@ -2239,6 +2285,164 @@ export class ApiRouter {
           end_line: endLine,
         }),
       };
+    }
+
+    // GET /api/projects/:id/workspace/repos/branches
+    if (
+      subparts.length === 2 &&
+      subparts[0] === "repos" &&
+      subparts[1] === "branches" &&
+      method === "GET"
+    ) {
+      const requestedRepo = query.get("repo")?.trim() || "";
+      let targetRepo = projectInfo.repos[0] ?? "";
+      if (requestedRepo) {
+        const matched = projectInfo.repos.find((r) => r.toLowerCase() === requestedRepo.toLowerCase());
+        if (!matched) {
+          throw new ApiError(400, "指定仓库未绑定到当前项目");
+        }
+        targetRepo = matched;
+      }
+
+      if (!targetRepo) {
+        return mergeRepoBranches({
+          repo: "",
+          project: projectInfo,
+          githubConfigured: readGithubConnections(this.store.dbPath).length > 0,
+          remoteOverview: null,
+          mirror: null,
+          localWorkdir: null,
+          tasks: [],
+        });
+      }
+
+      const connections = readGithubConnections(this.store.dbPath);
+      const localCandidate = this.resolveProjectLocalGitCandidate(projectInfo.id);
+
+      const [remoteResult, localResult] = await Promise.all([
+        (async (): Promise<{ overview: GithubRepoBranchOverview | null; error?: string }> => {
+          if (connections.length === 0) {
+            return { overview: null };
+          }
+          try {
+            const overview = await fetchGithubRepoBranchOverviewAcrossConnections(connections, targetRepo);
+            return { overview };
+          } catch (err) {
+            return {
+              overview: null,
+              error: err instanceof Error ? err.message : "读取 GitHub 远端分支失败",
+            };
+          }
+        })(),
+        (async (): Promise<RepoLocalWorkdirStatus | null> => {
+          if (!localCandidate || !this.bridgeHub) return null;
+          try {
+            const inspected = await this.bridgeHub.inspectProjectGit(
+              localCandidate.id,
+              projectInfo.id,
+              targetRepo,
+            );
+            if (!inspected) return null;
+            return {
+              agent_id: localCandidate.id,
+              agent_name: localCandidate.name,
+              online: true,
+              ...inspected,
+            };
+          } catch {
+            return null;
+          }
+        })(),
+      ]);
+
+      const reposStatus = getProjectReposStatus(this.store.dbPath, projectInfo);
+      const mirror =
+        reposStatus.repos.find((r) => r.repo.toLowerCase() === targetRepo.toLowerCase()) ?? null;
+      const tasks = this.store.transaction(false, () => this.store.listTasks(projectInfo.id));
+
+      return mergeRepoBranches({
+        repo: targetRepo,
+        project: projectInfo,
+        githubConfigured: connections.length > 0,
+        remoteOverview: remoteResult.overview,
+        remoteError: remoteResult.error,
+        mirror,
+        localWorkdir: localResult,
+        tasks,
+      });
+    }
+
+    // GET /api/projects/:id/workspace/repos/branch-detail
+    if (
+      subparts.length === 2 &&
+      subparts[0] === "repos" &&
+      subparts[1] === "branch-detail" &&
+      method === "GET"
+    ) {
+      const requestedRepo = query.get("repo")?.trim() || "";
+      let targetRepo = projectInfo.repos[0] ?? "";
+      if (requestedRepo) {
+        const matched = projectInfo.repos.find((r) => r.toLowerCase() === requestedRepo.toLowerCase());
+        if (!matched) {
+          throw new ApiError(400, "指定仓库未绑定到当前项目");
+        }
+        targetRepo = matched;
+      }
+      if (!targetRepo) {
+        throw new ApiError(400, "当前项目尚未绑定 GitHub 仓库");
+      }
+
+      const branch = (query.get("branch") ?? "").trim();
+      if (!isSafeGitBranchQuery(branch)) {
+        throw new ApiError(400, "无效的分支名称");
+      }
+      const base = (query.get("base") ?? "").trim();
+      if (base && !isSafeGitBranchQuery(base)) {
+        throw new ApiError(400, "无效的基线分支名称");
+      }
+      const source = query.get("source") === "local" ? "local" : "remote";
+
+      const queryBridgeDetail = async (): Promise<RepoBranchDetailPayload | null> => {
+        const localCandidate = this.resolveProjectLocalGitCandidate(projectInfo.id);
+        if (!localCandidate || !this.bridgeHub) return null;
+        return await this.bridgeHub.inspectProjectBranchDetail(localCandidate.id, projectInfo.id, {
+          repo: targetRepo,
+          branch,
+          baseBranch: base || undefined,
+        });
+      };
+
+      if (source === "local") {
+        const detail = await queryBridgeDetail();
+        if (!detail) {
+          throw new ApiError(409, "当前没有可用的本机在线节点读取该分支详情");
+        }
+        return detail;
+      }
+
+      const connections = readGithubConnections(this.store.dbPath);
+      if (connections.length > 0) {
+        try {
+          return await fetchGithubBranchDetailAcrossConnections(connections, targetRepo, branch, base);
+        } catch (err) {
+          try {
+            const fallback = await queryBridgeDetail();
+            if (fallback) return fallback;
+          } catch {
+            // prefer surfacing the remote GitHub error
+          }
+          if (err instanceof GithubError) {
+            throw new ApiError(502, err.message);
+          }
+          throw err;
+        }
+      }
+
+      const localFallback = await queryBridgeDetail();
+      if (localFallback) {
+        return localFallback;
+      }
+      throw new ApiError(409, "请先在设置中连接 GitHub Key 或绑定在线本机节点");
     }
 
     throw new ApiError(404, "Unknown workspace endpoint");

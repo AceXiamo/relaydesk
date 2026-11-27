@@ -317,6 +317,7 @@ export interface UploadedAttachment {
 export interface RepoMirrorEntry {
   repo: string;
   ready: boolean;
+  branch?: string;
   commit: string;
   updated_at: string | null;
   error?: string;
@@ -545,6 +546,145 @@ export interface WorkspaceRepoFileContent {
   error?: string;
 }
 
+export interface RepoBranchPullRequest {
+  number: number;
+  title: string;
+  html_url: string;
+  draft: boolean;
+  base_ref: string;
+  author: string;
+  updated_at: string;
+}
+
+export interface RepoBranchLinkedTask {
+  id: string;
+  number: number;
+  title: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  delivery_ref: string;
+}
+
+export interface RepoLocalBranchInfo {
+  name: string;
+  current: boolean;
+  sha: string;
+  committed_at: string;
+  upstream: string;
+  ahead: number;
+  behind: number;
+  upstream_gone: boolean;
+  author: string;
+  subject: string;
+}
+
+export interface RepoLocalWorkdirStatus {
+  agent_id: string;
+  agent_name: string;
+  online: boolean;
+  workdir: string;
+  repo_dir?: string;
+  remote_repo?: string;
+  current_branch: string;
+  detached: boolean;
+  head_sha: string;
+  has_dirty_files: boolean;
+  staged_count: number;
+  unstaged_count: number;
+  untracked_count: number;
+  branches: RepoLocalBranchInfo[];
+  detailed: boolean;
+  error?: string;
+}
+
+export interface RepoBranchItem {
+  name: string;
+  source: "both" | "remote" | "local";
+  is_default: boolean;
+  is_target: boolean;
+  is_mirror_branch: boolean;
+  is_local_current: boolean;
+  protected: boolean;
+  remote_sha: string;
+  local_sha: string;
+  sha: string;
+  committed_at: string;
+  author: string;
+  subject: string;
+  upstream: string;
+  ahead: number | null;
+  behind: number | null;
+  upstream_gone: boolean;
+  open_pr: RepoBranchPullRequest | null;
+  linked_tasks: RepoBranchLinkedTask[];
+  github_url: string;
+}
+
+export interface RepoBranchesOverviewPayload {
+  repo: string;
+  html_url: string;
+  private?: boolean;
+  default_branch: string;
+  target_branch: string;
+  branch_prefix: string;
+  delivery_mode: DeliveryMode;
+  compare_base: string;
+  github_configured: boolean;
+  remote_error?: string;
+  prs_unavailable?: boolean;
+  mirror: RepoMirrorEntry | null;
+  local_workdir: RepoLocalWorkdirStatus | null;
+  branches: RepoBranchItem[];
+  counts: {
+    total: number;
+    remote: number;
+    local_only: number;
+    with_pr: number;
+    with_task: number;
+  };
+  fetched_at: string;
+}
+
+export interface RepoBranchCommitItem {
+  sha: string;
+  short_sha: string;
+  message: string;
+  author_name: string;
+  author_login?: string;
+  author_avatar?: string;
+  date: string;
+  html_url?: string;
+}
+
+export interface RepoBranchChangedFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface RepoBranchComparison {
+  base: string;
+  status: "ahead" | "behind" | "diverged" | "identical";
+  ahead_by: number;
+  behind_by: number;
+  total_commits: number;
+  files_count: number;
+  additions: number;
+  deletions: number;
+  files: RepoBranchChangedFile[];
+  html_url?: string;
+}
+
+export interface RepoBranchDetailPayload {
+  repo: string;
+  branch: string;
+  source: "remote" | "local";
+  commits: RepoBranchCommitItem[];
+  compare: RepoBranchComparison | null;
+  error?: string;
+}
+
 /* ── Web Codex / CLI Chat ──────────────────────────────────────────────── */
 
 export type ChatFastMode = "default" | "on" | "off";
@@ -577,6 +717,8 @@ export interface BridgeAgentBindingSummary {
   path_error: string;
   enabled: boolean;
   allow_datasource_secrets: boolean;
+  git_branch?: string;
+  has_dirty_files?: boolean;
   updated_at: string;
 }
 
@@ -602,7 +744,7 @@ export interface BridgeAgentSummary {
   bindings: BridgeAgentBindingSummary[];
   runtimes: Partial<Record<ChatRuntime, BridgeRuntimeStatus>>;
   models: ModelCatalogItem[];
-  capabilities: { allowed_roots_enabled?: boolean; db_clients?: string[] };
+  capabilities: { allowed_roots_enabled?: boolean; db_clients?: string[]; git_inspect?: boolean };
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;

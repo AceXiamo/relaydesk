@@ -25,7 +25,14 @@ import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:p
 import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 import { ChatLink } from "./chat-link.ts";
-import type { ChatStreamEvent } from "../../app/lib/types.ts";
+import type {
+  ChatStreamEvent,
+  RepoBranchChangedFile,
+  RepoBranchCommitItem,
+  RepoBranchComparison,
+  RepoBranchDetailPayload,
+  RepoLocalBranchInfo,
+} from "../../app/lib/types.ts";
 import { bridgeCatalogPaths, detectBridgeCatalog, type BridgeCatalog, type BridgeCatalogConfig } from "./catalog.ts";
 import { chatWatchdog, chatTimeoutMessage, type ChatTimeoutReason } from "./chat-timeouts.ts";
 import { readCodexAccount } from "./codex-account.ts";
@@ -194,6 +201,364 @@ async function waitForJobs(jobs: Promise<void>[], signal: AbortSignal): Promise<
   ]);
   signal.throwIfAborted();
 }
+function parseGithubSlugFromRemoteUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  let pathPart = "";
+  const sshMatch = trimmed.match(/^(?:ssh:\/\/)?git@github\.com[:/]([^?#]+)$/i);
+  if (sshMatch?.[1]) {
+    pathPart = sshMatch[1];
+  } else {
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.hostname.toLowerCase() === "github.com") {
+        pathPart = parsed.pathname.replace(/^\/+/, "");
+      }
+    } catch {
+      return "";
+    }
+  }
+  const clean = pathPart.replace(/\.git$/i, "").replace(/\/+$/, "");
+  const m = clean.match(/^([\w.-]+)\/([\w.-]+)$/);
+  if (!m || m[1] === "." || m[1] === ".." || m[2] === "." || m[2] === "..") return "";
+  return `${m[1]}/${m[2]}`;
+}
+
+function isValidBridgeGitRef(value: string): boolean {
+  if (!value || value.length > 160 || value.startsWith("-")) return false;
+  if (/[\x00-\x1f\x7f\s~^:?*[\]\\]/.test(value)) return false;
+  if (value === "@" || value.startsWith("/") || value.endsWith("/")) return false;
+  if (value.startsWith(".") || value.endsWith(".") || value.includes("..") || value.includes("//") || value.includes("@{")) {
+    return false;
+  }
+  return value.split("/").every((part) => Boolean(part) && !part.startsWith(".") && !part.endsWith(".lock"));
+}
+
+function runBridgeGit(cwd: string, args: string[], timeoutMs = 3000) {
+  return spawnSync("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", ...args], {
+    cwd,
+    encoding: "utf8",
+    timeout: timeoutMs,
+    maxBuffer: 512 * 1024,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_ASKPASS: "",
+      GCM_INTERACTIVE: "never",
+    },
+  });
+}
+
+function inspectGitDirMeta(dir: string): { dir: string; remoteRepo: string } | null {
+  const insideRes = runBridgeGit(dir, ["rev-parse", "--is-inside-work-tree"], 1500);
+  if (insideRes.status !== 0 || insideRes.stdout?.trim() !== "true") return null;
+  const remoteRes = runBridgeGit(dir, ["remote", "get-url", "origin"], 1500);
+  const remoteRepo = remoteRes.status === 0 ? parseGithubSlugFromRemoteUrl(remoteRes.stdout ?? "") : "";
+  return { dir, remoteRepo };
+}
+
+function resolveGitRepoDir(cwd: string, requestedRepo?: string): { dir: string; remoteRepo: string } | null {
+  const cleanReq = requestedRepo?.trim() ?? "";
+  const requestedSlug = cleanReq.match(/^[\w.-]+\/[\w.-]+$/) ? cleanReq : "";
+  const requestedName = requestedSlug ? requestedSlug.split("/")[1]?.toLowerCase() ?? "" : "";
+  const rootMeta = inspectGitDirMeta(cwd);
+  if (rootMeta && (!requestedSlug || (rootMeta.remoteRepo && rootMeta.remoteRepo.toLowerCase() === requestedSlug.toLowerCase()))) {
+    return rootMeta;
+  }
+
+  let nameMatched: { dir: string; remoteRepo: string } | null = null;
+  let firstChild: { dir: string; remoteRepo: string } | null = null;
+  try {
+    const dirents = readdirSync(cwd, { withFileTypes: true });
+    for (const entry of dirents) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      const child = join(cwd, entry.name);
+      let realChild: string;
+      try {
+        realChild = realpathSync(child);
+      } catch {
+        continue;
+      }
+      if (!inside(cwd, realChild)) continue;
+      const meta = inspectGitDirMeta(realChild);
+      if (!meta) continue;
+      if (!firstChild) firstChild = meta;
+      if (requestedSlug && meta.remoteRepo && meta.remoteRepo.toLowerCase() === requestedSlug.toLowerCase()) {
+        return meta;
+      }
+      if (requestedName && !nameMatched && entry.name.toLowerCase() === requestedName) {
+        nameMatched = meta;
+      }
+    }
+  } catch {
+    // ignore child directory read errors
+  }
+
+  if (requestedSlug) {
+    return nameMatched ?? rootMeta ?? null;
+  }
+  return rootMeta ?? firstChild ?? null;
+}
+
+function parseTrackCounts(track: string): { ahead: number; behind: number; upstream_gone: boolean } {
+  const aheadMatch = track.match(/\bahead\s+(\d+)\b/i);
+  const behindMatch = track.match(/\bbehind\s+(\d+)\b/i);
+  return {
+    ahead: aheadMatch ? Number(aheadMatch[1]) || 0 : 0,
+    behind: behindMatch ? Number(behindMatch[1]) || 0 : 0,
+    upstream_gone: /\bgone\b/i.test(track),
+  };
+}
+
+function inspectLocalGitStatus(cwd: string, requestedRepo?: string) {
+  const target = resolveGitRepoDir(cwd, requestedRepo);
+  if (!target) {
+    return {
+      ok: true,
+      workdir: cwd,
+      repo_dir: "",
+      remote_repo: "",
+      current_branch: "",
+      detached: false,
+      head_sha: "",
+      has_dirty_files: false,
+      staged_count: 0,
+      unstaged_count: 0,
+      untracked_count: 0,
+      branches: [] as RepoLocalBranchInfo[],
+      error: "未在绑定目录中找到 Git 仓库",
+    };
+  }
+
+  const branchRes = runBridgeGit(target.dir, ["symbolic-ref", "--quiet", "--short", "HEAD"], 1500);
+  const headRes = runBridgeGit(target.dir, ["rev-parse", "--short", "HEAD"], 1500);
+  const currentBranch = branchRes.status === 0 ? (branchRes.stdout ?? "").trim().slice(0, 200) : "";
+  const headSha = headRes.status === 0 ? (headRes.stdout ?? "").trim().slice(0, 40) : "";
+  const detached = branchRes.status !== 0 && Boolean(headSha);
+
+  let staged = 0;
+  let unstaged = 0;
+  let untracked = 0;
+  const statusRes = runBridgeGit(target.dir, ["status", "--porcelain", "--ignore-submodules=all"], 2000);
+  if (statusRes.status === 0 && statusRes.stdout) {
+    for (const line of statusRes.stdout.split(/\r?\n/)) {
+      if (!line) continue;
+      if (line.startsWith("??")) {
+        untracked += 1;
+      } else if (line.length >= 2) {
+        const x = line[0];
+        const y = line[1];
+        if (x !== " " && x !== "?") staged += 1;
+        if (y !== " " && y !== "?") unstaged += 1;
+      }
+    }
+  }
+
+  const branches: RepoLocalBranchInfo[] = [];
+  const refsRes = runBridgeGit(
+    target.dir,
+    [
+      "for-each-ref",
+      "--sort=-committerdate",
+      "--count=100",
+      "--format=%(refname:short)%09%(HEAD)%09%(objectname:short)%09%(committerdate:iso-strict)%09%(upstream:short)%09%(upstream:track,nobracket)%09%(authorname)%09%(subject)",
+      "refs/heads",
+    ],
+    3000,
+  );
+  if (refsRes.status === 0 && refsRes.stdout) {
+    for (const line of refsRes.stdout.split(/\r?\n/)) {
+      if (!line) continue;
+      const [name = "", headMark = "", sha = "", committedAt = "", upstream = "", track = "", author = "", ...subjectParts] =
+        line.split("\t");
+      if (!name) continue;
+      const trackInfo = parseTrackCounts(track);
+      branches.push({
+        name: name.slice(0, 200),
+        current: headMark.trim() === "*" || (Boolean(currentBranch) && name === currentBranch),
+        sha: sha.slice(0, 40),
+        committed_at: committedAt.slice(0, 64),
+        upstream: upstream.slice(0, 200),
+        ahead: trackInfo.ahead,
+        behind: trackInfo.behind,
+        upstream_gone: trackInfo.upstream_gone,
+        author: author.slice(0, 120),
+        subject: subjectParts.join("\t").slice(0, 240),
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    workdir: cwd,
+    repo_dir: target.dir,
+    remote_repo: target.remoteRepo,
+    current_branch: currentBranch,
+    detached,
+    head_sha: headSha,
+    has_dirty_files: staged + unstaged + untracked > 0,
+    staged_count: staged,
+    unstaged_count: unstaged,
+    untracked_count: untracked,
+    branches,
+  };
+}
+
+function resolveLocalCompareRef(repoDir: string, baseBranch: string): string | null {
+  if (!baseBranch || !isValidBridgeGitRef(baseBranch)) return null;
+  for (const ref of [`refs/heads/${baseBranch}`, `refs/remotes/origin/${baseBranch}`]) {
+    const check = runBridgeGit(repoDir, ["rev-parse", "--verify", "--quiet", ref], 1500);
+    if (check.status === 0) return ref;
+  }
+  return null;
+}
+
+function inspectLocalBranchDetail(
+  cwd: string,
+  branch: string,
+  baseBranch: string,
+  requestedRepo?: string,
+): { ok: true } & RepoBranchDetailPayload {
+  const cleanBranch = branch.trim();
+  if (!isValidBridgeGitRef(cleanBranch)) {
+    throw new Error("无效的分支名称");
+  }
+  const cleanBase = baseBranch.trim();
+  if (cleanBase && !isValidBridgeGitRef(cleanBase)) {
+    throw new Error("无效的基线分支名称");
+  }
+  const target = resolveGitRepoDir(cwd, requestedRepo);
+  if (!target) {
+    throw new Error("未在绑定目录中找到 Git 仓库");
+  }
+
+  const branchRef = `refs/heads/${cleanBranch}`;
+  if (runBridgeGit(target.dir, ["rev-parse", "--verify", "--quiet", branchRef], 1500).status !== 0) {
+    throw new Error("本机仓库中不存在该分支");
+  }
+
+  const commits: RepoBranchCommitItem[] = [];
+  const logRes = runBridgeGit(
+    target.dir,
+    ["log", "-n", "12", "--format=%H%x09%h%x09%an%x09%aI%x09%s", branchRef, "--"],
+    3000,
+  );
+  if (logRes.status === 0 && logRes.stdout) {
+    for (const line of logRes.stdout.split(/\r?\n/)) {
+      if (!line) continue;
+      const [sha = "", shortSha = "", authorName = "", date = "", ...msgParts] = line.split("\t");
+      if (!sha) continue;
+      commits.push({
+        sha: sha.slice(0, 64),
+        short_sha: (shortSha || sha.slice(0, 7)).slice(0, 16),
+        message: msgParts.join("\t").slice(0, 300) || shortSha || sha.slice(0, 7),
+        author_name: authorName.slice(0, 120),
+        date: date.slice(0, 64),
+      });
+    }
+  }
+
+  let compare: RepoBranchComparison | null = null;
+  if (cleanBase && cleanBase !== cleanBranch) {
+    const baseRef = resolveLocalCompareRef(target.dir, cleanBase);
+    if (baseRef) {
+      const range = `${baseRef}...${branchRef}`;
+      const revList = runBridgeGit(target.dir, ["rev-list", "--left-right", "--count", range], 3000);
+      if (revList.status === 0 && revList.stdout) {
+        const [behindRaw = "0", aheadRaw = "0"] = revList.stdout.trim().split(/\s+/);
+        const behindBy = Math.max(0, Number(behindRaw) || 0);
+        const aheadBy = Math.max(0, Number(aheadRaw) || 0);
+
+        const statusMap = new Map<string, string>();
+        const nameStatusRes = runBridgeGit(target.dir, ["diff", "--name-status", range], 3000);
+        if (nameStatusRes.status === 0 && nameStatusRes.stdout) {
+          for (const line of nameStatusRes.stdout.split(/\r?\n/)) {
+            if (!line) continue;
+            const cols = line.split("\t");
+            const code = cols[0]?.[0] ?? "M";
+            const file = cols[cols.length - 1] ?? "";
+            if (!file) continue;
+            const mapped =
+              code === "A"
+                ? "added"
+                : code === "D"
+                  ? "removed"
+                  : code === "R"
+                    ? "renamed"
+                    : "modified";
+            statusMap.set(file, mapped);
+          }
+        }
+
+        let filesCount = 0;
+        let additions = 0;
+        let deletions = 0;
+        const files: RepoBranchChangedFile[] = [];
+        const numstatRes = runBridgeGit(target.dir, ["diff", "--numstat", range], 3000);
+        if (numstatRes.status === 0 && numstatRes.stdout) {
+          for (const line of numstatRes.stdout.split(/\r?\n/)) {
+            if (!line) continue;
+            const [addRaw = "0", delRaw = "0", ...pathParts] = line.split("\t");
+            const filename = pathParts.join("\t");
+            if (!filename) continue;
+            const add = addRaw === "-" ? 0 : Math.max(0, Number(addRaw) || 0);
+            const del = delRaw === "-" ? 0 : Math.max(0, Number(delRaw) || 0);
+            filesCount += 1;
+            additions += add;
+            deletions += del;
+            if (files.length < 20) {
+              files.push({
+                filename: filename.slice(0, 400),
+                status: statusMap.get(filename) ?? "modified",
+                additions: add,
+                deletions: del,
+              });
+            }
+          }
+        }
+        if (filesCount === 0 && statusMap.size > 0) {
+          filesCount = statusMap.size;
+          for (const [filename, status] of statusMap.entries()) {
+            if (files.length >= 20) break;
+            files.push({ filename: filename.slice(0, 400), status, additions: 0, deletions: 0 });
+          }
+        }
+
+        const status: RepoBranchComparison["status"] =
+          aheadBy === 0 && behindBy === 0
+            ? "identical"
+            : aheadBy > 0 && behindBy > 0
+              ? "diverged"
+              : aheadBy > 0
+                ? "ahead"
+                : "behind";
+
+        compare = {
+          base: cleanBase,
+          status,
+          ahead_by: aheadBy,
+          behind_by: behindBy,
+          total_commits: aheadBy,
+          files_count: filesCount,
+          additions,
+          deletions,
+          files,
+        };
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    repo: requestedRepo || target.remoteRepo || "",
+    branch: cleanBranch,
+    source: "local",
+    commits,
+    compare,
+  };
+}
+
 function projects(config: Config, home: string) {
   return Object.entries(config.projects ?? {})
     .filter(([id]) => validProjectId(id))
@@ -320,6 +685,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
     accept_cli_runs: c.accept_cli_runs === true,
     ...cat,
     allowed_roots_enabled: !!c.allowed_roots?.length,
+    git_inspect: true,
     projects: projects(c, home),
   });
   const log = (msg: string) => {
@@ -950,6 +1316,41 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
       }
       if (f.type === "catalog.refresh") void reload(f.id);
       if (f.type === "project.bind") bind(f);
+      if (f.type === "repo.git_status") {
+        if (!f.id) return;
+        const pid = f.payload.project_id;
+        const requestedRepo = typeof f.payload.repo === "string" ? f.payload.repo : undefined;
+        try {
+          if (typeof pid !== "string" || !validProjectId(pid)) throw new Error("Invalid project_id");
+          const proj = config.projects?.[pid];
+          if (!proj) throw new Error("Project is not locally bound");
+          const cwd = projectWorkdir(proj, config, home);
+          send(socket, "repo.git_status.result", inspectLocalGitStatus(cwd, requestedRepo), f.id);
+        } catch (e) {
+          send(socket, "repo.git_status.result", { ok: false, error: message(e) }, f.id);
+        }
+      }
+      if (f.type === "repo.git_branch_detail") {
+        if (!f.id) return;
+        const pid = f.payload.project_id;
+        const branch = typeof f.payload.branch === "string" ? f.payload.branch : "";
+        const baseBranch = typeof f.payload.base_branch === "string" ? f.payload.base_branch : "";
+        const requestedRepo = typeof f.payload.repo === "string" ? f.payload.repo : undefined;
+        try {
+          if (typeof pid !== "string" || !validProjectId(pid)) throw new Error("Invalid project_id");
+          const proj = config.projects?.[pid];
+          if (!proj) throw new Error("Project is not locally bound");
+          const cwd = projectWorkdir(proj, config, home);
+          send(
+            socket,
+            "repo.git_branch_detail.result",
+            inspectLocalBranchDetail(cwd, branch, baseBranch, requestedRepo),
+            f.id,
+          );
+        } catch (e) {
+          send(socket, "repo.git_branch_detail.result", { ok: false, error: message(e) }, f.id);
+        }
+      }
       if (f.type === "chat.start") start(f.payload as unknown as ChatStart);
       if (f.type === "chat.received") {
         const run = active.get(String(f.payload.run_id));
