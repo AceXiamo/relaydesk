@@ -739,7 +739,12 @@ function parseDeliveryMode(value: unknown): DeliveryMode {
 }
 
 function normalizeResolution(value: unknown): TaskResolution {
-  if (value === "shipped" || value === "dismissed" || value === "merged") {
+  if (
+    value === "shipped" ||
+    value === "dismissed" ||
+    value === "wontfix" ||
+    value === "merged"
+  ) {
     return value;
   }
   return null;
@@ -2184,12 +2189,43 @@ export class Store {
       changes = { status: newStatus };
       if (newStatus === "done") {
         changes.owner = "none";
+        if (task.resolution === "wontfix") {
+          changes.resolution = null;
+        }
       } else {
+        changes.resolution = null;
         changes.deploy_status = "not_required";
         changes.deployed_at = null;
         changes.release_id = null;
       }
       event = `${status} → ${newStatus}`;
+    } else if (action === "ignore" && owner !== "agent") {
+      if (
+        task.deploy_status === "deploying" ||
+        task.deploy_status === "deployed" ||
+        (status === "done" && task.resolution === "shipped")
+      ) {
+        throw new ApiError(409, "Cannot ignore a shipped or deploying task");
+      }
+      if (status === "done" && task.resolution === "wontfix") {
+        throw new ApiError(409, "Task is already ignored");
+      }
+      const reason =
+        "body" in data && data.body !== undefined
+          ? field(data, "body", 4000, false)
+          : "reason" in data && data.reason !== undefined
+            ? field(data, "reason", 4000, false)
+            : "";
+      changes = {
+        status: "done",
+        owner: "none",
+        lease: null,
+        resolution: "wontfix",
+        deploy_status: "not_required",
+        deployed_at: null,
+        release_id: null,
+      };
+      event = reason ? `Ignored by operator\n${reason}` : "Ignored by operator";
     } else if (action === "reopen" && owner !== "agent") {
       changes = {
         status: "ready",

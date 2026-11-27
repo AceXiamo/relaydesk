@@ -219,7 +219,19 @@ interface PromptSuggestion {
   mode: "comment" | "assistant";
 }
 
-function getPromptSuggestions(status: TaskStatus): PromptSuggestion[] {
+function getPromptSuggestions(
+  status: TaskStatus,
+  resolution?: TaskRecord["resolution"],
+): PromptSuggestion[] {
+  if (status === "done" && resolution === "wontfix") {
+    return [
+      {
+        label: "恢复并重新处理",
+        text: "重新评估该需求，请继续处理：\n",
+        mode: "comment",
+      },
+    ];
+  }
   if (status === "done" || status === "review") {
     return [
       {
@@ -295,6 +307,8 @@ export function TaskDetailDrawer({
   const [mergeOpen, setMergeOpen] = useState(false);
   const [mergeTarget, setMergeTarget] = useState("");
   const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
+  const [ignoreConfirmOpen, setIgnoreConfirmOpen] = useState(false);
+  const [ignoreReason, setIgnoreReason] = useState("");
   const [tab, setTab] = useState(initialTab);
   const [agentSessionData, setAgentSessionData] = useState<ChatSessionRecord | null>(null);
   const [savingDispatchConfig, setSavingDispatchConfig] = useState(false);
@@ -401,6 +415,9 @@ export function TaskDetailDrawer({
     setExpandedTraces({});
     setMergeOpen(false);
     setMergeTarget("");
+    setForceConfirmOpen(false);
+    setIgnoreConfirmOpen(false);
+    setIgnoreReason("");
     setAgentSessionData(null);
     setDraftTarget("auto");
     setDraftRuntime(null);
@@ -448,6 +465,21 @@ export function TaskDetailDrawer({
   );
 
   if (!detail && !loading) return null;
+
+  const isIgnored = Boolean(
+    task && task.status === "done" && task.resolution === "wontfix",
+  );
+
+  const canIgnoreTask = Boolean(
+    task &&
+      !task.merged_into &&
+      task.owner !== "agent" &&
+      task.deploy_status !== "deploying" &&
+      (task.status !== "done" ||
+        (task.resolution !== "shipped" &&
+          task.resolution !== "wontfix" &&
+          task.deploy_status !== "deployed")),
+  );
 
   const canReopenTask = Boolean(
     task &&
@@ -561,9 +593,9 @@ export function TaskDetailDrawer({
             text: "请结合任务需求与改动内容审计当前 PR，评估正确性、边界与回归风险，并给出是否建议合并的结论。",
             mode: "assistant",
           },
-          ...getPromptSuggestions(task.status),
+          ...getPromptSuggestions(task.status, task.resolution),
         ]
-      : getPromptSuggestions(task.status)
+      : getPromptSuggestions(task.status, task.resolution)
     : [];
 
   const runAction = async (
@@ -790,7 +822,7 @@ export function TaskDetailDrawer({
                   {task.title}
                 </h2>
                 <div className="flex flex-wrap items-center gap-2 mt-3">
-                  <StatusBadge status={task.status} />
+                  <StatusBadge status={task.status} resolution={task.resolution} />
                   <PriorityBadge priority={task.priority} showLabel />
                   <OwnerChip owner={task.owner} lastSeen={task.last_seen} />
                   <SourceBadge source={task.source} />
@@ -803,9 +835,11 @@ export function TaskDetailDrawer({
                   className={`relative overflow-hidden rounded-xl border px-3.5 py-2.5 rd-hairline-glow transition-colors ${
                     task.resolution === "shipped"
                       ? "border-emerald-500/25 bg-emerald-500/[0.05] dark:bg-emerald-500/[0.07]"
-                      : task.attempts >= 3
-                        ? "border-rose-500/25 bg-rose-500/[0.05] dark:bg-rose-500/[0.07]"
-                        : "border-[var(--border-subtle)] bg-[var(--surface-card)]"
+                      : isIgnored
+                        ? "border-zinc-500/25 bg-zinc-500/[0.04] dark:bg-zinc-500/[0.06]"
+                        : task.attempts >= 3
+                          ? "border-rose-500/25 bg-rose-500/[0.05] dark:bg-rose-500/[0.07]"
+                          : "border-[var(--border-subtle)] bg-[var(--surface-card)]"
                   }`}
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -814,6 +848,12 @@ export function TaskDetailDrawer({
                         resolution={task.resolution}
                         triagedBy={task.triaged_by}
                       />
+
+                      {isIgnored && (
+                        <span className="text-[11.5px] text-[var(--text-muted)]">
+                          已设为忽略，不再自动派发执行
+                        </span>
+                      )}
 
                       {task.deploy_status && task.deploy_status !== "not_required" && (
                         onOpenReleases ? (
@@ -934,11 +974,13 @@ export function TaskDetailDrawer({
                           void runAction(
                             "reopen",
                             { action: "reopen", version: task.version },
-                            "已重新推入自动执行队列",
+                            isIgnored
+                              ? "已取消忽略并重新推入队列"
+                              : "已重新推入自动执行队列",
                           )
                         }
                       >
-                        重新入队返工
+                        {isIgnored ? "取消忽略" : "重新入队返工"}
                       </Button>
                     )}
                   </div>
@@ -1206,19 +1248,45 @@ export function TaskDetailDrawer({
                       </Button>
                     ) : null}
 
+                    {canIgnoreTask && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        icon="ban"
+                        loading={busyAction === "ignore"}
+                        disabled={busyAction !== null}
+                        onClick={() => {
+                          setIgnoreReason("");
+                          setIgnoreConfirmOpen(true);
+                        }}
+                      >
+                        忽略
+                      </Button>
+                    )}
+
                     {/* Status instant selector */}
                     {task.owner !== "agent" && (
                       <div className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
                         <span>状态</span>
-                        <Select<TaskStatus>
+                        <Select<TaskStatus | "ignored">
                           ariaLabel="修改任务状态"
                           size="sm"
                           variant="elevated"
                           minMenuWidth={148}
                           className="h-8"
-                          value={task.status}
+                          value={isIgnored ? "ignored" : task.status}
                           disabled={busyAction !== null}
-                          onChange={(nextStatus) =>
+                          onChange={(nextStatus) => {
+                            if (nextStatus === "ignored") {
+                              if (!isIgnored) {
+                                void runAction(
+                                  "ignore",
+                                  { action: "ignore", version: task.version },
+                                  "已将任务设为忽略",
+                                );
+                              }
+                              return;
+                            }
                             void runAction(
                               "status",
                               {
@@ -1227,27 +1295,39 @@ export function TaskDetailDrawer({
                                 status: nextStatus,
                               },
                               `状态已更新为「${STATUS_LABELS[nextStatus]}」`,
-                            )
-                          }
+                            );
+                          }}
                           options={
-                            availableStatuses.map((s) => ({
-                              value: s,
-                              label: STATUS_LABELS[s],
-                              dotClassName:
-                                s === "triage"
-                                  ? "bg-zinc-400"
-                                  : s === "ready"
-                                    ? "bg-indigo-500 dark:bg-indigo-400"
-                                    : s === "working"
-                                      ? "bg-amber-500 dark:bg-amber-400"
-                                      : s === "handoff"
-                                        ? "bg-violet-500 dark:bg-violet-400"
-                                        : s === "waiting"
-                                          ? "bg-rose-500 dark:bg-rose-400"
-                                          : s === "review"
-                                            ? "bg-emerald-500 dark:bg-emerald-400"
-                                            : "bg-zinc-400 dark:bg-zinc-500",
-                            })) satisfies SelectOption<TaskStatus>[]
+                            [
+                              ...availableStatuses.map((s) => ({
+                                value: s,
+                                label: STATUS_LABELS[s],
+                                dotClassName:
+                                  s === "triage"
+                                    ? "bg-zinc-400"
+                                    : s === "ready"
+                                      ? "bg-indigo-500 dark:bg-indigo-400"
+                                      : s === "working"
+                                        ? "bg-amber-500 dark:bg-amber-400"
+                                        : s === "handoff"
+                                          ? "bg-violet-500 dark:bg-violet-400"
+                                          : s === "waiting"
+                                            ? "bg-rose-500 dark:bg-rose-400"
+                                            : s === "review"
+                                              ? "bg-emerald-500 dark:bg-emerald-400"
+                                              : "bg-zinc-400 dark:bg-zinc-500",
+                              })),
+                              ...(canIgnoreTask || isIgnored
+                                ? [
+                                    {
+                                      value: "ignored" as const,
+                                      label: "已忽略",
+                                      icon: "ban",
+                                      iconClassName: "text-zinc-400 dark:text-zinc-500",
+                                    },
+                                  ]
+                                : []),
+                            ] satisfies SelectOption<TaskStatus | "ignored">[]
                           }
                         />
                       </div>
@@ -1966,6 +2046,87 @@ export function TaskDetailDrawer({
           强制接手会立即撤销当前 Local
           Agent 的回写租约并将任务归属给你。若本机执行器只是暂时断网，其进程可能仍在后台运行，请记得在本机检查。
         </p>
+      </Modal>
+
+      {/* Ignore Confirmation Modal */}
+      <Modal
+        open={ignoreConfirmOpen}
+        onClose={() => setIgnoreConfirmOpen(false)}
+        title="忽略此任务？"
+        maxWidth="sm"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setIgnoreConfirmOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              icon="ban"
+              loading={busyAction === "ignore"}
+              onClick={async () => {
+                if (!task) return;
+                const trimmed = ignoreReason.trim();
+                setIgnoreConfirmOpen(false);
+                await runAction(
+                  "ignore",
+                  {
+                    action: "ignore",
+                    version: task.version,
+                    ...(trimmed ? { body: trimmed } : {}),
+                  },
+                  "已将任务设为忽略",
+                );
+              }}
+            >
+              确认忽略
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-[13.5px] leading-relaxed text-[var(--text-secondary)]">
+            忽略后该任务将标记为「暂不实施」并退出自动处理队列，后续仍可通过「取消忽略」随时恢复。
+          </p>
+          <label className="block space-y-1.5">
+            <span className="text-[12px] font-medium text-[var(--text-muted)]">
+              忽略原因（可选，仅内部留存）
+            </span>
+            <textarea
+              value={ignoreReason}
+              onChange={(e) => setIgnoreReason(e.target.value)}
+              onKeyDown={(e) => {
+                if (
+                  (e.metaKey || e.ctrlKey) &&
+                  e.key === "Enter" &&
+                  !e.nativeEvent.isComposing &&
+                  task
+                ) {
+                  e.preventDefault();
+                  const trimmed = ignoreReason.trim();
+                  setIgnoreConfirmOpen(false);
+                  void runAction(
+                    "ignore",
+                    {
+                      action: "ignore",
+                      version: task.version,
+                      ...(trimmed ? { body: trimmed } : {}),
+                    },
+                    "已将任务设为忽略",
+                  );
+                }
+              }}
+              rows={3}
+              maxLength={4000}
+              placeholder="例如：当前阶段暂不规划该功能、与产品定位不符…"
+              className="w-full resize-y rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-2.5 text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+        </div>
       </Modal>
     </>
   );

@@ -206,7 +206,9 @@ function publicTask(row: FeedbackRow, id: FeedbackIdentity) {
                       ? "发布暂缓"
                       : row.resolution === "shipped"
                         ? "已完成处理"
-                        : "已结束处理";
+                        : row.resolution === "wontfix"
+                          ? "已忽略"
+                          : "已结束处理";
   return {
     id: row.id,
     code: `RD-${row.number}`,

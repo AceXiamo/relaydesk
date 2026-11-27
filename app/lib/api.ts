@@ -274,7 +274,8 @@ export const api = {
         | "status"
         | "priority"
         | "merge"
-        | "reopen";
+        | "reopen"
+        | "ignore";
       version: number;
       status?: TaskStatus;
       priority?: TaskPriority;

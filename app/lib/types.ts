@@ -110,7 +110,7 @@ export interface ReleaseRecord {
   finished_at: string | null;
 }
 
-export type TaskResolution = "shipped" | "dismissed" | "merged" | null;
+export type TaskResolution = "shipped" | "dismissed" | "wontfix" | "merged" | null;
 
 export type WorkspaceView =
   | "queue"

@@ -23,6 +23,7 @@ import {
   filterTasksForView,
   type CockpitFilter,
   type SortMode,
+  type TaskStatusFilter,
 } from "~/components/TaskQueueView.tsx";
 import { Button, ToastProvider, useToast } from "~/components/ui.tsx";
 import { api } from "~/lib/api.ts";
@@ -38,7 +39,6 @@ import type {
   TaskDetailPayload,
   TaskRecord,
   TaskSource,
-  TaskStatus,
   WorkspaceView,
 } from "~/lib/types.ts";
 
@@ -112,7 +112,7 @@ function ConsoleWorkspace() {
 
   // Filters
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<TaskStatus | "">("");
+  const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>("");
   const [sourceFilter, setSourceFilter] = useState<TaskSource | "">("");
   const [cockpitFilter, setCockpitFilter] = useState<CockpitFilter>("");
   const [sortMode, setSortMode] = useState<SortMode>("updated");
@@ -436,7 +436,7 @@ function ConsoleWorkspace() {
   }, [chatStreams, refreshTasks]);
 
   const handleQuickAction = useCallback(
-    async (task: TaskRecord, action: "claim" | "ready" | "done") => {
+    async (task: TaskRecord, action: "claim" | "ready" | "done" | "ignore") => {
       try {
         if (action === "claim") {
           await api.taskAction(task.id, { action: "claim", version: task.version });
@@ -448,6 +448,12 @@ function ConsoleWorkspace() {
             version: task.version,
           });
           toast.success("已移入待处理队列");
+        } else if (action === "ignore") {
+          await api.taskAction(task.id, {
+            action: "ignore",
+            version: task.version,
+          });
+          toast.success("已将任务设为忽略");
         } else {
           await api.taskAction(task.id, {
             action: "status",
@@ -475,7 +481,11 @@ function ConsoleWorkspace() {
           action: "reopen",
           version: task.version,
         });
-        toast.success("已重新放回自动执行队列");
+        toast.success(
+          task.resolution === "wontfix"
+            ? "已取消忽略并重新放回自动队列"
+            : "已重新放回自动执行队列",
+        );
         await refreshTasks();
         if (detail?.task.id === task.id) {
           const payload = await api.getTaskDetail(task.id);

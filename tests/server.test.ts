@@ -1762,6 +1762,128 @@ describe("Autonomous Execution Queue, Lease Reclamation & Agent Operations", () 
     expect(tReopened.attempts).toBe(0);
     expect(tReopened.resolution).toBeNull();
   });
+
+  it("supports ignoring tasks as wontfix with optional reason, guards invalid states, and allows reopening", async () => {
+    const srv = await startApiServer();
+    const pRes = await jsonReq(`${srv.url}/api/projects`, "POST", {
+      name: "Ignore App",
+      repo: "acexiamo/ignore",
+    });
+    const project = pRes.json.project as { id: string; agent_key: string };
+    const auth = { Authorization: `Bearer ${project.agent_key}` };
+
+    const t = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "支持冷门硬件签名器",
+        body: "用户提议接入某个冷门硬件签名器",
+        priority: "normal",
+        skip_prescreen: true,
+      })
+    ).json.task as { id: string; version: number };
+
+    // Ignore with optional reason
+    const ignoredRes = await jsonReq(`${srv.url}/api/tasks/${t.id}/action`, "POST", {
+      action: "ignore",
+      version: t.version,
+      body: "当前版本暂不规划此硬件支持",
+    });
+    expect(ignoredRes.status).toBe(200);
+    const ignoredTask = ignoredRes.json.task as {
+      status: string;
+      owner: string;
+      resolution: string | null;
+      deploy_status: string;
+      version: number;
+    };
+    expect(ignoredTask.status).toBe("done");
+    expect(ignoredTask.owner).toBe("none");
+    expect(ignoredTask.resolution).toBe("wontfix");
+    expect(ignoredTask.deploy_status).toBe("not_required");
+
+    // Ignored event is recorded and agent queue excludes it
+    const detail = await jsonReq(`${srv.url}/api/tasks/${t.id}`);
+    const msgs = detail.json.messages as Array<{ kind: string; body: string }>;
+    expect(
+      msgs.some((m) => m.kind === "event" && m.body === "Ignored by operator\n当前版本暂不规划此硬件支持"),
+    ).toBe(true);
+    const claimRes = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    expect(claimRes.json.task).toBeNull();
+
+    // Ignoring an already ignored task returns 409
+    const dupIgnore = await jsonReq(`${srv.url}/api/tasks/${t.id}/action`, "POST", {
+      action: "ignore",
+      version: ignoredTask.version,
+    });
+    expect(dupIgnore.status).toBe(409);
+
+    // Reopen clears wontfix and returns task to ready
+    const reopenRes = await jsonReq(`${srv.url}/api/tasks/${t.id}/action`, "POST", {
+      action: "reopen",
+      version: ignoredTask.version,
+    });
+    expect(reopenRes.status).toBe(200);
+    const reopenedTask = reopenRes.json.task as {
+      status: string;
+      resolution: string | null;
+      version: number;
+    };
+    expect(reopenedTask.status).toBe("ready");
+    expect(reopenedTask.resolution).toBeNull();
+
+    // Agent holding lease blocks operator ignore (409)
+    const claimActive = await jsonReq(`${srv.url}/api/projects/${project.id}/agent/claim`, "POST", {}, auth);
+    const claimedTask = claimActive.json.task as { id: string; version: number };
+    expect(claimedTask.id).toBe(t.id);
+    const blockedIgnore = await jsonReq(`${srv.url}/api/tasks/${t.id}/action`, "POST", {
+      action: "ignore",
+      version: claimedTask.version,
+    });
+    expect(blockedIgnore.status).toBe(409);
+
+    // Shipped / deployed tasks cannot be ignored (409)
+    await jsonReq(
+      `${srv.url}/api/projects/${project.id}/agent/${t.id}/finish`,
+      "POST",
+      { lease: claimActive.json.lease, complete: true, body: "Shipped instead" },
+      auth,
+    );
+    const shippedDetail = await jsonReq(`${srv.url}/api/tasks/${t.id}`);
+    const shippedTask = shippedDetail.json.task as { version: number };
+    const shippedIgnore = await jsonReq(`${srv.url}/api/tasks/${t.id}/action`, "POST", {
+      action: "ignore",
+      version: shippedTask.version,
+    });
+    expect(shippedIgnore.status).toBe(409);
+
+    // Status change to ready / done clears wontfix cleanly, and chatAgentTaskOp transition_task preserves wontfix
+    const t2 = (
+      await jsonReq(`${srv.url}/api/projects/${project.id}/tasks`, "POST", {
+        title: "MCP wontfix persistence",
+        body: "Verify normalizeResolution handles wontfix",
+        priority: "low",
+        skip_prescreen: true,
+      })
+    ).json.task as { id: string; version: number };
+    const wontfixOp = srv.store.chatAgentTaskOp(project.id, "transition_task", {
+      task: t2.id,
+      status: "done",
+      resolution: "wontfix",
+    });
+    expect((wontfixOp.result as { task: { resolution: string | null; deploy_status: string } }).task).toMatchObject({
+      resolution: "wontfix",
+      deploy_status: "not_required",
+    });
+    const t2Fetched = await jsonReq(`${srv.url}/api/tasks/${t2.id}`);
+    expect((t2Fetched.json.task as { resolution: string | null; version: number }).resolution).toBe("wontfix");
+
+    const switchToDone = await jsonReq(`${srv.url}/api/tasks/${t2.id}/action`, "POST", {
+      action: "status",
+      status: "done",
+      version: (t2Fetched.json.task as { version: number }).version,
+    });
+    expect(switchToDone.status).toBe(200);
+    expect((switchToDone.json.task as { status: string; resolution: string | null }).resolution).toBeNull();
+  });
 });
 
 describe("Feedback prescreening", () => {

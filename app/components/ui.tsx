@@ -131,6 +131,7 @@ export function Button({
 
 export interface StatusBadgeProps {
   status: TaskStatus;
+  resolution?: TaskResolution;
   compact?: boolean;
   className?: string;
 }
@@ -178,11 +179,19 @@ const STATUS_VISUALS: Record<TaskStatus, StatusVisual> = {
 
 export function StatusBadge({
   status,
+  resolution,
   compact = false,
   className,
 }: StatusBadgeProps) {
-  const visual = STATUS_VISUALS[status];
-  const label = STATUS_LABELS[status];
+  const isIgnored = status === "done" && resolution === "wontfix";
+  const visual: StatusVisual = isIgnored
+    ? {
+        pill: "bg-zinc-500/10 text-zinc-500 dark:text-zinc-400 border-zinc-500/20",
+        dot: "bg-zinc-400 dark:bg-zinc-500",
+        icon: "ban",
+      }
+    : STATUS_VISUALS[status];
+  const label = isIgnored ? "已忽略" : STATUS_LABELS[status];
 
   return (
     <span
@@ -499,6 +508,11 @@ export function ResolutionBadge({
       "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-zinc-500/20";
     iconName = triagedBy === "server_ai" ? "shield-check" : "filter";
     label = triagedBy === "server_ai" ? "AI 预筛归档" : "已过滤归档";
+  } else if (resolution === "wontfix") {
+    pillClass =
+      "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-zinc-500/25";
+    iconName = "ban";
+    label = "暂不实施";
   } else {
     pillClass =
       "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/25";

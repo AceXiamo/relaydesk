@@ -3904,6 +3904,9 @@ export class ApiRouter {
         if (res.task.owner === "none" && (res.task.status === "ready" || res.task.status === "triage")) {
           postCommit.push(() => this.taskDispatcher.schedule(taskRow.project_id));
         }
+        if (res.task.status === "done") {
+          postCommit.push(() => this.releaseDispatcher.schedule(taskRow.project_id));
+        }
         return { task: this.store.getTaskView(taskRow.id) };
       }
     }

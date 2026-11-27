@@ -173,6 +173,15 @@ function resolveStatusVisual(label: string): StatusVisual {
       pulse: false,
     };
   }
+  if (label === "已忽略") {
+    return {
+      stepIndex: 4,
+      badgeClass: "bg-[var(--p-field)] text-[var(--p-ink-2)] border-transparent",
+      dotTone: "zinc",
+      pulse: false,
+      specialNote: "该需求已设为忽略，当前暂不实施",
+    };
+  }
   if (label === "已关联处理" || label === "已结束处理") {
     return {
       stepIndex: 4,
@@ -1118,6 +1127,7 @@ function PortalContent() {
         (t.status_label === "已上线" ||
           t.status_label === "已确认解决" ||
           t.status_label === "已完成处理" ||
+          t.status_label === "已忽略" ||
           t.status_label === "已结束处理")
       ) {
         return false;

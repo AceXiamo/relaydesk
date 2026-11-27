@@ -575,6 +575,25 @@ describe("feedback rate limits and deploy authorization", () => {
     vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_001);
     createFeedbackTicket(store, project, id, input);
   });
+
+  it("exposes status_label='已忽略' without internal ignore reason or public action flags when ignored", () => {
+    const id = makeWidget(),
+      created = createFeedbackTicket(store, project, id, input),
+      taskId = created.task.id;
+    store.operatorAction(taskId, {
+      action: "ignore",
+      body: "SECRET internal triage rationale",
+    });
+
+    const dto = getFeedbackTicket(store, project, id, taskId);
+    expect(dto.task).toMatchObject({
+      status_label: "已忽略",
+      can_reply: false,
+      can_accept: false,
+      can_request_deploy: false,
+    });
+    expect(JSON.stringify(dto)).not.toContain("SECRET");
+  });
 });
 
 it("migrates old rows fail-closed without inferring visibility or ownership from historic roles or source", () => {

@@ -68,6 +68,7 @@ export const DELIVERY_MODE_DESCRIPTIONS: Record<DeliveryMode, string> = {
 export const RESOLUTION_LABELS: Record<Exclude<TaskResolution, null>, string> = {
   shipped: "已自动交付",
   dismissed: "已过滤归档",
+  wontfix: "暂不实施",
   merged: "已合并去重",
 };
 
@@ -177,6 +178,7 @@ const EVENT_TRANSLATIONS: Record<string, string> = {
   "Agent submitted task for review": "Agent 已提交验收",
   "Agent shipped and completed task": "Agent 已验证交付并自动闭环",
   "Agent dismissed task": "Agent 研判为无效/已解决并归档",
+  "Ignored by operator": "已设为忽略（暂不实施）",
   "Server AI pre-screened as noise and archived": "服务端 AI 预筛判定为噪音并自动归档",
   "Server AI pre-screened and promoted to ready": "服务端 AI 预筛通过，自动进入队列",
   "Stale agent lease reclaimed": "超时 Agent 租约已自动回收",

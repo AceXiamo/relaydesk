@@ -625,7 +625,7 @@ export function CommandPaletteModal({
                       </span>
                       <span className="truncate">{t.title}</span>
                     </span>
-                    <StatusBadge status={t.status} compact />
+                    <StatusBadge status={t.status} resolution={t.resolution} compact />
                   </button>
                 );
               })}

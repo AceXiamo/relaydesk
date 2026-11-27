@@ -34,6 +34,7 @@ import type {
 
 export type SortMode = "updated" | "priority" | "number";
 export type CockpitFilter = "" | "auto_pending" | "attention";
+export type TaskStatusFilter = TaskStatus | "ignored" | "";
 
 interface TaskQueueViewProps {
   project: ProjectDetail | null;
@@ -41,7 +42,7 @@ interface TaskQueueViewProps {
   view: WorkspaceView;
   selectedTaskId: string | null;
   search: string;
-  statusFilter: TaskStatus | "";
+  statusFilter: TaskStatusFilter;
   sourceFilter: TaskSource | "";
   cockpitFilter?: CockpitFilter;
   sortMode: SortMode;
@@ -49,7 +50,7 @@ interface TaskQueueViewProps {
   automationBusy?: boolean;
   deployBusy?: boolean;
   onSearchChange: (q: string) => void;
-  onStatusFilterChange: (s: TaskStatus | "") => void;
+  onStatusFilterChange: (s: TaskStatusFilter) => void;
   onSourceFilterChange: (s: TaskSource | "") => void;
   onCockpitFilterChange?: (f: CockpitFilter) => void;
   onSortModeChange: (m: SortMode) => void;
@@ -57,7 +58,7 @@ interface TaskQueueViewProps {
   onSelectTask: (id: string) => void;
   onQuickAction: (
     task: TaskRecord,
-    action: "claim" | "ready" | "done",
+    action: "claim" | "ready" | "done" | "ignore",
   ) => Promise<void>;
   onReopenTask: (task: TaskRecord) => Promise<void>;
   onToggleAutomation: (paused: boolean) => Promise<void>;
@@ -202,7 +203,7 @@ export function filterTasksForView(
   tasks: TaskRecord[],
   view: WorkspaceView,
   search: string,
-  statusFilter: TaskStatus | "",
+  statusFilter: TaskStatusFilter,
   sourceFilter: TaskSource | "",
   sortMode: SortMode,
   cockpitFilter: CockpitFilter = "",
@@ -220,7 +221,13 @@ export function filterTasksForView(
     if (view === "queue" && cockpitFilter === "attention" && !isAttentionTask(t)) {
       return false;
     }
-    if (statusFilter && t.status !== statusFilter) return false;
+    if (statusFilter === "ignored") {
+      if (!(t.status === "done" && t.resolution === "wontfix")) return false;
+    } else if (statusFilter === "done") {
+      if (!(t.status === "done" && t.resolution !== "wontfix")) return false;
+    } else if (statusFilter && t.status !== statusFilter) {
+      return false;
+    }
     if (sourceFilter && t.source !== sourceFilter) return false;
     if (q) {
       const hay =
@@ -298,6 +305,8 @@ export function TaskQueueView({
       shipped: active.filter((t) => t.status === "done" && t.resolution === "shipped").length,
       dismissed: active.filter((t) => t.status === "done" && t.resolution === "dismissed")
         .length,
+      ignored: active.filter((t) => t.status === "done" && t.resolution === "wontfix")
+        .length,
       attention: active.filter(isAttentionTask).length,
       pendingDeploy: active.filter((t) => t.deploy_status === "pending").length,
       deployingDeploy: active.filter((t) => t.deploy_status === "deploying").length,
@@ -353,7 +362,7 @@ export function TaskQueueView({
   const triggerQuick = async (
     e: React.MouseEvent,
     task: TaskRecord,
-    action: "claim" | "ready" | "done" | "reopen",
+    action: "claim" | "ready" | "done" | "ignore" | "reopen",
   ) => {
     e.stopPropagation();
     if (busyIdRef.current === task.id) return;
@@ -426,9 +435,13 @@ export function TaskQueueView({
       count: metrics.shipped,
       ratio: metrics.shipped / totalFlow,
       subtitle:
-        metrics.dismissed > 0
-          ? `含 ${metrics.dismissed} 条自动过滤噪音`
-          : "验证通过后自动推送闭环",
+        metrics.dismissed > 0 && metrics.ignored > 0
+          ? `含 ${metrics.dismissed} 条过滤 · ${metrics.ignored} 条已忽略`
+          : metrics.ignored > 0
+            ? `另有 ${metrics.ignored} 条已忽略`
+            : metrics.dismissed > 0
+              ? `含 ${metrics.dismissed} 条自动过滤噪音`
+              : "验证通过后自动推送闭环",
       icon: "check-circle-2",
       active: statusFilter === "done" && !cockpitFilter,
       pulse: false,
@@ -792,7 +805,7 @@ export function TaskQueueView({
             )}
 
             {view === "queue" && (
-              <Select<TaskStatus | "">
+              <Select<TaskStatusFilter>
                 ariaLabel="按状态筛选"
                 size="sm"
                 minMenuWidth={152}
@@ -827,7 +840,13 @@ export function TaskQueueView({
                                     ? "bg-emerald-500 dark:bg-emerald-400"
                                     : "bg-zinc-400 dark:bg-zinc-500",
                     })),
-                  ] satisfies SelectOption<TaskStatus | "">[]
+                    {
+                      value: "ignored",
+                      label: "已忽略",
+                      icon: "ban",
+                      iconClassName: "text-zinc-400 dark:text-zinc-500",
+                    },
+                  ] satisfies SelectOption<TaskStatusFilter>[]
                 }
               />
             )}
@@ -930,6 +949,11 @@ export function TaskQueueView({
                 task.status === "review" && task.owner !== "agent";
               const canQuickClaim =
                 task.owner === "none" && task.status !== "done" && !canQuickDone;
+              const canQuickIgnore =
+                !task.merged_into &&
+                task.owner !== "agent" &&
+                task.status !== "done" &&
+                task.deploy_status !== "deploying";
               const deliveryChip = formatDeliveryRef(task.delivery_ref);
               const previewText =
                 task.body && task.body !== task.title ? formatTaskPreview(task.body) : "";
@@ -987,7 +1011,7 @@ export function TaskQueueView({
                         <PriorityBadge priority={task.priority} />
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
-                        <StatusBadge status={task.status} compact />
+                        <StatusBadge status={task.status} resolution={task.resolution} compact />
                         <time
                           className="text-[11px] font-mono tabular-nums text-[var(--text-muted)]"
                           title={task.updated_at}
@@ -1234,7 +1258,7 @@ export function TaskQueueView({
                         className="rd-press inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11.5px] font-medium rd-plate text-indigo-600 dark:text-indigo-400 hover:border-indigo-500/50 hover:bg-indigo-500/[0.06] transition-[color,background-color,border-color,transform] duration-150 cursor-pointer"
                       >
                         <Icon name="refresh-cw" size={11} />
-                        重新入队
+                        {task.resolution === "wontfix" ? "取消忽略" : "重新入队"}
                       </button>
                     )}
                     {canQuickDone && (
@@ -1255,11 +1279,21 @@ export function TaskQueueView({
                         我来处理
                       </button>
                     )}
+                    {canQuickIgnore && (
+                      <button
+                        type="button"
+                        onClick={(e) => void triggerQuick(e, task, "ignore")}
+                        className="rd-press inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11.5px] font-medium rd-plate text-[var(--text-muted)] hover:text-zinc-700 dark:hover:text-zinc-200 hover:border-[var(--border-strong)] transition-[color,background-color,border-color,transform] duration-150 cursor-pointer"
+                      >
+                        <Icon name="ban" size={11} />
+                        忽略
+                      </button>
+                    )}
                   </div>
 
                   {/* Status + Owner + Source + Updated */}
                   <div className="hidden md:flex shrink-0 items-center gap-2.5">
-                    <StatusBadge status={task.status} />
+                    <StatusBadge status={task.status} resolution={task.resolution} />
                     <div>
                       <OwnerChip owner={task.owner} lastSeen={task.last_seen} />
                     </div>

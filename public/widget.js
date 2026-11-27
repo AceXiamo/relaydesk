@@ -231,7 +231,7 @@
     if (label === "排查与修复中" || label === "内部复核中") {
       return { step: 1, tone: "accent" };
     }
-    if (label === "已关联处理" || label === "已结束处理") {
+    if (label === "已关联处理" || label === "已结束处理" || label === "已忽略") {
       return { step: 4, tone: "muted" };
     }
     return { step: 0, tone: "muted" };

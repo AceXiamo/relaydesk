@@ -105,7 +105,7 @@ export function AgentExecutionView({ project, tasks, streams, routing, onOpenTas
           >
           <div className="flex items-center gap-2 text-[11px] text-[var(--text-muted)]"><span className="font-mono">{taskCode(task.number)}</span><time className="ml-auto">{formatRelativeTime(task.updated_at)}</time></div>
           <p className="my-1.5 line-clamp-2 text-sm font-medium">{task.title}</p>
-          <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]"><StatusBadge status={task.status} /><LivePulseDot active={group === "running"} tone={group === "running" ? "emerald" : "zinc"} />{task.agent_session_status === "error" ? "执行异常" : task.agent_session_status === "idle" ? "会话空闲" : filters[group]}</div>
+          <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]"><StatusBadge status={task.status} resolution={task.resolution} /><LivePulseDot active={group === "running"} tone={group === "running" ? "emerald" : "zinc"} />{task.agent_session_status === "error" ? "执行异常" : task.agent_session_status === "idle" ? "会话空闲" : filters[group]}</div>
           </button>
         ))}
         {!rows.length && <p className="px-4 py-8 text-center text-sm text-[var(--text-muted)]">{filter === "all" ? "暂无待分配或已执行的任务" : "此筛选下暂无任务"}</p>}
@@ -115,7 +115,7 @@ export function AgentExecutionView({ project, tasks, streams, routing, onOpenTas
       {selected ? <>
         <header className="flex flex-wrap items-center gap-3 border-b border-[var(--border-subtle)] bg-[var(--surface-card)] px-4 py-3">
           <Button size="xs" variant="ghost" className="md:hidden" icon="arrow-left" onClick={() => setShowMobileSession(false)}>执行列表</Button>
-          <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-xs text-[var(--text-muted)]">{taskCode(selected.number)}</span><StatusBadge status={selected.status} /><PriorityBadge priority={selected.priority} showLabel /></div>
+          <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-xs text-[var(--text-muted)]">{taskCode(selected.number)}</span><StatusBadge status={selected.status} resolution={selected.resolution} /><PriorityBadge priority={selected.priority} showLabel /></div>
             <h2 className="mt-1 break-words text-base font-semibold">{selected.title}</h2></div>
           {selected.delivery_ref && (/^https?:\/\//i.test(selected.delivery_ref) ? <a href={selected.delivery_ref} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-[var(--rd-accent)] hover:underline">查看交付<Icon name="external-link" size={12} /></a> : <span className="max-w-40 truncate font-mono text-xs" title={selected.delivery_ref}>{selected.delivery_ref}</span>)}
           <Button size="xs" variant="secondary" onClick={() => onOpenTaskDetail(selected.id)}>任务详情</Button>
