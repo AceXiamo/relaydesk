@@ -7,7 +7,7 @@ function latch() {
   return { promise, resolve };
 }
 
-export type ChatRpc = (type: "workspace.fetch" | "workspace.push" | "task.rpc", payload: Record<string, unknown>, signal: AbortSignal) => Promise<Record<string, unknown>>;
+export type ChatRpc = (type: "workspace.fetch" | "workspace.push" | "task.rpc" | "delegate.rpc", payload: Record<string, unknown>, signal: AbortSignal) => Promise<Record<string, unknown>>;
 interface Transport {
   open(): boolean;
   emit(event: unknown, result?: RunChatTurnResult): void;

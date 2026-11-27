@@ -19,6 +19,7 @@ import {
   SubagentTaskList,
   renderToolOutputLines,
 } from "./SubagentDock.tsx";
+import { SubagentDetailPanel } from "./SubagentDetailPanel.tsx";
 import {
   effortLabels,
   showEffortControl,
@@ -46,7 +47,7 @@ import { Select, type SelectOption } from "../Select.tsx";
 import { LivePulseDot } from "../ui.tsx";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./RichPromptEditor.tsx";
 
-export { PixelGridMatrix, SubagentDock, type RichPromptEditorHandle };
+export { PixelGridMatrix, SubagentDetailPanel, SubagentDock, type RichPromptEditorHandle };
 
 function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");

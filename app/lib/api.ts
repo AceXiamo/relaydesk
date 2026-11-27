@@ -703,6 +703,10 @@ export const api = {
     request<{ session: ChatSessionRecord; messages: ChatMessageRecord[] }>(
       `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}`,
     ),
+  listCodexChatSubagents: (projectId: string, sessionId: string) =>
+    request<{ sessions: ChatSessionRecord[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/codex-chat/sessions/${encodeURIComponent(sessionId)}/subagents`,
+    ),
   updateCodexChatSession: (
     projectId: string,
     sessionId: string,

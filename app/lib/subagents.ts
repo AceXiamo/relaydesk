@@ -1,7 +1,14 @@
-import type { ChatMessageRecord, ChatToolEvent } from "./types.ts";
+import type { ChatMessageRecord, ChatRuntime, ChatToolEvent } from "./types.ts";
 
 export type SubagentStatus = NonNullable<ChatToolEvent["subagent"]>["status"];
 export type SubagentToolEvent = ChatToolEvent & { subagent: NonNullable<ChatToolEvent["subagent"]> };
+
+export function formatSubagentRuntimeLabel(runtime?: ChatRuntime): string {
+  if (runtime === "claude") return "Claude";
+  if (runtime === "agy") return "Agy";
+  if (runtime === "codex") return "Codex";
+  return "";
+}
 
 export interface SubagentStatusMeta {
   label: string;
@@ -230,6 +237,10 @@ export function aggregateSessionSubagents(
           subagent: {
             status: nextStatus,
             ...(activity ? { activity } : {}),
+            ...(ev.subagent.session_id ? { session_id: ev.subagent.session_id } : {}),
+            ...(ev.subagent.runtime ? { runtime: ev.subagent.runtime } : {}),
+            ...(ev.subagent.model ? { model: ev.subagent.model } : {}),
+            ...(ev.subagent.delegated ? { delegated: true } : {}),
           },
         };
         map.set(ev.id, {
@@ -261,6 +272,10 @@ export function aggregateSessionSubagents(
       const output = ev.output?.trim() ? ev.output : prev.event.output;
       const exitCode = ev.exit_code !== undefined ? ev.exit_code : prev.event.exit_code;
       const images = ev.images?.length ? ev.images : prev.event.images;
+      const sessionId = ev.subagent.session_id || prev.event.subagent.session_id;
+      const runtime = ev.subagent.runtime || prev.event.subagent.runtime;
+      const model = ev.subagent.model || prev.event.subagent.model;
+      const delegated = Boolean(ev.subagent.delegated || prev.event.subagent.delegated);
 
       const mergedEvent: SubagentToolEvent = {
         ...prev.event,
@@ -274,6 +289,10 @@ export function aggregateSessionSubagents(
         subagent: {
           status: mergedStatus,
           ...(activity ? { activity } : {}),
+          ...(sessionId ? { session_id: sessionId } : {}),
+          ...(runtime ? { runtime } : {}),
+          ...(model ? { model } : {}),
+          ...(delegated ? { delegated: true } : {}),
         },
       };
 

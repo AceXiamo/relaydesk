@@ -16,6 +16,7 @@ import type { RunChatTurnResult } from "../../server/codex-chat.ts";
 import {
   startRelaydeskMcpServer,
   type RelaydeskMcpDatasourceMeta,
+  type RelaydeskMcpDelegateClient,
   type RelaydeskMcpHandle,
   type RelaydeskMcpTaskClient,
 } from "../../server/relaydesk-mcp.ts";
@@ -42,6 +43,7 @@ export interface ChatStart {
   datasource_env?: Record<string, unknown>;
   pg_read_only_enforced?: boolean;
   public_feedback?: boolean;
+  is_subagent?: boolean;
   prior_subagents?: PriorSubagentSeed[];
 }
 
@@ -170,6 +172,7 @@ interface RunnerOptions {
   allowSecrets: boolean;
   enableMcp?: boolean;
   taskClient?: RelaydeskMcpTaskClient;
+  delegateClient?: RelaydeskMcpDelegateClient;
   signal: AbortSignal;
   prompt: string;
   onEvent(event: ChatStreamEvent): void;
@@ -240,6 +243,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
       allowDatasourceSecrets: effectiveAllowSecrets,
       secrets,
       taskClient: o.taskClient,
+      delegateClient: p.is_subagent ? undefined : o.delegateClient,
       signal: o.signal,
     });
     secrets.push(mcpHandle.token);

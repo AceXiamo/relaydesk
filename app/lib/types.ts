@@ -706,10 +706,15 @@ export interface ChatToolEvent {
   subagent?: {
     status: "unknown" | "running" | "done" | "error" | "interrupted";
     activity?: string;
+    session_id?: string;
+    runtime?: ChatRuntime;
+    model?: string;
+    delegated?: boolean;
   };
 }
 
 export type ChatSessionKind = "chat" | "task" | "release";
+export type ChatSessionRole = "root" | "subagent";
 
 export interface ChatContextUsage {
   used_tokens: number;
@@ -722,6 +727,9 @@ export interface ChatSessionRecord {
   kind: ChatSessionKind;
   task_id: string | null;
   release_id: string | null;
+  parent_session_id?: string | null;
+  delegation_depth?: number;
+  session_role?: ChatSessionRole;
   title: string;
   runtime: ChatRuntime;
   model: string;

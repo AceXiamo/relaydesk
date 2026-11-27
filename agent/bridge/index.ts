@@ -434,7 +434,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
     });
     const pending = new Map<string, { type: string; finish(payload?: Record<string, unknown>): void }>();
     const bridgeRpc = (
-      type: "workspace.fetch" | "workspace.push" | "task.rpc",
+      type: "workspace.fetch" | "workspace.push" | "task.rpc" | "delegate.rpc",
       payload: Record<string, unknown>,
       signal: AbortSignal,
     ): Promise<Record<string, unknown>> =>
@@ -445,7 +445,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         }
         const id = randomUUID();
         const abort = () => finish();
-        const timer = setTimeout(abort, 30_000);
+        const timer = setTimeout(abort, type === "delegate.rpc" ? 330_000 : 30_000);
         const finish = (reply?: Record<string, unknown>) => {
           clearTimeout(timer);
           signal.removeEventListener("abort", abort);
@@ -672,6 +672,26 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
                   return res.data;
                 },
               };
+          const delegateClient =
+            isPublicFeedback || effectiveP.is_subagent
+              ? undefined
+              : {
+                  async call(
+                    action:
+                      | "delegate_task"
+                      | "check_delegated_task"
+                      | "wait_delegated_task"
+                      | "cancel_delegated_task",
+                    params: Record<string, unknown>,
+                  ) {
+                    const res = await (link?.rpc ?? bridgeRpc)(
+                      "delegate.rpc",
+                      { run_id: effectiveP.run_id, project_id: effectiveP.project_id, action, params },
+                      abort.signal,
+                    );
+                    return res.data;
+                  },
+                };
           const execute = (resumeId: string) => {
             const current = config.projects?.[effectiveP.project_id];
             if (!current || projectWorkdir(current, config, home) !== cwd) throw new Error("Project binding changed");
@@ -685,6 +705,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
               allowSecrets: isPublicFeedback ? false : current.allow_datasource_secrets !== false,
               enableMcp: !isPublicFeedback,
               taskClient,
+              delegateClient,
               signal: abort.signal,
               prompt: promptFor(resumeId),
               onEvent,

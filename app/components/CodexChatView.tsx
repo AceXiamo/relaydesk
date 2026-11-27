@@ -30,6 +30,7 @@ import {
   ChatFailureNotice,
   FollowUpList,
   PromptBar,
+  SubagentDetailPanel,
   SubagentDock,
   ThinkingTrace,
   ToolChipsGroup,
@@ -164,8 +165,7 @@ export function CodexChatView({
   const [history, setMessages] = useState<ChatMessageRecord[]>([]);
   const messages = messagesWithTurn(history[0]?.session_id === activeSessionId ? history : [], turn);
   const subagentSummary = useMemo(() => aggregateSessionSubagents(messages), [messages]);
-  const [subagentDockOpen, setSubagentDockOpen] = useState(false);
-  const [focusedSubagentId, setFocusedSubagentId] = useState<string | null>(null);
+  const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
   const [messagesLoading, setMessagesLoading] = useState(false);
@@ -219,8 +219,7 @@ export function CodexChatView({
   }, []);
 
   useEffect(() => {
-    setSubagentDockOpen(false);
-    setFocusedSubagentId(null);
+    setSelectedSubagentId(null);
     setHighlightedMsgId(null);
   }, [activeSessionId]);
 
@@ -233,12 +232,7 @@ export function CodexChatView({
   }, []);
 
   const handleFocusSubagent = useCallback((id: string) => {
-    setFocusedSubagentId(id);
-    setSubagentDockOpen(true);
-  }, []);
-
-  const handleClearSubagentFocus = useCallback(() => {
-    setFocusedSubagentId(null);
+    setSelectedSubagentId(id);
   }, []);
 
   const handleJumpToMessage = useCallback((messageId: string) => {
@@ -254,9 +248,6 @@ export function CodexChatView({
     highlightTimerRef.current = window.setTimeout(() => {
       setHighlightedMsgId((curr) => (curr === messageId ? null : curr));
     }, 1800);
-    if (typeof window !== "undefined" && window.innerWidth < 640) {
-      setSubagentDockOpen(false);
-    }
   }, []);
 
   const handleThreadScroll = useCallback(() => {
@@ -1705,12 +1696,8 @@ export function CodexChatView({
                 subagentSummary.total > 0 ? (
                   <SubagentDock
                     summary={subagentSummary}
-                    isStreaming={streaming}
-                    open={subagentDockOpen}
-                    onOpenChange={setSubagentDockOpen}
-                    focusedId={focusedSubagentId}
-                    onClearFocus={handleClearSubagentFocus}
-                    onJumpToMessage={handleJumpToMessage}
+                    selectedId={selectedSubagentId}
+                    onSelectSubagent={handleFocusSubagent}
                     align="left"
                   />
                 ) : null
@@ -1828,6 +1815,14 @@ export function CodexChatView({
           </div>
         </div>
       </div>
+      <SubagentDetailPanel
+        projectId={project.id}
+        summary={subagentSummary}
+        selectedId={selectedSubagentId}
+        onSelectId={setSelectedSubagentId}
+        onClose={() => setSelectedSubagentId(null)}
+        onJumpToMessage={handleJumpToMessage}
+      />
     </div>
   );
 }

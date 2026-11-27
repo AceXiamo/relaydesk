@@ -19,6 +19,7 @@ import { canResumeExternalSession } from "./execution-router.ts";
 import { readProjectCliSettings } from "./project-cli-config.ts";
 import {
   startRelaydeskMcpServer,
+  type RelaydeskMcpDelegateClient,
   type RelaydeskMcpHandle,
   type RelaydeskMcpTaskClient,
 } from "./relaydesk-mcp.ts";
@@ -171,6 +172,7 @@ export const RELAYDESK_MCP_INSTRUCTIONS = [
   "## Relaydesk MCP Tools (`relaydesk`)",
   "- Task tools: `list_tasks`, `get_task`, `comment_task`, `update_task`, `transition_task`, `create_task` (all scoped to this project).",
   "- Database tools: `list_datasources`, `describe_datasource`, `query_datasource` (strictly read-only inspection/queries for project SQLite files and configured external databases; works even in read-only chat mode without Bash).",
+  "- Cross-harness delegation tools: `delegate_task`, `check_delegated_task`, `wait_delegated_task`, `cancel_delegated_task` — spawn an isolated child session natively on another harness (`claude`, `codex`, or `agy`) with its own prompt cache and focused task brief. Prefer `mode: \"async\"` for longer tasks so you don't block past prompt-cache TTLs.",
   "- Follow the operator's explicit intent: when asked to analyze or investigate a task, inspect code/data first and post findings via `comment_task` if asked or helpful; do NOT transition task status, close, merge, or create tasks unless the operator asks or clearly instructs you to.",
   "- Never reveal or print raw database connection URLs, passwords, or tokens.",
 ].join("\n");
@@ -426,6 +428,7 @@ export interface RunChatTurnOptions {
   signal: AbortSignal;
   resolveTask?: TaskAttachmentResolver;
   taskClient?: RelaydeskMcpTaskClient;
+  delegateClient?: RelaydeskMcpDelegateClient;
   onEvent: (event: ChatStreamEvent) => void;
 }
 
@@ -644,6 +647,7 @@ export async function runWebCliChatTurn(options: RunChatTurnOptions): Promise<Ru
       allowDatasourceSecrets: true,
       secrets: datasourceRuntime.secrets,
       taskClient,
+      delegateClient: options.session.session_role === "subagent" ? undefined : options.delegateClient,
       signal,
     });
     if (session.runtime === "claude") {

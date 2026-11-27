@@ -400,6 +400,9 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     kind TEXT NOT NULL DEFAULT 'chat' CHECK(kind IN ('chat','task','release')),
     task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     release_id TEXT,
+    parent_session_id TEXT REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    delegation_depth INTEGER NOT NULL DEFAULT 0,
+    session_role TEXT NOT NULL DEFAULT 'root' CHECK(session_role IN ('root','subagent')),
     title TEXT NOT NULL,
     runtime TEXT NOT NULL DEFAULT 'codex' CHECK(runtime IN ('codex','claude','agy')),
     model TEXT NOT NULL DEFAULT '',
@@ -1108,9 +1111,22 @@ export class Store {
       this.db.exec("ALTER TABLE chat_sessions ADD COLUMN fast_mode TEXT NOT NULL DEFAULT 'default' CHECK(fast_mode IN ('default','on','off'))");
     }
     this.migrateChatSessionsForReleases();
+    const postReleaseCols = this.db
+      .prepare("PRAGMA table_info(chat_sessions)")
+      .all() as Array<{ name: string }>;
     for (const column of ["context_used_tokens", "context_window_tokens"]) {
-      if (!chatSessionCols.some(c => c.name === column)) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN ${column} INTEGER`);
+      if (!postReleaseCols.some(c => c.name === column)) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN ${column} INTEGER`);
     }
+    if (!postReleaseCols.some((c) => c.name === "parent_session_id")) {
+      this.db.exec("ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT REFERENCES chat_sessions(id) ON DELETE CASCADE");
+    }
+    if (!postReleaseCols.some((c) => c.name === "delegation_depth")) {
+      this.db.exec("ALTER TABLE chat_sessions ADD COLUMN delegation_depth INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!postReleaseCols.some((c) => c.name === "session_role")) {
+      this.db.exec("ALTER TABLE chat_sessions ADD COLUMN session_role TEXT NOT NULL DEFAULT 'root'");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS chat_sessions_parent ON chat_sessions(parent_session_id, created_at ASC)");
     this.migrateReleasesTable();
     const feedbackAgentCols = this.db
       .prepare("PRAGMA table_info(feedback_agents)")
@@ -3259,14 +3275,21 @@ export class Store {
     };
   }
 
-  listChatSessions(projectId: string, kind: ChatSessionKind | "all" = "chat"): ChatSessionRecord[] {
+  listChatSessions(
+    projectId: string,
+    kind: ChatSessionKind | "all" = "chat",
+    options: { includeSubagents?: boolean } = {},
+  ): ChatSessionRecord[] {
     this.getProjectRow(projectId);
     const whereKind = kind === "all" ? "" : " AND s.kind = ?";
+    const whereSubagent = options.includeSubagents
+      ? ""
+      : " AND (s.parent_session_id IS NULL OR s.parent_session_id = '') AND COALESCE(s.session_role, 'root') = 'root'";
     const sql = `SELECT s.*,
           (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id) AS message_count,
           (SELECT m.content FROM chat_messages m WHERE m.session_id = s.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS last_message_preview
          FROM chat_sessions s
-         WHERE s.project_id = ?${whereKind}
+         WHERE s.project_id = ?${whereKind}${whereSubagent}
          ORDER BY s.updated_at DESC, s.rowid DESC
          LIMIT 100`;
     const rows = (
@@ -3274,10 +3297,13 @@ export class Store {
         ? this.db.prepare(sql).all(projectId)
         : this.db.prepare(sql).all(projectId, kind)
     ) as unknown as Array<
-      Omit<ChatSessionRecord, "network_access" | "kind" | "task_id" | "release_id"> & {
+      Omit<ChatSessionRecord, "network_access" | "kind" | "task_id" | "release_id" | "parent_session_id" | "delegation_depth" | "session_role"> & {
         kind?: string;
         task_id?: string | null;
         release_id?: string | null;
+        parent_session_id?: string | null;
+        delegation_depth?: number | null;
+        session_role?: string | null;
         network_access?: number;
         message_count: number;
         last_message_preview: string | null;
@@ -3288,6 +3314,47 @@ export class Store {
       kind: normalizeChatSessionKind(row.kind),
       task_id: row.task_id ?? null,
       release_id: row.release_id ?? null,
+      parent_session_id: row.parent_session_id ?? null,
+      delegation_depth: Number(row.delegation_depth ?? 0),
+      session_role: row.session_role === "subagent" ? "subagent" : "root",
+      network_access: Boolean(row.network_access),
+      message_count: Number(row.message_count ?? 0),
+      last_message_preview: row.last_message_preview
+        ? row.last_message_preview.replace(/\s+/g, " ").trim().slice(0, 120)
+        : "",
+    }));
+  }
+
+  listChildChatSessions(projectId: string, parentSessionId: string): ChatSessionRecord[] {
+    this.getProjectRow(projectId);
+    const sql = `SELECT s.*,
+          (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id) AS message_count,
+          (SELECT m.content FROM chat_messages m WHERE m.session_id = s.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS last_message_preview
+         FROM chat_sessions s
+         WHERE s.project_id = ? AND s.parent_session_id = ?
+         ORDER BY s.created_at ASC, s.rowid ASC
+         LIMIT 100`;
+    const rows = this.db.prepare(sql).all(projectId, parentSessionId) as unknown as Array<
+      Omit<ChatSessionRecord, "network_access" | "kind" | "task_id" | "release_id" | "parent_session_id" | "delegation_depth" | "session_role"> & {
+        kind?: string;
+        task_id?: string | null;
+        release_id?: string | null;
+        parent_session_id?: string | null;
+        delegation_depth?: number | null;
+        session_role?: string | null;
+        network_access?: number;
+        message_count: number;
+        last_message_preview: string | null;
+      }
+    >;
+    return rows.map((row) => ({
+      ...row,
+      kind: normalizeChatSessionKind(row.kind),
+      task_id: row.task_id ?? null,
+      release_id: row.release_id ?? null,
+      parent_session_id: row.parent_session_id ?? null,
+      delegation_depth: Number(row.delegation_depth ?? 0),
+      session_role: row.session_role === "subagent" ? "subagent" : "root",
       network_access: Boolean(row.network_access),
       message_count: Number(row.message_count ?? 0),
       last_message_preview: row.last_message_preview
@@ -3301,10 +3368,13 @@ export class Store {
     const row = this.db
       .prepare("SELECT * FROM chat_sessions WHERE id = ? AND project_id = ?")
       .get(sessionId, projectId) as unknown as
-      | (Omit<ChatSessionRecord, "network_access" | "kind" | "task_id" | "release_id"> & {
+      | (Omit<ChatSessionRecord, "network_access" | "kind" | "task_id" | "release_id" | "parent_session_id" | "delegation_depth" | "session_role"> & {
           kind?: string;
           task_id?: string | null;
           release_id?: string | null;
+          parent_session_id?: string | null;
+          delegation_depth?: number | null;
+          session_role?: string | null;
           network_access?: number;
         })
       | undefined;
@@ -3314,6 +3384,9 @@ export class Store {
       kind: normalizeChatSessionKind(row.kind),
       task_id: row.task_id ?? null,
       release_id: row.release_id ?? null,
+      parent_session_id: row.parent_session_id ?? null,
+      delegation_depth: Number(row.delegation_depth ?? 0),
+      session_role: row.session_role === "subagent" ? "subagent" : "root",
       network_access: Boolean(row.network_access),
     };
   }
@@ -3363,7 +3436,7 @@ export class Store {
   createChatSession(
     projectId: string,
     data: Partial<Pick<ChatSessionRecord,
-      "kind" | "task_id" | "release_id" | "title" | "runtime" | "model" | "reasoning_effort" | "fast_mode" | "execution_target" | "sandbox_mode" | "network_access"
+      "kind" | "task_id" | "release_id" | "parent_session_id" | "delegation_depth" | "session_role" | "title" | "runtime" | "model" | "reasoning_effort" | "fast_mode" | "execution_target" | "sandbox_mode" | "network_access"
     >> = {},
   ): ChatSessionRecord {
     this.getProjectRow(projectId);
@@ -3374,6 +3447,18 @@ export class Store {
     const releaseId = kind === "release" && typeof data.release_id === "string" && data.release_id.trim()
       ? data.release_id.trim()
       : null;
+    const parentSessionId =
+      typeof data.parent_session_id === "string" && data.parent_session_id.trim()
+        ? data.parent_session_id.trim()
+        : null;
+    const delegationDepth =
+      typeof data.delegation_depth === "number" && Number.isFinite(data.delegation_depth) && data.delegation_depth > 0
+        ? Math.floor(data.delegation_depth)
+        : parentSessionId
+          ? 1
+          : 0;
+    const sessionRole =
+      data.session_role === "subagent" || parentSessionId ? "subagent" : "root";
     const title =
       typeof data.title === "string" && data.title.trim()
         ? data.title.trim().slice(0, 120)
@@ -3388,10 +3473,10 @@ export class Store {
     const now = nowIso();
     this.db
       .prepare(
-        `INSERT INTO chat_sessions(id, project_id, kind, task_id, release_id, title, runtime, model, reasoning_effort, fast_mode, execution_target, sandbox_mode, network_access, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chat_sessions(id, project_id, kind, task_id, release_id, parent_session_id, delegation_depth, session_role, title, runtime, model, reasoning_effort, fast_mode, execution_target, sandbox_mode, network_access, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, projectId, kind, taskId, releaseId, title, runtime, model, data.reasoning_effort ?? "default", runtime === "codex" ? data.fast_mode ?? "default" : "default",
+      .run(id, projectId, kind, taskId, releaseId, parentSessionId, delegationDepth, sessionRole, title, runtime, model, data.reasoning_effort ?? "default", runtime === "codex" ? data.fast_mode ?? "default" : "default",
         data.execution_target ?? "auto", sandboxMode, networkAccess, now, now);
     return this.getChatSession(projectId, id);
   }

@@ -2365,6 +2365,24 @@ export class ApiRouter {
       throw new ApiError(405, "Method not allowed");
     }
 
+    // GET /api/projects/:id/codex-chat/sessions/:sessionId/subagents
+    if (
+      subparts.length === 3 &&
+      subparts[0] === "sessions" &&
+      subparts[2] === "subagents" &&
+      method === "GET"
+    ) {
+      const sessionId = subparts[1];
+      return this.store.transaction(false, () => {
+        this.store.getChatSession(projectInfo.id, sessionId);
+        const children = this.store.listChildChatSessions(projectInfo.id, sessionId).map((s) => {
+          const activeRunId = this.chatRuns.getActiveRunId(s.id);
+          return activeRunId ? { ...s, active_run_id: activeRunId } : s;
+        });
+        return { sessions: children };
+      });
+    }
+
     // GET /api/projects/:id/codex-chat/sessions/:sessionId/stream
     if (
       subparts.length === 3 &&

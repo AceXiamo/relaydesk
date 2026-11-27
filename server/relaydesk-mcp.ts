@@ -22,6 +22,16 @@ export interface RelaydeskMcpTaskClient {
   call(action: RelaydeskTaskAction, params: Record<string, unknown>): Promise<unknown>;
 }
 
+export type RelaydeskDelegateAction =
+  | "delegate_task"
+  | "check_delegated_task"
+  | "wait_delegated_task"
+  | "cancel_delegated_task";
+
+export interface RelaydeskMcpDelegateClient {
+  call(action: RelaydeskDelegateAction, params: Record<string, unknown>): Promise<unknown>;
+}
+
 export interface RelaydeskMcpDatasourceMeta {
   id?: string;
   name: string;
@@ -43,6 +53,7 @@ export interface RelaydeskMcpOptions {
   allowDatasourceSecrets: boolean;
   secrets?: string[];
   taskClient?: RelaydeskMcpTaskClient;
+  delegateClient?: RelaydeskMcpDelegateClient;
   signal?: AbortSignal;
   dbBinaries?: Partial<Record<"psql" | "mysql" | "redis-cli" | "mongosh", string>>;
 }
@@ -729,7 +740,7 @@ function isValidSqlIdentifier(name: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_$.-]{0,127}$/.test(name);
 }
 
-function buildToolDefinitions(hasTasks: boolean) {
+function buildToolDefinitions(hasTasks: boolean, hasDelegate: boolean) {
   const readOnlyAnnotations = {
     readOnlyHint: true,
     destructiveHint: false,
@@ -1054,7 +1065,115 @@ function buildToolDefinitions(hasTasks: boolean) {
     },
   ];
 
-  return [...taskTools, ...datasourceTools];
+  const delegateTools = hasDelegate
+    ? [
+        {
+          name: "delegate_task",
+          description:
+            "Delegate a focused sub-task to an independent Relaydesk-managed child session running natively on any available harness (claude, codex, or agy). Preserves each harness's native prompt cache and isolates context. Use mode='async' for longer tasks to avoid blocking past prompt-cache TTLs.",
+          annotations: taskWriteAnnotations,
+          inputSchema: {
+            type: "object",
+            required: ["runtime", "prompt"],
+            properties: {
+              runtime: {
+                type: "string",
+                enum: ["claude", "codex", "agy"],
+                description: "Target CLI harness to execute the delegated subagent natively",
+              },
+              prompt: {
+                type: "string",
+                description: "Self-contained, focused task brief for the subagent (it does NOT inherit parent conversation history)",
+              },
+              title: {
+                type: "string",
+                description: "Optional short label (2-6 words) shown in the UI subagent dock and panel",
+              },
+              model: {
+                type: "string",
+                description: "Optional model ID on the target runtime (defaults to the runtime's default model)",
+              },
+              reasoning_effort: {
+                type: "string",
+                enum: ["default", "off", "low", "medium", "high", "max"],
+                description: "Optional reasoning effort level",
+              },
+              sandbox_mode: {
+                type: "string",
+                enum: ["read-only", "workspace-write"],
+                description: "Sandbox mode for the subagent (defaults to 'read-only'; cannot exceed parent session sandbox)",
+              },
+              mode: {
+                type: "string",
+                enum: ["wait", "async"],
+                description: "'wait' blocks until completion and returns the summary (default); 'async' returns immediately with session_id so you can continue working and call check_delegated_task or wait_delegated_task later",
+              },
+              timeout_seconds: {
+                type: "integer",
+                minimum: 10,
+                maximum: 300,
+                description: "Max seconds to wait in 'wait' mode (default 180, max 300)",
+              },
+            },
+          },
+        },
+        {
+          name: "check_delegated_task",
+          description:
+            "Inspect the current status, latest activity, and result (if finished) of a delegated subagent session without blocking.",
+          annotations: readOnlyAnnotations,
+          inputSchema: {
+            type: "object",
+            required: ["session_id"],
+            properties: {
+              session_id: {
+                type: "string",
+                description: "Delegated child session_id returned by delegate_task",
+              },
+            },
+          },
+        },
+        {
+          name: "wait_delegated_task",
+          description:
+            "Wait for a running delegated subagent session to finish and return its final summary.",
+          annotations: readOnlyAnnotations,
+          inputSchema: {
+            type: "object",
+            required: ["session_id"],
+            properties: {
+              session_id: {
+                type: "string",
+                description: "Delegated child session_id returned by delegate_task",
+              },
+              timeout_seconds: {
+                type: "integer",
+                minimum: 5,
+                maximum: 300,
+                description: "Max seconds to wait (default 180, max 300)",
+              },
+            },
+          },
+        },
+        {
+          name: "cancel_delegated_task",
+          description: "Stop a running delegated subagent session.",
+          annotations: taskWriteAnnotations,
+          inputSchema: {
+            type: "object",
+            required: ["session_id"],
+            properties: {
+              session_id: {
+                type: "string",
+                description: "Delegated child session_id returned by delegate_task",
+              },
+            },
+          },
+        },
+      ]
+    : [];
+
+  return [...taskTools, ...delegateTools, ...datasourceTools];
 }
 
 export async function startRelaydeskMcpServer(options: RelaydeskMcpOptions): Promise<RelaydeskMcpHandle> {
@@ -1070,7 +1189,7 @@ export async function startRelaydeskMcpServer(options: RelaydeskMcpOptions): Pro
     return out;
   };
 
-  const tools = buildToolDefinitions(Boolean(options.taskClient));
+  const tools = buildToolDefinitions(Boolean(options.taskClient), Boolean(options.delegateClient));
   const dsEnv = options.datasourceEnv ?? {};
 
   function findDatasource(ref: unknown): RelaydeskMcpDatasourceMeta {
@@ -1422,6 +1541,18 @@ export async function startRelaydeskMcpServer(options: RelaydeskMcpOptions): Pro
         throw new Error("Task tools are not available in this session");
       }
       return await options.taskClient.call(name, args);
+    }
+
+    if (
+      name === "delegate_task" ||
+      name === "check_delegated_task" ||
+      name === "wait_delegated_task" ||
+      name === "cancel_delegated_task"
+    ) {
+      if (!options.delegateClient) {
+        throw new Error("Delegation tools are not available in this session");
+      }
+      return await options.delegateClient.call(name, args);
     }
 
     if (name === "list_datasources") {

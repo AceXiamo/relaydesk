@@ -24,11 +24,15 @@ import type {
   AgentProjectInfo,
   ChatContextRef,
   ChatMessageRecord,
+  ChatReasoningEffort,
+  ChatRuntime,
+  ChatSandboxMode,
   ChatSessionRecord,
   ChatStreamEvent,
   ChatToolEvent,
   DeliveryMode,
 } from "../app/lib/types.ts";
+import type { RelaydeskDelegateAction } from "./relaydesk-mcp.ts";
 
 export interface RunSubscriber {
   onEvent: (event: ChatStreamEvent) => void;
@@ -73,6 +77,7 @@ export interface StartedChatTurn {
 interface ActiveRun {
   id: string;
   projectId: string;
+  projectInfo: AgentProjectInfo;
   sessionId: string;
   controller: AbortController;
   reason?: "user_stop" | "follow_up";
@@ -99,6 +104,47 @@ const MUTATING_TASK_ACTIONS = new Set([
 ]);
 
 const LEASE_TOUCH_INTERVAL_MS = 30_000;
+const MAX_DELEGATION_DEPTH = 1;
+const DEFAULT_DELEGATE_WAIT_SECONDS = 180;
+const MAX_DELEGATE_WAIT_SECONDS = 300;
+const MAX_DELEGATE_SUMMARY_CHARS = 12_000;
+
+interface DelegatedRunEntry {
+  childSessionId: string;
+  parentSessionId: string;
+  parentRunId: string;
+  toolEventId: string;
+  runtime: ChatRuntime;
+  model: string;
+  title: string;
+  completion: Promise<void>;
+}
+
+function buildSubagentWorkerContext(title: string, sandboxMode: ChatSandboxMode): string {
+  return [
+    `## Delegated Subagent Worker (${title})`,
+    "You are an isolated child worker spawned by a parent Relaydesk session to complete one focused sub-task.",
+    `- Sandbox mode: \`${sandboxMode}\`.`,
+    "- Stay strictly scoped to the assigned brief. Do not ask follow-up questions unless truly blocked.",
+    "- Return a concise, factual, directly actionable summary (file paths, findings, or changes made) for the parent agent.",
+  ].join("\n");
+}
+
+function mergeDelegatedEvents(
+  resultEvents: ChatToolEvent[],
+  runEvents: ReadonlyMap<string, ChatToolEvent>,
+): ChatToolEvent[] {
+  const merged = new Map<string, ChatToolEvent>();
+  for (const ev of resultEvents) {
+    merged.set(ev.id, ev);
+  }
+  for (const [id, ev] of runEvents.entries()) {
+    if (ev.subagent?.delegated || id.startsWith("delegated:")) {
+      merged.set(id, ev);
+    }
+  }
+  return Array.from(merged.values());
+}
 
 export function buildTaskWorkflowSystemContext(
   project: AgentProjectInfo,
@@ -182,11 +228,13 @@ export class ChatRunManager {
   private readonly store: Store;
   private readonly bridgeHub: BridgeHub | null;
   private readonly runs = new Map<string, ActiveRun>();
+  private readonly delegatedRuns = new Map<string, DelegatedRunEntry>();
   private readonly finishedListeners = new Set<(info: ChatTurnFinishedInfo) => void>();
 
   constructor(store: Store, bridgeHub: BridgeHub | null) {
     this.store = store;
     this.bridgeHub = bridgeHub;
+    this.bridgeHub?.setDelegateHandler((ctx) => this.handleDelegateRpc(ctx));
   }
 
   onTurnFinished(listener: (info: ChatTurnFinishedInfo) => void): () => void {
@@ -433,6 +481,7 @@ export class ChatRunManager {
     const run: ActiveRun = {
       id: runId,
       projectId: projectInfo.id,
+      projectInfo,
       sessionId,
       controller: abortController,
       session,
@@ -606,8 +655,15 @@ export class ChatRunManager {
           resolveTask,
           { spaceDirVar: "$RELAYDESK_SPACE_DIR" },
         );
+        const isSubagent =
+          session.session_role === "subagent" ||
+          Boolean(session.parent_session_id) ||
+          (session.delegation_depth ?? 0) > 0;
         const contextBlocks: string[] = [];
-        if ((session.kind !== "task" && session.kind !== "release") || !extraSystemContext?.trim()) {
+        if (
+          !isSubagent &&
+          ((session.kind !== "task" && session.kind !== "release") || !extraSystemContext?.trim())
+        ) {
           contextBlocks.push(RELAYDESK_MCP_INSTRUCTIONS);
         }
         if (extraSystemContext?.trim()) {
@@ -615,10 +671,10 @@ export class ChatRunManager {
         }
         if (projectInfo.agent_instructions.trim()) {
           contextBlocks.push(
-            `## Project Instructions\n${projectInfo.agent_instructions.trim().slice(0, 4000)}`,
+            `## Project Instructions\n${projectInfo.agent_instructions.trim().slice(0, isSubagent ? 1500 : 4000)}`,
           );
         }
-        if (workspaceManifest.databases.length > 0) {
+        if (!isSubagent && workspaceManifest.databases.length > 0) {
           const dbLines = workspaceManifest.databases.map((db) => {
             if (db.source === "workspace_file") {
               return `- [SQLite] ${db.name}: path=$RELAYDESK_SPACE_DIR/files/${db.file_path} (${db.table_count ?? 0} tables; queryable via relaydesk MCP tools)`;
@@ -655,6 +711,7 @@ export class ChatRunManager {
             prompt: canResumePrior ? buildResumePrompt(prompt, attachmentContext) : prompt,
             system_context: contextBlocks.join("\n\n"),
             workspace_manifest: workspaceManifest,
+            ...(isSubagent ? { is_subagent: true } : {}),
             ...(priorSubagents.length ? { prior_subagents: priorSubagents } : {}),
             ...(bridgeImagePaths.length ? { image_paths: bridgeImagePaths } : {}),
             ...(localBinding?.allow_datasource_secrets
@@ -669,6 +726,10 @@ export class ChatRunManager {
           datasourceRuntime.secrets,
         );
       } else {
+        const isSubagent =
+          session.session_role === "subagent" ||
+          Boolean(session.parent_session_id) ||
+          (session.delegation_depth ?? 0) > 0;
         const cloudPrompt =
           extraSystemContext?.trim() && !canResumePrior
             ? `${extraSystemContext.trim()}\n\n${prompt}`
@@ -698,6 +759,18 @@ export class ChatRunManager {
               return opResult;
             },
           },
+          delegateClient: isSubagent
+            ? undefined
+            : {
+                call: (action, opParams) =>
+                  this.handleDelegateRpc({
+                    projectId: projectInfo.id,
+                    sessionId,
+                    runId: run.id,
+                    action,
+                    params: opParams,
+                  }),
+              },
           onEvent: (ev) => this.emit(run, ev),
         });
       }
@@ -713,7 +786,10 @@ export class ChatRunManager {
       terminalStatus = result.status;
       terminalStopReason = stopReason;
 
-      const finalEvents = finalizeTurnSubagents(result.events, result.status);
+      const finalEvents = finalizeTurnSubagents(
+        mergeDelegatedEvents(result.events, run.events),
+        result.status,
+      );
       const saved = this.store.transaction(true, () => {
         const updatedMsg = this.store.updateChatMessage(run.assistantMessageId, {
           content: result.status === "error" ? result.content || run.content : result.content,
@@ -844,5 +920,306 @@ export class ChatRunManager {
         stopReason: terminalStopReason,
       });
     }
+  }
+
+  private buildDelegatedStatusPayload(
+    projectId: string,
+    childSession: ChatSessionRecord,
+    timedOut = false,
+  ): Record<string, unknown> {
+    const activeChild = this.runs.get(childSession.id);
+    const messages = this.store.listChatMessages(projectId, childSession.id);
+    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+    const running = Boolean(activeChild) || this.isRunning(childSession.id);
+    const status = running
+      ? "running"
+      : lastAssistant?.status === "aborted"
+        ? "aborted"
+        : lastAssistant?.status === "error" || childSession.status === "error"
+          ? "error"
+          : "done";
+    const activity = activeChild?.statusLine || "";
+    const content = activeChild?.content || lastAssistant?.content || "";
+    const summary = content.trim().slice(0, MAX_DELEGATE_SUMMARY_CHARS);
+    return {
+      session_id: childSession.id,
+      title: childSession.title,
+      runtime: childSession.runtime,
+      model: childSession.model || undefined,
+      sandbox_mode: childSession.sandbox_mode,
+      status,
+      ...(timedOut ? { timed_out: true } : {}),
+      ...(activity ? { activity } : {}),
+      ...(summary ? { summary } : {}),
+      ...(lastAssistant?.error_reason ? { error: lastAssistant.error_reason } : {}),
+    };
+  }
+
+  private emitDelegatedToolUpdate(
+    parentSessionId: string,
+    parentRunId: string,
+    event: ChatToolEvent,
+  ): void {
+    const parentRun = this.runs.get(parentSessionId);
+    if (parentRun && parentRun.id === parentRunId) {
+      this.emit(parentRun, { type: "tool", event });
+    }
+  }
+
+  async handleDelegateRpc(ctx: {
+    projectId: string;
+    sessionId: string;
+    runId: string;
+    action: RelaydeskDelegateAction;
+    params: Record<string, unknown>;
+  }): Promise<unknown> {
+    const { projectId, sessionId, runId, action, params } = ctx;
+    const parentRun = this.runs.get(sessionId);
+    if (!parentRun || parentRun.id !== runId || parentRun.projectId !== projectId) {
+      throw new ApiError(403, "父会话当前不在运行中，无法执行委派操作");
+    }
+    const parentSession = this.store.getChatSession(projectId, sessionId);
+    if (
+      parentSession.session_role === "subagent" ||
+      Boolean(parentSession.parent_session_id) ||
+      (parentSession.delegation_depth ?? 0) >= MAX_DELEGATION_DEPTH
+    ) {
+      throw new ApiError(403, "子代理会话不允许继续嵌套委派子代理");
+    }
+
+    if (action === "delegate_task") {
+      const rawRuntime = typeof params.runtime === "string" ? params.runtime.trim().toLowerCase() : "";
+      if (rawRuntime !== "claude" && rawRuntime !== "codex" && rawRuntime !== "agy") {
+        throw new ApiError(400, "runtime 必须是 claude、codex 或 agy");
+      }
+      const runtime: ChatRuntime = rawRuntime;
+      const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
+      if (!prompt) {
+        throw new ApiError(400, "prompt 不能为空");
+      }
+      if (prompt.length > 40_000) {
+        throw new ApiError(400, "prompt 长度超出上限（40000 字符）");
+      }
+      const rawTitle = typeof params.title === "string" ? params.title.trim().slice(0, 80) : "";
+      const title = rawTitle || buildFallbackSessionTitle(prompt) || `${runtime} 子代理`;
+      const model = typeof params.model === "string" ? params.model.trim().slice(0, 160) : "";
+      const rawEffort = typeof params.reasoning_effort === "string" ? params.reasoning_effort.trim() : "default";
+      const reasoningEffort: ChatReasoningEffort =
+        rawEffort === "off" ||
+        rawEffort === "low" ||
+        rawEffort === "medium" ||
+        rawEffort === "high" ||
+        rawEffort === "max"
+          ? rawEffort
+          : "default";
+      const requestedSandbox: ChatSandboxMode =
+        params.sandbox_mode === "workspace-write" ? "workspace-write" : "read-only";
+      // Child sandbox can never exceed parent sandbox privilege.
+      const sandboxMode: ChatSandboxMode =
+        parentSession.sandbox_mode === "read-only" ? "read-only" : requestedSandbox;
+      const mode = params.mode === "async" ? "async" : "wait";
+      const timeoutSec = Math.max(
+        10,
+        Math.min(
+          MAX_DELEGATE_WAIT_SECONDS,
+          Math.floor(Number(params.timeout_seconds) || DEFAULT_DELEGATE_WAIT_SECONDS),
+        ),
+      );
+
+      const childSession = this.store.createChatSession(projectId, {
+        kind: "chat",
+        parent_session_id: parentSession.id,
+        delegation_depth: (parentSession.delegation_depth ?? 0) + 1,
+        session_role: "subagent",
+        title,
+        runtime,
+        model,
+        reasoning_effort: reasoningEffort,
+        execution_target: parentSession.execution_target || "auto",
+        sandbox_mode: sandboxMode,
+        network_access: parentSession.network_access,
+      });
+
+      const toolEventId = `delegated:${childSession.id}`;
+      let latestActivity = `已启动 ${runtime}${model ? ` (${model})` : ""} 子代理…`;
+
+      const buildMirroredEvent = (
+        subStatus: NonNullable<ChatToolEvent["subagent"]>["status"],
+        activity?: string,
+        output?: string,
+      ): ChatToolEvent => ({
+        id: toolEventId,
+        tool: `delegate:${runtime}`,
+        summary: title,
+        status: subStatus === "done" ? "done" : subStatus === "error" || subStatus === "interrupted" ? "error" : "running",
+        ...(output ? { output: output.slice(0, 8000) } : {}),
+        subagent: {
+          status: subStatus,
+          ...(activity ? { activity: activity.slice(0, 500) } : {}),
+          session_id: childSession.id,
+          runtime,
+          ...(model ? { model } : {}),
+          delegated: true,
+        },
+      });
+
+      this.emitDelegatedToolUpdate(
+        parentSession.id,
+        runId,
+        buildMirroredEvent("running", latestActivity),
+      );
+
+      let started: StartedChatTurn;
+      try {
+        started = this.startTurn({
+          projectInfo: parentRun.projectInfo,
+          sessionId: childSession.id,
+          content: prompt,
+          skipAutoTitle: true,
+          extraSystemContext: buildSubagentWorkerContext(title, sandboxMode),
+          initialSubscriber: {
+            onEvent: (ev) => {
+              if (ev.type === "tool") {
+                const summary = ev.event.summary || ev.event.tool;
+                if (summary) {
+                  latestActivity = summary;
+                  this.emitDelegatedToolUpdate(
+                    parentSession.id,
+                    runId,
+                    buildMirroredEvent("running", latestActivity),
+                  );
+                }
+              } else if (ev.type === "status" && ev.message) {
+                latestActivity = ev.message;
+                this.emitDelegatedToolUpdate(
+                  parentSession.id,
+                  runId,
+                  buildMirroredEvent("running", latestActivity),
+                );
+              } else if (ev.type === "done") {
+                const finalStatus =
+                  ev.message.status === "aborted"
+                    ? "interrupted"
+                    : ev.message.status === "error"
+                      ? "error"
+                      : "done";
+                this.emitDelegatedToolUpdate(
+                  parentSession.id,
+                  runId,
+                  buildMirroredEvent(
+                    finalStatus,
+                    finalStatus === "done" ? "已完成" : ev.message.error_reason || "执行结束",
+                    ev.message.content || ev.message.error_reason,
+                  ),
+                );
+              } else if (ev.type === "error") {
+                this.emitDelegatedToolUpdate(
+                  parentSession.id,
+                  runId,
+                  buildMirroredEvent("error", ev.error || "执行失败", ev.error),
+                );
+              }
+            },
+          },
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "无法启动子代理";
+        this.emitDelegatedToolUpdate(parentSession.id, runId, buildMirroredEvent("error", msg, msg));
+        throw err;
+      }
+
+      const entry: DelegatedRunEntry = {
+        childSessionId: childSession.id,
+        parentSessionId: parentSession.id,
+        parentRunId: runId,
+        toolEventId,
+        runtime,
+        model: childSession.model,
+        title,
+        completion: started.completion,
+      };
+      this.delegatedRuns.set(childSession.id, entry);
+      void started.completion.finally(() => {
+        if (this.delegatedRuns.get(childSession.id) === entry) {
+          this.delegatedRuns.delete(childSession.id);
+        }
+      });
+
+      if (mode === "async") {
+        return {
+          session_id: childSession.id,
+          title,
+          runtime,
+          model: childSession.model || undefined,
+          sandbox_mode: sandboxMode,
+          mode: "async",
+          status: "running",
+        };
+      }
+
+      let timedOut = false;
+      await Promise.race([
+        started.completion,
+        new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            timedOut = true;
+            resolve();
+          }, timeoutSec * 1000);
+          timer.unref?.();
+        }),
+      ]);
+
+      const latestChild = this.store.getChatSession(projectId, childSession.id);
+      return this.buildDelegatedStatusPayload(projectId, latestChild, timedOut);
+    }
+
+    const childSessionId = typeof params.session_id === "string" ? params.session_id.trim() : "";
+    if (!childSessionId) {
+      throw new ApiError(400, "缺少 session_id");
+    }
+    const childSession = this.store.getChatSession(projectId, childSessionId);
+    if (childSession.parent_session_id !== parentSession.id) {
+      throw new ApiError(403, "只能查询或操作当前父会话委派的子代理");
+    }
+
+    if (action === "check_delegated_task") {
+      return this.buildDelegatedStatusPayload(projectId, childSession);
+    }
+
+    if (action === "wait_delegated_task") {
+      const timeoutSec = Math.max(
+        5,
+        Math.min(
+          MAX_DELEGATE_WAIT_SECONDS,
+          Math.floor(Number(params.timeout_seconds) || DEFAULT_DELEGATE_WAIT_SECONDS),
+        ),
+      );
+      const entry = this.delegatedRuns.get(childSession.id);
+      let timedOut = false;
+      if (entry) {
+        await Promise.race([
+          entry.completion,
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+              timedOut = true;
+              resolve();
+            }, timeoutSec * 1000);
+            timer.unref?.();
+          }),
+        ]);
+      }
+      const latestChild = this.store.getChatSession(projectId, childSession.id);
+      return this.buildDelegatedStatusPayload(projectId, latestChild, timedOut);
+    }
+
+    if (action === "cancel_delegated_task") {
+      this.forceAbortSession(childSession.id);
+      return {
+        session_id: childSession.id,
+        status: "aborted",
+      };
+    }
+
+    throw new ApiError(400, `不支持的委派操作: ${action}`);
   }
 }

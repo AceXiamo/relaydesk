@@ -14,7 +14,7 @@ import type {
   ProjectExecutionRoutingResponse,
   TaskRecord,
 } from "~/lib/types.ts";
-import { ChatFailureNotice, SubagentDock, ThinkingTrace, ToolChipsGroup } from "./agent-chat/AgentPrimitives.tsx";
+import { ChatFailureNotice, SubagentDetailPanel, SubagentDock, ThinkingTrace, ToolChipsGroup } from "./agent-chat/AgentPrimitives.tsx";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./agent-chat/RichPromptEditor.tsx";
 import { Icon } from "./Icon.tsx";
 import {
@@ -349,14 +349,12 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
   const nodeName = agents.find(agent => `local:${agent.id}` === target)?.name;
   const messages = messagesWithTurn(data?.messages ?? [], turn);
   const subagentSummary = useMemo(() => aggregateSessionSubagents(messages), [messages]);
-  const [subagentDockOpen, setSubagentDockOpen] = useState(false);
-  const [focusedSubagentId, setFocusedSubagentId] = useState<string | null>(null);
+  const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
   const highlightTimer = useRef<number | null>(null);
 
   useEffect(() => {
-    setSubagentDockOpen(false);
-    setFocusedSubagentId(null);
+    setSelectedSubagentId(null);
     setHighlightedMsgId(null);
   }, [sessionId]);
 
@@ -369,12 +367,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
   }, []);
 
   const handleFocusSubagent = useCallback((id: string) => {
-    setFocusedSubagentId(id);
-    setSubagentDockOpen(true);
-  }, []);
-
-  const handleClearSubagentFocus = useCallback(() => {
-    setFocusedSubagentId(null);
+    setSelectedSubagentId(id);
   }, []);
 
   const handleJumpToMessage = useCallback((messageId: string) => {
@@ -390,9 +383,6 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
     highlightTimer.current = window.setTimeout(() => {
       setHighlightedMsgId((curr) => (curr === messageId ? null : curr));
     }, 1800);
-    if (typeof window !== "undefined" && window.innerWidth < 640) {
-      setSubagentDockOpen(false);
-    }
   }, []);
   const status = running ? "执行中" : session?.status === "error" ? "执行异常" : "空闲";
   const controlsDisabled = running || dispatching || savingConfig || blocked;
@@ -666,12 +656,8 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
               {subagentSummary.total > 0 && (
                 <SubagentDock
                   summary={subagentSummary}
-                  isStreaming={running}
-                  open={subagentDockOpen}
-                  onOpenChange={setSubagentDockOpen}
-                  focusedId={focusedSubagentId}
-                  onClearFocus={handleClearSubagentFocus}
-                  onJumpToMessage={handleJumpToMessage}
+                  selectedId={selectedSubagentId}
+                  onSelectSubagent={handleFocusSubagent}
                   align="right"
                   className="ml-auto"
                 />
@@ -789,6 +775,14 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
           </div>
         </form>
       </>}
+      <SubagentDetailPanel
+        projectId={task.project_id}
+        summary={subagentSummary}
+        selectedId={selectedSubagentId}
+        onSelectId={setSelectedSubagentId}
+        onClose={() => setSelectedSubagentId(null)}
+        onJumpToMessage={handleJumpToMessage}
+      />
     </section>
   );
 }

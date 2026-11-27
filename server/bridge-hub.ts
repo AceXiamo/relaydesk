@@ -30,6 +30,7 @@ export interface BridgeChatStart {
   datasource_env?: Record<string, string>;
   pg_read_only_enforced?: boolean;
   public_feedback?: boolean;
+  is_subagent?: boolean;
   prior_subagents?: PriorSubagentSeed[];
 }
 
@@ -76,7 +77,14 @@ const toolImage = z.object({ url: text(2048), alt: text(256).optional() });
 const tool = z.object({ id: text(256), tool: text(128), summary: text(4096), status: z.enum(["running", "done", "error"]),
   output: text(32_768).optional(), exit_code: z.number().int().nullable().optional(),
   images: z.array(toolImage).max(4).optional(),
-  subagent: z.object({ status: z.enum(["unknown", "running", "done", "error", "interrupted"]), activity: text(4096).optional() }).optional() });
+  subagent: z.object({
+    status: z.enum(["unknown", "running", "done", "error", "interrupted"]),
+    activity: text(4096).optional(),
+    session_id: text(128).optional(),
+    runtime: z.enum(["codex", "claude", "agy"]).optional(),
+    model: text(200).optional(),
+    delegated: z.boolean().optional(),
+  }).optional() });
 const contextUsageFrame = z.object({ type: z.literal("context_usage"), usage: z.object({
   used_tokens: z.number().int().nonnegative(), window_tokens: z.number().int().positive().optional(),
 }) });
@@ -113,6 +121,26 @@ const taskRpcSchema = z.object({
   ]),
   params: z.record(z.string(), z.unknown()).default({}),
 });
+const delegateRpcSchema = z.object({
+  run_id: text(160).min(1),
+  project_id: text(64).min(1),
+  action: z.enum([
+    "delegate_task",
+    "check_delegated_task",
+    "wait_delegated_task",
+    "cancel_delegated_task",
+  ]),
+  params: z.record(z.string(), z.unknown()).default({}),
+});
+
+export type BridgeDelegateRpcHandler = (ctx: {
+  projectId: string;
+  sessionId: string;
+  runId: string;
+  action: "delegate_task" | "check_delegated_task" | "wait_delegated_task" | "cancel_delegated_task";
+  params: Record<string, unknown>;
+}) => Promise<unknown>;
+
 const MUTATING_TASK_ACTIONS = new Set([
   "comment_task",
   "update_task",
@@ -179,6 +207,7 @@ export class BridgeHub {
   private readonly runs = new Map<string, Run>();
   private readonly cliRuns = new Map<string, CliRunHandle>();
   private readonly availabilityListeners = new Set<(projectIds?: string[]) => void>();
+  private delegateHandler: BridgeDelegateRpcHandler | null = null;
   private readonly heartbeat: NodeJS.Timeout;
   private readonly timeout: number;
   private readonly reconnectMs: number;
@@ -196,6 +225,10 @@ export class BridgeHub {
         } else if (conn.ws.readyState === WebSocket.OPEN) conn.ws.ping();
       }
     }, opts.pingIntervalMs ?? 15_000).unref();
+  }
+
+  setDelegateHandler(handler: BridgeDelegateRpcHandler | null): void {
+    this.delegateHandler = handler;
   }
 
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer) {
@@ -469,6 +502,45 @@ export class BridgeHub {
           id,
         );
       }
+    } else if (type === "delegate.rpc") {
+      if (!id) throw new Error();
+      void (async () => {
+        try {
+          const req = delegateRpcSchema.parse(p);
+          const run = this.runs.get(req.run_id);
+          if (!run || run.owner !== conn || run.project !== req.project_id) {
+            throw new ApiError(403, "没有有效的对话执行上下文");
+          }
+          if (run.publicFeedback) {
+            throw new ApiError(403, "公开反馈会话禁止委派子代理");
+          }
+          if (this.assertWorkspaceAccess(conn.id, req.project_id).workdir !== run.workdir) {
+            throw new ApiError(403, "项目目录绑定已失效");
+          }
+          if (!this.delegateHandler) {
+            throw new ApiError(503, "子代理委派服务未就绪");
+          }
+          const result = await this.delegateHandler({
+            projectId: req.project_id,
+            sessionId: run.session,
+            runId: run.id,
+            action: req.action,
+            params: req.params,
+          });
+          this.send(conn, "delegate.rpc.result", { ok: true, data: result }, id);
+        } catch (err) {
+          this.send(
+            conn,
+            "delegate.rpc.result",
+            {
+              ok: false,
+              error: err instanceof ApiError ? err.message : err instanceof Error ? err.message : "子代理委派请求无效",
+              status: err instanceof ApiError ? err.status : 400,
+            },
+            id,
+          );
+        }
+      })();
     } else if (type === "project.bind.result") {
       const pending = id && conn.binds.get(id);
       if (!pending || p.project_id !== pending.project) return;

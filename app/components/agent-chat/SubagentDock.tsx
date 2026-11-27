@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   SUBAGENT_STATUS_META,
-  SUBAGENT_STATUS_ORDER,
   compactWhitespace,
+  formatSubagentRuntimeLabel,
   formatSubagentTask,
   resolveSubagentAvatar,
   resolveSubagentStatus,
@@ -533,26 +533,15 @@ export function SubagentTaskList({
   );
 }
 
-function hasSubagentDetail(item: AggregatedSubagent): boolean {
-  const taskText = formatSubagentTask(item.event);
-  const activity = item.event.subagent.activity?.trim() || "";
-  const hasOutput = (item.event.output ?? "").trim().length > 0;
-  const hasExitCode = typeof item.event.exit_code === "number";
-  const hasLongTask = taskText.length > 120 || taskText.includes("\n");
-  const hasLongActivity = Boolean(activity && (activity.length > 90 || activity.includes("\n")));
-  return hasOutput || hasExitCode || hasLongTask || hasLongActivity;
-}
-
 const MAX_VISIBLE_AVATARS = 5;
 
-function SubagentHoverCard({
+function SubagentStatusPopover({
   item,
   index,
   total,
   align,
   caretOffsetPx,
-  onJump,
-  onOpenDetail,
+  onOpenPanel,
   onMouseEnter,
   onMouseLeave,
 }: {
@@ -561,8 +550,7 @@ function SubagentHoverCard({
   total: number;
   align: "left" | "right";
   caretOffsetPx: number | null;
-  onJump?: () => void;
-  onOpenDetail: () => void;
+  onOpenPanel: () => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
@@ -570,8 +558,8 @@ function SubagentHoverCard({
   const statusMeta = SUBAGENT_STATUS_META[item.status];
   const taskText = formatSubagentTask(item.event);
   const activity = item.event.subagent.activity?.trim() || "";
-  const outputText = (item.event.output ?? "").trim();
-  const hasExitCode = typeof item.event.exit_code === "number";
+  const runtimeLabel = formatSubagentRuntimeLabel(item.event.subagent.runtime);
+  const modelLabel = item.event.subagent.model?.trim() || "";
   const isRunning = item.status === "running";
 
   return (
@@ -582,12 +570,11 @@ function SubagentHoverCard({
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
       className={cn(
-        "absolute bottom-full mb-3 z-40 w-[min(340px,calc(100vw-2rem))] rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/96 backdrop-blur-xl shadow-[var(--rd-shadow-lg)] overflow-visible animate-rd-hover-card-in",
+        "absolute bottom-full mb-3 z-40 w-[min(300px,calc(100vw-2rem))] rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/96 backdrop-blur-xl shadow-[var(--rd-shadow-lg)] overflow-visible animate-rd-hover-card-in",
         "before:content-[''] before:absolute before:inset-x-0 before:-bottom-3 before:h-3",
         align === "right" ? "-right-2" : "-left-2",
       )}
     >
-      {/* Signature bot color hairline accent */}
       <div className="overflow-hidden rounded-2xl">
         <div
           aria-hidden="true"
@@ -597,14 +584,15 @@ function SubagentHoverCard({
           }}
         />
 
-        <div key={item.id} className="p-3 space-y-2.5 animate-rd-content-swap">
+        <div key={item.id} className="p-3 space-y-2 animate-rd-content-swap">
           <div className="flex items-start gap-2.5">
             <SubagentAvatar
               avatar={avatar}
               status={item.status}
-              size="md"
+              size="sm"
               bobbing={isRunning}
               elevated={isRunning}
+              className="mt-0.5"
             />
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-1.5">
@@ -612,9 +600,11 @@ function SubagentHoverCard({
                   <span className="text-[12.5px] font-semibold tracking-[-0.01em] text-[var(--text-primary)] truncate">
                     {avatar.name}
                   </span>
-                  <span className="rounded bg-[var(--surface-subtle)] border border-[var(--border-subtle)] px-1 py-[1px] font-mono text-[10px] text-[var(--text-muted)] tabular-nums">
-                    #{item.launchIndex}
-                  </span>
+                  {runtimeLabel && (
+                    <span className="rounded bg-[var(--surface-subtle)] border border-[var(--border-subtle)] px-1.5 py-[1px] font-mono text-[10px] text-[var(--text-secondary)] truncate max-w-[110px]">
+                      {modelLabel ? `${runtimeLabel} · ${modelLabel}` : runtimeLabel}
+                    </span>
+                  )}
                 </span>
                 <span
                   className={cn(
@@ -626,100 +616,35 @@ function SubagentHoverCard({
                   <span>{statusMeta.label}</span>
                 </span>
               </div>
-              <p className="mt-1 text-[12px] font-medium leading-[1.4] text-[var(--text-primary)] whitespace-pre-wrap break-words max-h-20 overflow-y-auto rd-scroll">
+              <p className="mt-1 text-[12px] font-medium leading-[1.4] text-[var(--text-primary)] line-clamp-2 break-words">
                 {taskText}
               </p>
             </div>
           </div>
 
-          {activity || outputText || hasExitCode ? (
-            <div
-              className={cn(
-                "rounded-xl border px-2.5 py-2 text-[11.5px] leading-[1.5] space-y-1.5",
-                item.status === "error"
-                  ? "border-rose-500/25 bg-rose-500/[0.06] dark:bg-rose-500/[0.09]"
-                  : item.status === "interrupted"
-                    ? "border-amber-500/25 bg-amber-500/[0.06]"
-                    : "border-[var(--border-subtle)]/80 bg-[var(--surface-subtle)]/75",
-              )}
-            >
-              {activity && (
-                <div className="flex items-center gap-1.5 min-w-0 text-[11px]">
-                  <span className="shrink-0 text-[var(--text-muted)]">
-                    {isRunning ? "正在执行" : "最近步骤"}
-                  </span>
-                  <span className="min-w-0 truncate rounded border border-[var(--border-subtle)] bg-[var(--surface-card)] px-1.5 py-0.5 font-mono text-[10.5px] text-[var(--text-primary)]">
-                    {compactWhitespace(activity)}
-                  </span>
-                </div>
-              )}
-              {(outputText || hasExitCode) && (
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between gap-2 text-[10.5px]">
-                    <span
-                      className={cn(
-                        "font-semibold",
-                        item.status === "error"
-                          ? "text-rose-600 dark:text-rose-400"
-                          : item.status === "interrupted"
-                            ? "text-amber-700 dark:text-amber-300"
-                            : item.status === "done"
-                              ? "text-emerald-700 dark:text-emerald-400"
-                              : "text-[var(--text-muted)]",
-                      )}
-                    >
-                      {statusMeta.outputLabel}
-                    </span>
-                    {hasExitCode && (
-                      <span className="font-mono text-[10px] text-[var(--text-muted)] tabular-nums">
-                        exit {item.event.exit_code}
-                      </span>
-                    )}
-                  </div>
-                  {outputText && (
-                    <pre
-                      className={cn(
-                        "m-0 max-h-36 overflow-y-auto rd-scroll font-mono text-[11px] leading-[1.5] whitespace-pre-wrap break-words",
-                        item.status === "error"
-                          ? "text-rose-700 dark:text-rose-300"
-                          : "text-[var(--text-secondary)]",
-                      )}
-                    >
-                      {outputText}
-                    </pre>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="rounded-xl border border-[var(--border-subtle)]/70 bg-[var(--surface-subtle)]/60 px-2.5 py-1.5 text-[11px] text-[var(--text-muted)]">
-              {isRunning ? "子代理正在后台推进任务…" : "暂无更多工作输出"}
+          {activity && (
+            <div className="flex items-center gap-1.5 min-w-0 rounded-lg border border-[var(--border-subtle)]/80 bg-[var(--surface-subtle)]/75 px-2 py-1 text-[11px]">
+              <span className="shrink-0 text-[var(--text-muted)]">
+                {isRunning ? "进行中" : "状态"}
+              </span>
+              <span className="min-w-0 truncate font-mono text-[10.5px] text-[var(--text-secondary)]">
+                {compactWhitespace(activity)}
+              </span>
             </div>
           )}
 
           <div className="flex items-center justify-between gap-2 pt-0.5 text-[10.5px] text-[var(--text-muted)]">
             <span className="tabular-nums">
-              {total > 1 ? `小队成员 ${index + 1} / ${total}` : "点击头像跳转消息"}
+              {total > 1 ? `小队成员 ${index + 1} / ${total}` : "点击头像查看完整对话"}
             </span>
-            <span className="inline-flex items-center gap-2 shrink-0">
-              {onJump && (
-                <button
-                  type="button"
-                  onClick={onJump}
-                  className="rd-focus-ring inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
-                >
-                  <span>跳到消息</span>
-                  <Icon name="arrow-up-right" size={11} />
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={onOpenDetail}
-                className="rd-focus-ring inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-medium text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
-              >
-                <span>全部详情</span>
-              </button>
-            </span>
+            <button
+              type="button"
+              onClick={onOpenPanel}
+              className="rd-focus-ring inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer shrink-0"
+            >
+              <span>打开面板</span>
+              <Icon name="arrow-up-right" size={11} />
+            </button>
           </div>
         </div>
       </div>
@@ -743,38 +668,23 @@ function SubagentHoverCard({
 
 export function SubagentDock({
   summary,
-  isStreaming = false,
-  open,
-  onOpenChange,
-  focusedId,
-  onClearFocus,
-  onJumpToMessage,
+  selectedId,
+  onSelectSubagent,
   align = "left",
   className,
 }: {
   summary: SessionSubagentSummary;
-  isStreaming?: boolean;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  focusedId?: string | null;
-  onClearFocus?: () => void;
-  onJumpToMessage?: (messageId: string) => void;
+  selectedId?: string | null;
+  onSelectSubagent: (id: string) => void;
   align?: "left" | "right";
   className?: string;
 }) {
   const dockRef = useRef<HTMLDivElement>(null);
-  const panelRef = useRef<HTMLElement>(null);
   const avatarBtnRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const hoverCloseTimerRef = useRef<number | null>(null);
-  const panelId = useId();
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
-  const [highlightedId, setHighlightedId] = useState<string | null>(null);
-  const [localFocusId, setLocalFocusId] = useState<string | null>(null);
   const [stackHovered, setStackHovered] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [caretOffsetPx, setCaretOffsetPx] = useState<number | null>(null);
-
-  const activeFocusId = focusedId || localFocusId;
 
   const cancelHoverClose = useCallback(() => {
     if (hoverCloseTimerRef.current !== null) {
@@ -795,12 +705,12 @@ export function SubagentDock({
   useEffect(() => () => cancelHoverClose(), [cancelHoverClose]);
 
   useEffect(() => {
-    if (open) {
+    if (selectedId) {
       cancelHoverClose();
       setStackHovered(false);
       setHoveredId(null);
     }
-  }, [open, cancelHoverClose]);
+  }, [selectedId, cancelHoverClose]);
 
   const updateCaretForElement = useCallback(
     (btnEl: HTMLElement | null | undefined) => {
@@ -810,12 +720,11 @@ export function SubagentDock({
       const btnRect = btnEl.getBoundingClientRect();
       if (!dockRect.width || !btnRect.width) return;
       const btnCenter = btnRect.left + btnRect.width / 2;
-      // Hover card is shifted 8px outward (-left-2 / -right-2) so the caret stays inside the flat bottom edge
       const offset =
         align === "right"
           ? dockRect.right - btnCenter + 3
           : btnCenter - dockRect.left + 3;
-      const clamped = Math.max(14, Math.min(308, Math.round(offset)));
+      const clamped = Math.max(14, Math.min(268, Math.round(offset)));
       setCaretOffsetPx(clamped);
     },
     [align],
@@ -829,58 +738,7 @@ export function SubagentDock({
   );
 
   useEffect(() => {
-    if (!open || !activeFocusId) return;
-    const match = summary.byId.get(activeFocusId);
-    if (match && hasSubagentDetail(match)) {
-      setExpandedIds((prev) => {
-        if (prev.has(activeFocusId)) return prev;
-        const next = new Set(prev);
-        next.add(activeFocusId);
-        return next;
-      });
-    }
-    setHighlightedId(activeFocusId);
-    const timer = window.setTimeout(() => {
-      setHighlightedId((curr) => (curr === activeFocusId ? null : curr));
-    }, 1800);
-
-    const raf = window.requestAnimationFrame(() => {
-      const listItems = panelRef.current?.querySelectorAll<HTMLLIElement>("li[data-subagent-id]");
-      const targetEl = listItems
-        ? Array.from(listItems).find((el) => el.dataset.subagentId === activeFocusId)
-        : undefined;
-      targetEl?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
-    });
-
-    if (focusedId) onClearFocus?.();
-    if (localFocusId) setLocalFocusId(null);
-    return () => {
-      window.clearTimeout(timer);
-      window.cancelAnimationFrame(raf);
-    };
-  }, [open, activeFocusId, focusedId, localFocusId, summary.byId, onClearFocus]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onOpenChange(false);
-    };
-    const onPointerDown = (e: PointerEvent) => {
-      const target = e.target;
-      if (target instanceof Node && dockRef.current?.contains(target)) return;
-      if (target instanceof Element && target.closest("[data-subagent-ref-trigger]")) return;
-      onOpenChange(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("pointerdown", onPointerDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("pointerdown", onPointerDown);
-    };
-  }, [open, onOpenChange]);
-
-  useEffect(() => {
-    if (!hoveredId || open) return;
+    if (!hoveredId) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         cancelHoverClose();
@@ -890,13 +748,11 @@ export function SubagentDock({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [hoveredId, open, cancelHoverClose]);
+  }, [hoveredId, cancelHoverClose]);
 
   if (summary.total === 0) return null;
 
-  const { counts, items, total } = summary;
-  const isParallel = total > 1;
-  const runningCount = counts.running;
+  const { items, total } = summary;
   const visibleItems = items.slice(0, MAX_VISIBLE_AVATARS);
   const overflowCount = Math.max(0, total - visibleItems.length);
 
@@ -904,45 +760,19 @@ export function SubagentDock({
   const hoveredItem = hoveredIndex >= 0 ? items[hoveredIndex] : null;
   const hoveredVisibleIndex = hoveredId ? visibleItems.findIndex((i) => i.id === hoveredId) : -1;
 
-  const toggleItem = (id: string) => {
-    setExpandedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
   const handlePreviewItem = (id: string) => {
-    if (open) return;
     cancelHoverClose();
     setStackHovered(true);
     setHoveredId(id);
     updateCaretForAvatar(id);
   };
 
-  const handleOpenForItem = (id: string) => {
-    cancelHoverClose();
-    setStackHovered(false);
-    setHoveredId(null);
-    setLocalFocusId(id);
-    onOpenChange(true);
-  };
-
   const handleAvatarClick = (item: AggregatedSubagent) => {
     cancelHoverClose();
     setStackHovered(false);
     setHoveredId(null);
-    const targetMsgId = item.sourceMessageId || item.latestMessageId;
-    if (onJumpToMessage && targetMsgId) {
-      if (open) onOpenChange(false);
-      onJumpToMessage(targetMsgId);
-      return;
-    }
-    handleOpenForItem(item.id);
+    onSelectSubagent(item.id);
   };
-
-  const hoveredJumpMsgId = hoveredItem ? hoveredItem.sourceMessageId || hoveredItem.latestMessageId : "";
 
   return (
     <div
@@ -952,114 +782,30 @@ export function SubagentDock({
       onMouseLeave={scheduleHoverClose}
       className={cn("relative inline-flex h-7 items-center max-w-full overflow-visible", className)}
     >
-      {/* Gliding Hover Work-Detail Card (shown on avatar hover when full panel is closed) */}
-      {!open && hoveredItem && (
-        <SubagentHoverCard
+      {/* Lightweight Status-Only Hover Popover */}
+      {!selectedId && hoveredItem && (
+        <SubagentStatusPopover
           item={hoveredItem}
           index={hoveredIndex}
           total={total}
           align={align}
           caretOffsetPx={caretOffsetPx}
-          onJump={
-            onJumpToMessage && hoveredJumpMsgId
-              ? () => handleAvatarClick(hoveredItem)
-              : undefined
-          }
-          onOpenDetail={() => handleOpenForItem(hoveredItem.id)}
+          onOpenPanel={() => handleAvatarClick(hoveredItem)}
           onMouseEnter={cancelHoverClose}
           onMouseLeave={scheduleHoverClose}
         />
       )}
 
-      {/* Expanded Subagent Detail Panel (anchored cleanly above the composer stack) */}
-      {open && (
-        <section
-          ref={panelRef}
-          id={panelId}
-          aria-label={isParallel ? "并行子代理任务" : "子代理任务"}
-          className={cn(
-            "absolute bottom-full mb-2.5 z-40 w-[min(420px,calc(100vw-1.5rem))] sm:w-[min(440px,calc(100vw-2rem))] rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/98 backdrop-blur-md shadow-[var(--rd-shadow-lg)] overflow-hidden animate-rd-panel-spring",
-            align === "right" ? "right-0" : "left-0",
-          )}
-        >
-          <header className="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3.5 py-2.5 bg-[var(--surface-subtle)]/40">
-            <div className="flex items-center flex-wrap gap-x-2 gap-y-1 min-w-0">
-              {runningCount > 0 ? (
-                <PixelGridMatrix variant="orbit" />
-              ) : counts.error > 0 ? (
-                <Icon name="alert-circle" size={13} className="text-rose-500" />
-              ) : counts.interrupted > 0 ? (
-                <Icon name="pause-circle" size={13} className="text-amber-500" />
-              ) : counts.unknown > 0 ? (
-                <Icon name="circle-dashed" size={13} className="text-[var(--text-muted)]" />
-              ) : (
-                <Icon name="bot" size={13} className="text-emerald-500" />
-              )}
-              <span
-                className={cn(
-                  "text-[12px] font-semibold tabular-nums",
-                  runningCount > 0 ? "rd-shimmer-text" : "text-[var(--text-primary)]",
-                )}
-              >
-                {isParallel ? `并行子代理 (${total})` : "子代理任务"}
-              </span>
-              <span className="flex items-center flex-wrap gap-1">
-                {SUBAGENT_STATUS_ORDER.map((status) => {
-                  const count = counts[status];
-                  if (!count) return null;
-                  const meta = SUBAGENT_STATUS_META[status];
-                  return (
-                    <span
-                      key={status}
-                      className={cn(
-                        "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10.5px] font-medium leading-none tabular-nums whitespace-nowrap",
-                        meta.badgeClass,
-                      )}
-                    >
-                      {isParallel ? `${count} ${meta.countLabel}` : meta.label}
-                    </span>
-                  );
-                })}
-              </span>
-            </div>
-            <button
-              type="button"
-              aria-label="收起子代理面板"
-              title="收起子代理面板"
-              onClick={() => onOpenChange(false)}
-              className="rd-focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition cursor-pointer"
-            >
-              <Icon name="x" size={13} />
-            </button>
-          </header>
-
-          <div className="max-h-[min(56vh,420px)] overflow-y-auto rd-scroll bg-[var(--surface-subtle)]/35 dark:bg-[#0d0f13]/35">
-            <SubagentTaskList
-              items={items.map((item) => ({
-                event: item.event,
-                status: item.status,
-                sourceMessageId: item.sourceMessageId,
-                launchIndex: item.launchIndex,
-              }))}
-              isStreaming={isStreaming}
-              expandedIds={expandedIds}
-              onToggleItem={toggleItem}
-              highlightedId={highlightedId}
-              onJumpToMessage={onJumpToMessage}
-            />
-          </div>
-        </section>
-      )}
-
-      {/* Frameless Composer-aligned Overlapping Avatar Stack (exact h-7 / 28px alignment) */}
+      {/* Frameless Composer-aligned Overlapping Avatar Stack (entry point to independent panel) */}
       <div
         role="group"
-        aria-label="子代理头像列表"
+        aria-label="子代理入口列表"
         data-subagent-avatar-stack="1"
         className="inline-flex h-7 items-center overflow-visible"
       >
         {visibleItems.map((item, idx) => {
           const avatar = resolveSubagentAvatar(item.id, item.launchIndex);
+          const isSelected = selectedId === item.id;
           const isDirectHover = hoveredVisibleIndex === idx;
           const isNeighborHover =
             hoveredVisibleIndex !== -1 && Math.abs(hoveredVisibleIndex - idx) === 1;
@@ -1082,6 +828,7 @@ export function SubagentDock({
               type="button"
               data-subagent-avatar={item.id}
               data-subagent-status={item.status}
+              aria-pressed={isSelected}
               aria-label={`${avatar.name} · ${SUBAGENT_STATUS_META[item.status].label} · ${formatSubagentTask(item.event)}`}
               onMouseEnter={() => handlePreviewItem(item.id)}
               onFocus={() => handlePreviewItem(item.id)}
@@ -1093,7 +840,7 @@ export function SubagentDock({
               )}
               style={{
                 transform,
-                zIndex: isDirectHover ? 30 : isNeighborHover ? 20 : MAX_VISIBLE_AVATARS - idx,
+                zIndex: isDirectHover || isSelected ? 30 : isNeighborHover ? 20 : MAX_VISIBLE_AVATARS - idx,
                 transition:
                   "transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1), margin-left 280ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 180ms ease",
               }}
@@ -1104,7 +851,7 @@ export function SubagentDock({
                 size="sm"
                 bobbing={item.status === "running" && !isDirectHover}
                 bobDelayMs={idx * 240}
-                elevated={isDirectHover}
+                elevated={isDirectHover || isSelected}
               />
             </button>
           );
@@ -1114,11 +861,8 @@ export function SubagentDock({
           <button
             type="button"
             data-subagent-overflow-trigger="1"
-            aria-expanded={open}
-            aria-controls={panelId}
-            aria-label={`还有 ${overflowCount} 个子代理，点击展开全部`}
+            aria-label={`还有 ${overflowCount} 个子代理，点击打开独立面板`}
             onMouseEnter={(e) => {
-              if (open) return;
               cancelHoverClose();
               setStackHovered(true);
               if (items[MAX_VISIBLE_AVATARS]) {
@@ -1126,7 +870,13 @@ export function SubagentDock({
                 updateCaretForElement(e.currentTarget);
               }
             }}
-            onClick={() => onOpenChange(!open)}
+            onClick={() => {
+              cancelHoverClose();
+              setStackHovered(false);
+              setHoveredId(null);
+              const firstOverflow = items[MAX_VISIBLE_AVATARS] ?? items[0];
+              if (firstOverflow) onSelectSubagent(firstOverflow.id);
+            }}
             className={cn(
               "rd-focus-ring relative inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--surface-elevated)] ring-2 ring-[var(--surface-canvas)] text-[10px] font-semibold tabular-nums text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:-translate-y-1 hover:scale-110 cursor-pointer",
               stackHovered ? "ml-1" : "-ml-2",
