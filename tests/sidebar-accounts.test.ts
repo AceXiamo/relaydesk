@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   clampQuotaPercent,
+  computeArcLength,
+  describeSemiArcPath,
   formatAccountPlan,
   formatResetFull,
   formatResetShort,
   formatWindowLabel,
   getAccountHarnessLogo,
   getQuotaTone,
+  polarToCartesian,
   selectDualRingWindows,
 } from "../app/lib/sidebar-accounts.ts";
 import { sanitizeSidebarAccount } from "../server/sidebar-accounts.ts";
@@ -147,5 +150,21 @@ describe("sidebar account normalization and formatting", () => {
       outer: multi[2],
       inner: multi[1],
     });
+  });
+
+  it("computes semi-arc coordinates, SVG arc paths, and arc lengths accurately", () => {
+    expect(polarToCartesian(24, 24, 10, 0)).toEqual({ x: 34, y: 24 });
+    expect(polarToCartesian(24, 24, 10, 90)).toEqual({ x: 24, y: 34 });
+    expect(polarToCartesian(24, 24, 10, 180)).toEqual({ x: 14, y: 24 });
+    expect(polarToCartesian(24, 24, 10, 270)).toEqual({ x: 24, y: 14 });
+
+    const halfPath = describeSemiArcPath(24, 24, 10, 180, 360);
+    expect(halfPath).toBe("M 14 24 A 10 10 0 0 1 34 24");
+
+    const wideArcPath = describeSemiArcPath(24, 23.5, 18.5, 172, 368);
+    expect(wideArcPath).toContain("A 18.5 18.5 0 1 1");
+
+    expect(computeArcLength(10, 180)).toBeCloseTo(Math.PI * 10, 4);
+    expect(computeArcLength(18.5, 196)).toBeCloseTo((196 / 360) * 2 * Math.PI * 18.5, 4);
   });
 });

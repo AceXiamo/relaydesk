@@ -1,14 +1,25 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { createPortal } from "react-dom";
 import { api } from "~/lib/api.ts";
 import {
   clampQuotaPercent,
+  computeArcLength,
+  describeSemiArcPath,
   formatAccountPlan,
   formatResetFull,
   formatResetShort,
   formatWindowLabel,
   getAccountHarnessLogo,
   getQuotaTone,
+  polarToCartesian,
   selectDualRingWindows,
   type QuotaTone,
 } from "~/lib/sidebar-accounts.ts";
@@ -19,13 +30,45 @@ import { RollingNumber, SmoothCollapse } from "./MotionPrimitives.tsx";
 const FALLBACK_AVATAR = "https://axm.moe/avatar";
 export type SidebarAccountList = SidebarAccount[] | "loading" | "error";
 
-const RING_SIZE = 42;
-const RING_CENTER = RING_SIZE / 2;
-const RING_STROKE_WIDTH = 2.5;
-const OUTER_RING_RADIUS = 19;
-const INNER_RING_RADIUS = 14.5;
-const OUTER_RING_CIRCUMFERENCE = 2 * Math.PI * OUTER_RING_RADIUS;
-const INNER_RING_CIRCUMFERENCE = 2 * Math.PI * INNER_RING_RADIUS;
+const GAUGE_SIZE = 48;
+const GAUGE_CX = 24;
+const GAUGE_CY = 23.5;
+const GAUGE_START_DEG = 172;
+const GAUGE_END_DEG = 368;
+const GAUGE_SWEEP_DEG = GAUGE_END_DEG - GAUGE_START_DEG;
+const OUTER_ARC_RADIUS = 18.5;
+const INNER_ARC_RADIUS = 14.0;
+const OUTER_ARC_STROKE = 2.8;
+const INNER_ARC_STROKE = 2.2;
+const TICK_INNER_RADIUS = 21.1;
+const TICK_OUTER_RADIUS = 22.4;
+const TICK_RATIOS = [0, 0.25, 0.5, 0.75, 1] as const;
+
+const OUTER_ARC_PATH = describeSemiArcPath(
+  GAUGE_CX,
+  GAUGE_CY,
+  OUTER_ARC_RADIUS,
+  GAUGE_START_DEG,
+  GAUGE_END_DEG,
+);
+const INNER_ARC_PATH = describeSemiArcPath(
+  GAUGE_CX,
+  GAUGE_CY,
+  INNER_ARC_RADIUS,
+  GAUGE_START_DEG,
+  GAUGE_END_DEG,
+);
+const OUTER_ARC_LEN = Math.round(computeArcLength(OUTER_ARC_RADIUS, GAUGE_SWEEP_DEG) * 100) / 100;
+const INNER_ARC_LEN = Math.round(computeArcLength(INNER_ARC_RADIUS, GAUGE_SWEEP_DEG) * 100) / 100;
+
+const GAUGE_TICKS = TICK_RATIOS.map((ratio) => {
+  const angle = GAUGE_START_DEG + GAUGE_SWEEP_DEG * ratio;
+  return {
+    ratio,
+    p1: polarToCartesian(GAUGE_CX, GAUGE_CY, TICK_INNER_RADIUS, angle),
+    p2: polarToCartesian(GAUGE_CX, GAUGE_CY, TICK_OUTER_RADIUS, angle),
+  };
+});
 
 const BAR_FILL_STYLES: Record<QuotaTone, string> = {
   healthy: "bg-emerald-500 dark:bg-emerald-400/90",
@@ -34,26 +77,102 @@ const BAR_FILL_STYLES: Record<QuotaTone, string> = {
   unknown: "bg-transparent",
 };
 
-const OUTER_RING_STROKE_STYLES: Record<QuotaTone, string> = {
-  healthy: "stroke-emerald-500 dark:stroke-emerald-400",
-  low: "stroke-amber-500 dark:stroke-amber-400",
-  critical: "stroke-rose-500 dark:stroke-rose-400",
-  unknown: "stroke-transparent",
-};
-
-const INNER_RING_STROKE_STYLES: Record<QuotaTone, string> = {
-  healthy: "stroke-teal-500 dark:stroke-teal-400",
-  low: "stroke-amber-500 dark:stroke-amber-400",
-  critical: "stroke-rose-500 dark:stroke-rose-400",
-  unknown: "stroke-transparent",
-};
-
 const PERCENT_TEXT_STYLES: Record<QuotaTone, string> = {
   healthy: "text-[var(--text-primary)]",
   low: "text-amber-700 dark:text-amber-400",
   critical: "text-rose-600 dark:text-rose-400",
   unknown: "text-[var(--text-muted)]",
 };
+
+const OUTER_DOT_STYLES: Record<QuotaTone, string> = {
+  healthy: "bg-emerald-500 dark:bg-emerald-400",
+  low: "bg-amber-500 dark:bg-amber-400",
+  critical: "bg-rose-500 dark:bg-rose-400",
+  unknown: "bg-[var(--text-muted)]",
+};
+
+const INNER_DOT_STYLES: Record<QuotaTone, string> = {
+  healthy: "bg-sky-500 dark:bg-sky-400",
+  low: "bg-amber-500 dark:bg-amber-400",
+  critical: "bg-rose-500 dark:bg-rose-400",
+  unknown: "bg-[var(--text-muted)]",
+};
+
+const GAUGE_OUTER_READOUT_STYLES: Record<QuotaTone, string> = {
+  healthy: "text-emerald-600 dark:text-emerald-400",
+  low: "text-amber-600 dark:text-amber-400",
+  critical: "text-rose-600 dark:text-rose-400",
+  unknown: "text-[var(--text-muted)]",
+};
+
+const GAUGE_INNER_READOUT_STYLES: Record<QuotaTone, string> = {
+  healthy: "text-sky-600 dark:text-sky-400",
+  low: "text-amber-600 dark:text-amber-400",
+  critical: "text-rose-600 dark:text-rose-400",
+  unknown: "text-[var(--text-muted)]",
+};
+
+function getArcGradientStops(tone: QuotaTone, layer: "outer" | "inner") {
+  if (tone === "low") {
+    return layer === "outer"
+      ? [
+          { offset: "0%", color: "#f59e0b" },
+          { offset: "100%", color: "#fbbf24" },
+        ]
+      : [
+          { offset: "0%", color: "#d97706" },
+          { offset: "100%", color: "#fbbf24" },
+        ];
+  }
+  if (tone === "critical") {
+    return [
+      { offset: "0%", color: "#e11d48" },
+      { offset: "100%", color: "#fb7185" },
+    ];
+  }
+  if (tone === "unknown") {
+    return [
+      { offset: "0%", color: "#a1a1aa" },
+      { offset: "100%", color: "#a1a1aa" },
+    ];
+  }
+  if (layer === "inner") {
+    return [
+      { offset: "0%", color: "#0284c7" },
+      { offset: "50%", color: "#38bdf8" },
+      { offset: "100%", color: "#22d3ee" },
+    ];
+  }
+  return [
+    { offset: "0%", color: "#10b981" },
+    { offset: "50%", color: "#34d399" },
+    { offset: "100%", color: "#2dd4bf" },
+  ];
+}
+
+function getTipAccentColor(tone: QuotaTone, layer: "outer" | "inner"): string {
+  if (tone === "low") return "#fbbf24";
+  if (tone === "critical") return "#fb7185";
+  if (tone === "unknown") return "#a1a1aa";
+  return layer === "inner" ? "#38bdf8" : "#34d399";
+}
+
+function getHarnessGlowColor(service: string): string {
+  switch (service.trim().toLowerCase()) {
+    case "codex":
+    case "openai":
+      return "rgba(99, 102, 241, 0.22)";
+    case "gemini":
+    case "agy":
+    case "antigravity":
+      return "rgba(56, 189, 248, 0.22)";
+    case "claude":
+    case "anthropic":
+      return "rgba(217, 119, 87, 0.24)";
+    default:
+      return "rgba(99, 102, 241, 0.16)";
+  }
+}
 
 export function useSidebarAccounts(): { accounts: SidebarAccountList; reload: () => void } {
   const [snapshot, setSnapshot] = useState<SidebarAccountList>("loading");
@@ -100,8 +219,8 @@ export function useSidebarAccounts(): { accounts: SidebarAccountList; reload: ()
 
 function HarnessLogoBadge({
   service,
-  sizeClass = "size-[22px]",
-  iconSize = 12,
+  sizeClass = "size-[20px]",
+  iconSize = 11,
 }: {
   service: string;
   sizeClass?: string;
@@ -155,7 +274,7 @@ function QuotaWindowBar({
 }: {
   service: string;
   window: SidebarAccount["windows"][number];
-  ringHint?: "外环" | "内环";
+  ringHint?: { label: "外弧" | "内弧"; dotClass: string };
 }) {
   const shortLabel = formatWindowLabel(service, window.label);
   const clamped = clampQuotaPercent(window.remainingPercent);
@@ -176,8 +295,9 @@ function QuotaWindowBar({
             {shortLabel}
           </span>
           {ringHint && (
-            <span className="rounded px-1 py-[1px] text-[9px] font-medium bg-[var(--surface-subtle)] border border-[var(--border-subtle)] text-[var(--text-muted)] shrink-0">
-              {ringHint}
+            <span className="inline-flex items-center gap-1 rounded px-1 py-[1px] text-[9px] font-medium bg-[var(--surface-subtle)] border border-[var(--border-subtle)] text-[var(--text-muted)] shrink-0">
+              <span aria-hidden="true" className={`size-[5px] rounded-full ${ringHint.dotClass}`} />
+              {ringHint.label}
             </span>
           )}
           {hasReset && resetDate ? (
@@ -335,7 +455,7 @@ function AccountCard({
   );
 }
 
-function CompactAccountRingItem({
+function CompactAccountGaugeItem({
   account,
   preferIdentitySubtitle,
 }: {
@@ -346,6 +466,7 @@ function CompactAccountRingItem({
   const popoverRef = useRef<HTMLDivElement>(null);
   const openTimerRef = useRef<number | undefined>(undefined);
   const closeTimerRef = useRef<number | undefined>(undefined);
+  const uid = useId().replace(/:/g, "");
 
   const [hovered, setHovered] = useState(false);
   const [pinned, setPinned] = useState(false);
@@ -358,6 +479,34 @@ function CompactAccountRingItem({
   const innerPercent = inner ? clampQuotaPercent(inner.remainingPercent) : null;
   const outerTone = getQuotaTone(outerPercent);
   const innerTone = getQuotaTone(innerPercent);
+
+  const outerOffset =
+    outerPercent !== null
+      ? Math.round(OUTER_ARC_LEN * (1 - outerPercent / 100) * 100) / 100
+      : OUTER_ARC_LEN;
+  const innerOffset =
+    innerPercent !== null
+      ? Math.round(INNER_ARC_LEN * (1 - innerPercent / 100) * 100) / 100
+      : INNER_ARC_LEN;
+
+  const outerTip =
+    account.status === "ready" && outer && outerPercent !== null && outerPercent > 0
+      ? polarToCartesian(
+          GAUGE_CX,
+          GAUGE_CY,
+          OUTER_ARC_RADIUS,
+          GAUGE_START_DEG + GAUGE_SWEEP_DEG * (outerPercent / 100),
+        )
+      : null;
+  const innerTip =
+    account.status === "ready" && inner && innerPercent !== null && innerPercent > 0
+      ? polarToCartesian(
+          GAUGE_CX,
+          GAUGE_CY,
+          INNER_ARC_RADIUS,
+          GAUGE_START_DEG + GAUGE_SWEEP_DEG * (innerPercent / 100),
+        )
+      : null;
 
   const clearHoverTimers = useCallback(() => {
     window.clearTimeout(openTimerRef.current);
@@ -448,6 +597,10 @@ function CompactAccountRingItem({
   }
   const ariaSummary = summaryParts.join("，");
   const showDualHint = Boolean(account.status === "ready" && outer && inner);
+  const outerStops = getArcGradientStops(outerTone, "outer");
+  const innerStops = getArcGradientStops(innerTone, "inner");
+  const outerGradientId = `${uid}-outer`;
+  const innerGradientId = `${uid}-inner`;
 
   return (
     <li className="relative flex justify-center">
@@ -469,121 +622,226 @@ function CompactAccountRingItem({
             return next;
           });
         }}
-        className="relative size-[42px] rounded-full flex items-center justify-center transition-transform duration-150 hover:scale-[1.04] active:scale-[0.96] rd-focus-ring cursor-pointer"
+        className={`group relative w-[48px] h-[48px] rounded-[14px] flex items-center justify-center border transition-[background-color,border-color,box-shadow,transform] duration-200 active:scale-[0.95] rd-focus-ring cursor-pointer overflow-visible ${
+          open
+            ? "bg-[var(--surface-card)] border-[var(--border-strong)]/70 shadow-[var(--rd-shadow-sm)]"
+            : "bg-[var(--rd-tray)]/55 hover:bg-[var(--surface-card)] border-transparent hover:border-[var(--border-subtle)] hover:shadow-[var(--rd-shadow-sm)]"
+        }`}
       >
-        <svg
-          viewBox={`0 0 ${RING_SIZE} ${RING_SIZE}`}
-          width={RING_SIZE}
-          height={RING_SIZE}
+        <span
           aria-hidden="true"
-          className="pointer-events-none"
+          className="pointer-events-none absolute inset-0 rounded-[14px] overflow-hidden"
         >
+          <span
+            style={{
+              background: `radial-gradient(circle at 50% 42%, ${getHarnessGlowColor(account.service)}, transparent 72%)`,
+            }}
+            className={`absolute inset-0 transition-opacity duration-200 ${
+              open ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+            }`}
+          />
+        </span>
+
+        <svg
+          viewBox={`0 0 ${GAUGE_SIZE} ${GAUGE_SIZE}`}
+          width={GAUGE_SIZE}
+          height={GAUGE_SIZE}
+          aria-hidden="true"
+          className="pointer-events-none relative z-10"
+        >
+          <defs>
+            <linearGradient id={outerGradientId} x1="0%" y1="50%" x2="100%" y2="50%">
+              {outerStops.map((stop) => (
+                <stop key={stop.offset} offset={stop.offset} stopColor={stop.color} />
+              ))}
+            </linearGradient>
+            <linearGradient id={innerGradientId} x1="0%" y1="50%" x2="100%" y2="50%">
+              {innerStops.map((stop) => (
+                <stop key={stop.offset} offset={stop.offset} stopColor={stop.color} />
+              ))}
+            </linearGradient>
+          </defs>
+
+          {GAUGE_TICKS.map((tick) => (
+            <line
+              key={tick.ratio}
+              data-gauge-tick=""
+              x1={tick.p1.x}
+              y1={tick.p1.y}
+              x2={tick.p2.x}
+              y2={tick.p2.y}
+              strokeWidth={1}
+              strokeLinecap="round"
+              className="stroke-black/20 dark:stroke-white/20"
+            />
+          ))}
+
           {account.status === "ready" && outer ? (
             <>
-              <circle
-                cx={RING_CENTER}
-                cy={RING_CENTER}
-                r={OUTER_RING_RADIUS}
+              <path
+                d={OUTER_ARC_PATH}
                 fill="none"
-                strokeWidth={RING_STROKE_WIDTH}
-                className="stroke-black/[0.08] dark:stroke-white/[0.09]"
+                strokeWidth={OUTER_ARC_STROKE}
+                strokeLinecap="round"
+                className="stroke-black/[0.09] dark:stroke-white/[0.1]"
               />
               {outerPercent !== null && outerPercent > 0 && (
-                <circle
+                <path
                   data-ring="outer"
-                  cx={RING_CENTER}
-                  cy={RING_CENTER}
-                  r={OUTER_RING_RADIUS}
+                  d={OUTER_ARC_PATH}
                   fill="none"
-                  strokeWidth={RING_STROKE_WIDTH}
+                  stroke={`url(#${outerGradientId})`}
+                  strokeWidth={OUTER_ARC_STROKE}
                   strokeLinecap="round"
-                  strokeDasharray={OUTER_RING_CIRCUMFERENCE}
-                  strokeDashoffset={OUTER_RING_CIRCUMFERENCE * (1 - outerPercent / 100)}
-                  transform={`rotate(-90 ${RING_CENTER} ${RING_CENTER})`}
-                  className={`transition-[stroke-dashoffset,stroke] duration-500 ease-[var(--ease-out)] ${OUTER_RING_STROKE_STYLES[outerTone]}`}
+                  strokeDasharray={OUTER_ARC_LEN}
+                  strokeDashoffset={outerOffset}
+                  style={
+                    {
+                      "--gauge-len": OUTER_ARC_LEN,
+                      "--gauge-offset": outerOffset,
+                    } as CSSProperties
+                  }
+                  className="rd-gauge-arc transition-[stroke-dashoffset] duration-500 ease-[var(--ease-out)]"
                 />
               )}
+              {outerTip && (
+                <g data-gauge-tip="outer">
+                  <circle
+                    cx={outerTip.x}
+                    cy={outerTip.y}
+                    r={3.6}
+                    fill={getTipAccentColor(outerTone, "outer")}
+                    opacity={0.34}
+                    className={outerTone === "critical" ? "animate-pulse" : undefined}
+                  />
+                  <circle cx={outerTip.x} cy={outerTip.y} r={1.55} fill="#ffffff" />
+                </g>
+              )}
+
               {inner && (
                 <>
-                  <circle
-                    cx={RING_CENTER}
-                    cy={RING_CENTER}
-                    r={INNER_RING_RADIUS}
+                  <path
+                    d={INNER_ARC_PATH}
                     fill="none"
-                    strokeWidth={RING_STROKE_WIDTH}
+                    strokeWidth={INNER_ARC_STROKE}
+                    strokeLinecap="round"
                     className="stroke-black/[0.08] dark:stroke-white/[0.09]"
                   />
                   {innerPercent !== null && innerPercent > 0 && (
-                    <circle
+                    <path
                       data-ring="inner"
-                      cx={RING_CENTER}
-                      cy={RING_CENTER}
-                      r={INNER_RING_RADIUS}
+                      d={INNER_ARC_PATH}
                       fill="none"
-                      strokeWidth={RING_STROKE_WIDTH}
+                      stroke={`url(#${innerGradientId})`}
+                      strokeWidth={INNER_ARC_STROKE}
                       strokeLinecap="round"
-                      strokeDasharray={INNER_RING_CIRCUMFERENCE}
-                      strokeDashoffset={INNER_RING_CIRCUMFERENCE * (1 - innerPercent / 100)}
-                      transform={`rotate(-90 ${RING_CENTER} ${RING_CENTER})`}
-                      className={`transition-[stroke-dashoffset,stroke] duration-500 ease-[var(--ease-out)] ${INNER_RING_STROKE_STYLES[innerTone]}`}
+                      strokeDasharray={INNER_ARC_LEN}
+                      strokeDashoffset={innerOffset}
+                      style={
+                        {
+                          "--gauge-len": INNER_ARC_LEN,
+                          "--gauge-offset": innerOffset,
+                        } as CSSProperties
+                      }
+                      className="rd-gauge-arc transition-[stroke-dashoffset] duration-500 ease-[var(--ease-out)]"
                     />
+                  )}
+                  {innerTip && (
+                    <g data-gauge-tip="inner">
+                      <circle
+                        cx={innerTip.x}
+                        cy={innerTip.y}
+                        r={2.8}
+                        fill={getTipAccentColor(innerTone, "inner")}
+                        opacity={0.34}
+                        className={innerTone === "critical" ? "animate-pulse" : undefined}
+                      />
+                      <circle cx={innerTip.x} cy={innerTip.y} r={1.15} fill="#ffffff" />
+                    </g>
                   )}
                 </>
               )}
             </>
           ) : account.status === "unverified" ? (
             <>
-              <circle
-                cx={RING_CENTER}
-                cy={RING_CENTER}
-                r={OUTER_RING_RADIUS}
+              <path
+                d={OUTER_ARC_PATH}
                 fill="none"
                 strokeWidth={2}
+                strokeLinecap="round"
                 strokeDasharray="3.5 3"
                 className="stroke-amber-500/80 dark:stroke-amber-400/80"
               />
-              <circle
-                cx={RING_CENTER}
-                cy={RING_CENTER}
-                r={INNER_RING_RADIUS}
+              <path
+                d={INNER_ARC_PATH}
                 fill="none"
-                strokeWidth={2}
-                className="stroke-black/[0.05] dark:stroke-white/[0.06]"
+                strokeWidth={1.8}
+                strokeLinecap="round"
+                className="stroke-black/[0.06] dark:stroke-white/[0.07]"
               />
             </>
           ) : (
             <>
-              <circle
-                cx={RING_CENTER}
-                cy={RING_CENTER}
-                r={OUTER_RING_RADIUS}
+              <path
+                d={OUTER_ARC_PATH}
                 fill="none"
                 strokeWidth={2}
+                strokeLinecap="round"
                 strokeDasharray="3.5 3"
                 className="stroke-black/20 dark:stroke-white/20"
               />
-              <circle
-                cx={RING_CENTER}
-                cy={RING_CENTER}
-                r={INNER_RING_RADIUS}
+              <path
+                d={INNER_ARC_PATH}
                 fill="none"
-                strokeWidth={2}
-                className="stroke-black/[0.05] dark:stroke-white/[0.06]"
+                strokeWidth={1.8}
+                strokeLinecap="round"
+                className="stroke-black/[0.06] dark:stroke-white/[0.07]"
               />
             </>
           )}
         </svg>
 
-        <span className="absolute inset-0 m-auto size-[22px] flex items-center justify-center pointer-events-none">
-          <HarnessLogoBadge service={account.service} sizeClass="size-[22px]" iconSize={12} />
+        <span
+          className={`absolute top-[13.5px] left-1/2 -translate-x-1/2 size-[20px] flex items-center justify-center pointer-events-none z-10 transition-transform duration-300 ease-[var(--ease-spring)] group-hover:-translate-y-[1px] group-hover:-rotate-6 group-hover:scale-[1.08] ${
+            open ? "-translate-y-[1px] -rotate-6 scale-[1.08]" : ""
+          }`}
+        >
+          <HarnessLogoBadge service={account.service} sizeClass="size-[20px]" iconSize={11} />
         </span>
 
         {account.status === "unverified" && (
           <span
             aria-hidden="true"
-            className="absolute right-0.5 top-0.5 size-2 rounded-full bg-amber-500 ring-2 ring-[var(--surface-sidebar)] pointer-events-none"
+            className="absolute right-1 top-1 size-2 rounded-full bg-amber-500 ring-2 ring-[var(--surface-sidebar)] animate-pulse pointer-events-none z-20"
           />
         )}
+
+        <span className="absolute bottom-[1.5px] inset-x-0 flex justify-center pointer-events-none z-20">
+          <span
+            data-gauge-readout=""
+            className="inline-flex items-center px-1.5 py-[1px] rounded-full bg-[var(--surface-sidebar)]/90 border border-[var(--border-subtle)]/75 text-[8.5px] leading-none font-mono font-semibold tabular-nums shadow-2xs"
+          >
+            {account.status === "ready" && outer && inner ? (
+              <>
+                <span className={GAUGE_OUTER_READOUT_STYLES[outerTone]}>
+                  {outerPercent ?? "--"}
+                </span>
+                <span className="opacity-40 mx-[1px]">·</span>
+                <span className={GAUGE_INNER_READOUT_STYLES[innerTone]}>
+                  {innerPercent ?? "--"}
+                </span>
+              </>
+            ) : account.status === "ready" && outer ? (
+              <span className={GAUGE_OUTER_READOUT_STYLES[outerTone]}>
+                {outerPercent !== null ? `${outerPercent}%` : "--"}
+              </span>
+            ) : account.status === "unverified" ? (
+              <span className="text-amber-600 dark:text-amber-400">?!</span>
+            ) : (
+              <span className="text-[var(--text-muted)]">--</span>
+            )}
+          </span>
+        </span>
       </button>
 
       {open &&
@@ -628,9 +886,9 @@ function CompactAccountRingItem({
                     ringHint={
                       showDualHint
                         ? window === outer
-                          ? "外环"
+                          ? { label: "外弧", dotClass: OUTER_DOT_STYLES[outerTone] }
                           : window === inner
-                            ? "内环"
+                            ? { label: "内弧", dotClass: INNER_DOT_STYLES[innerTone] }
                             : undefined
                         : undefined
                     }
@@ -700,18 +958,55 @@ export function SidebarAccounts({
 }) {
   if (compact) {
     if (accounts === "loading") {
+      const scanSeg = Math.round(OUTER_ARC_LEN * 0.36);
       return (
-        <section
-          aria-label="绑定账号"
-          role="status"
-          className="flex justify-center py-0.5"
-        >
+        <section aria-label="绑定账号" role="status" className="flex justify-center py-0.5">
           <span className="sr-only">正在读取绑定账号…</span>
           <div
             aria-hidden="true"
-            className="size-[42px] rounded-full border-2 border-dashed border-[var(--border-strong)]/60 animate-pulse flex items-center justify-center"
+            className="w-[48px] h-[48px] rounded-[14px] bg-[var(--rd-tray)]/55 flex items-center justify-center relative"
           >
-            <div className="size-[22px] rounded-full bg-[var(--surface-hover)]" />
+            <svg
+              viewBox={`0 0 ${GAUGE_SIZE} ${GAUGE_SIZE}`}
+              width={GAUGE_SIZE}
+              height={GAUGE_SIZE}
+              className="pointer-events-none"
+            >
+              {GAUGE_TICKS.map((tick) => (
+                <line
+                  key={tick.ratio}
+                  x1={tick.p1.x}
+                  y1={tick.p1.y}
+                  x2={tick.p2.x}
+                  y2={tick.p2.y}
+                  strokeWidth={1}
+                  strokeLinecap="round"
+                  className="stroke-black/15 dark:stroke-white/15"
+                />
+              ))}
+              <path
+                d={OUTER_ARC_PATH}
+                fill="none"
+                strokeWidth={OUTER_ARC_STROKE}
+                strokeLinecap="round"
+                className="stroke-black/[0.08] dark:stroke-white/[0.08]"
+              />
+              <path
+                d={OUTER_ARC_PATH}
+                fill="none"
+                strokeWidth={OUTER_ARC_STROKE}
+                strokeLinecap="round"
+                strokeDasharray={`${scanSeg} ${Math.round(OUTER_ARC_LEN)}`}
+                style={
+                  {
+                    "--gauge-scan-start": scanSeg,
+                    "--gauge-scan-end": -Math.round(OUTER_ARC_LEN),
+                  } as CSSProperties
+                }
+                className="stroke-indigo-400/75 rd-gauge-scan"
+              />
+            </svg>
+            <div className="absolute top-[13.5px] left-1/2 -translate-x-1/2 size-[20px] rounded-full bg-[var(--surface-hover)] animate-pulse" />
           </div>
         </section>
       );
@@ -725,9 +1020,29 @@ export function SidebarAccounts({
             onClick={onRetry}
             aria-label="额度读取失败，点击重试"
             title="额度读取失败，点击重试"
-            className="size-[42px] rounded-full border-2 border-dashed border-rose-500/45 bg-rose-500/[0.05] text-rose-600 dark:text-rose-400 flex items-center justify-center hover:bg-rose-500/12 active:scale-[0.95] transition-[background-color,transform] duration-150 rd-focus-ring cursor-pointer"
+            className="w-[48px] h-[48px] rounded-[14px] bg-rose-500/[0.05] hover:bg-rose-500/12 active:scale-[0.95] transition-[background-color,transform] duration-150 rd-focus-ring cursor-pointer relative flex items-center justify-center"
           >
-            <Icon name="alert-circle" size={16} />
+            <svg
+              viewBox={`0 0 ${GAUGE_SIZE} ${GAUGE_SIZE}`}
+              width={GAUGE_SIZE}
+              height={GAUGE_SIZE}
+              aria-hidden="true"
+              className="pointer-events-none"
+            >
+              <path
+                d={OUTER_ARC_PATH}
+                fill="none"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeDasharray="3.5 3"
+                className="stroke-rose-500/55 dark:stroke-rose-400/55"
+              />
+            </svg>
+            <Icon
+              name="alert-circle"
+              size={14}
+              className="text-rose-600 dark:text-rose-400 absolute top-[17px] left-1/2 -translate-x-1/2"
+            />
           </button>
         </section>
       );
@@ -744,12 +1059,15 @@ export function SidebarAccounts({
     }
 
     return (
-      <section aria-label="绑定账号" className="w-full max-h-[28dvh] overflow-y-auto rd-scroll py-0.5">
+      <section
+        aria-label="绑定账号"
+        className="w-full max-h-[30dvh] overflow-y-auto overflow-x-hidden rd-scroll py-0.5"
+      >
         <ul className="flex flex-col items-center gap-2">
           {accounts.map((account) => {
             const key = `${account.service.toLowerCase()}::${(account.name?.trim() || "未命名账号").toLowerCase()}`;
             return (
-              <CompactAccountRingItem
+              <CompactAccountGaugeItem
                 key={account.id}
                 account={account}
                 preferIdentitySubtitle={(serviceNameCounts.get(key) ?? 0) > 1}

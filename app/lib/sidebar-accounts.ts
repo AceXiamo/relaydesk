@@ -69,6 +69,40 @@ export function selectDualRingWindows(
   };
 }
 
+function roundCoord(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+export function polarToCartesian(
+  cx: number,
+  cy: number,
+  radius: number,
+  angleDeg: number,
+): { x: number; y: number } {
+  const rad = (angleDeg * Math.PI) / 180;
+  return {
+    x: roundCoord(cx + radius * Math.cos(rad)),
+    y: roundCoord(cy + radius * Math.sin(rad)),
+  };
+}
+
+export function describeSemiArcPath(
+  cx: number,
+  cy: number,
+  radius: number,
+  startDeg: number,
+  endDeg: number,
+): string {
+  const start = polarToCartesian(cx, cy, radius, startDeg);
+  const end = polarToCartesian(cx, cy, radius, endDeg);
+  const largeArc = endDeg - startDeg > 180 ? 1 : 0;
+  return `M ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArc} 1 ${end.x} ${end.y}`;
+}
+
+export function computeArcLength(radius: number, sweepDeg: number): number {
+  return (Math.abs(sweepDeg) / 360) * 2 * Math.PI * radius;
+}
+
 const KNOWN_PLAN_LABELS: Record<string, string> = {
   pro: "Pro",
   plus: "Plus",

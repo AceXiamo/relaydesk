@@ -299,7 +299,8 @@ function SidebarPanel({
         {showRailDivider && (
           <span
             aria-hidden="true"
-            className={`absolute left-1/2 -translate-x-1/2 w-5 h-px bg-[var(--border-subtle)] transition-opacity duration-150 ${
+            data-rail-divider=""
+            className={`absolute left-[10px] w-5 h-px bg-[var(--border-subtle)] transition-opacity duration-150 ${
               isRail ? "opacity-100" : "opacity-0 pointer-events-none"
             }`}
           />
@@ -676,7 +677,7 @@ function SidebarPanel({
       {/* Footer */}
       <div className="border-t border-[var(--border-subtle)] overflow-hidden shrink-0 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
         {isRail ? (
-          <div className="px-2 pt-2.5 flex flex-col items-center gap-2">
+          <div data-rail-footer="" className="w-[59px] pt-2.5 flex flex-col items-center gap-2">
             <SidebarAccounts
               accounts={accounts}
               onRetry={onReloadAccounts}

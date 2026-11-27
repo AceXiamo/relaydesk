@@ -992,6 +992,37 @@
   .animate-rd-panel-spring {
     animation: rd-panel-spring 260ms cubic-bezier(0.22, 1.18, 0.36, 1) both;
   }
+
+  .rd-gauge-arc {
+    animation: rd-gauge-sweep 520ms cubic-bezier(0.22, 1.12, 0.36, 1) both;
+  }
+
+  .rd-gauge-scan {
+    animation: rd-gauge-scan 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes rd-gauge-sweep {
+  from {
+    stroke-dashoffset: var(--gauge-len);
+  }
+  to {
+    stroke-dashoffset: var(--gauge-offset);
+  }
+}
+
+@keyframes rd-gauge-scan {
+  0% {
+    stroke-dashoffset: var(--gauge-scan-start, 24);
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.95;
+  }
+  100% {
+    stroke-dashoffset: var(--gauge-scan-end, -64);
+    opacity: 0.35;
+  }
 }
 
 @keyframes rd-avatar-pop {
@@ -1265,6 +1296,8 @@
   .rd-toast-bar,
   .rd-waterfall-stripe,
   .rd-stagger-in,
+  .rd-gauge-arc,
+  .rd-gauge-scan,
   [data-rd-pulse="true"] {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;

@@ -138,6 +138,15 @@ describe("Sidebar Icon Rail & compact dual-ring accounts", () => {
     expect(collapsedAside?.className).toContain("lg:w-[60px]");
     expect(collapsedAside?.className).toContain("rd-sidebar-shell");
 
+    const railFooter = collapsedAside?.querySelector("[data-rail-footer]");
+    expect(railFooter?.className).toContain("w-[59px]");
+    const railDividers = Array.from(collapsedAside?.querySelectorAll("[data-rail-divider]") ?? []);
+    expect(railDividers.length).toBeGreaterThan(0);
+    for (const divider of railDividers) {
+      expect(divider.className).toContain("left-[10px]");
+      expect(divider.className).not.toContain("left-1/2");
+    }
+
     // Clicking nav items works while collapsed
     const chatNavBtn = collapsedAside?.querySelector('button[aria-label="Codex 对话"]') as HTMLButtonElement;
     expect(chatNavBtn).not.toBeNull();
@@ -175,7 +184,7 @@ describe("Sidebar Icon Rail & compact dual-ring accounts", () => {
     expect(asides[1]?.getAttribute("data-collapsed")).toBe("false");
   });
 
-  it("renders concentric dual rings with Harness Logos and interactive detail popover in compact mode", async () => {
+  it("renders dual half-arc cockpit gauges with Harness Logos, tip sparks, odometer readouts, and popover", async () => {
     const user = userEvent.setup();
     const accounts: SidebarAccount[] = [
       makeAccount({
@@ -210,13 +219,29 @@ describe("Sidebar Icon Rail & compact dual-ring accounts", () => {
       root.render(createElement(SidebarAccounts, { accounts, compact: true }));
     });
 
+    const section = document.querySelector("section[aria-label='绑定账号']");
+    expect(section?.className).toContain("overflow-x-hidden");
+
     const list = document.querySelector("ul");
     expect(list?.className).toContain("flex-col");
 
-    const outerRings = document.querySelectorAll('[data-ring="outer"]');
-    const innerRings = document.querySelectorAll('[data-ring="inner"]');
-    expect(outerRings).toHaveLength(3);
-    expect(innerRings).toHaveLength(2);
+    const outerArcs = Array.from(document.querySelectorAll('path[data-ring="outer"]'));
+    const innerArcs = Array.from(document.querySelectorAll('path[data-ring="inner"]'));
+    expect(outerArcs).toHaveLength(3);
+    expect(innerArcs).toHaveLength(2);
+    for (const arc of [...outerArcs, ...innerArcs]) {
+      expect(arc.getAttribute("d")).toContain(" A ");
+    }
+
+    // 5 tachometer ticks per gauge × 3 gauges = 15
+    expect(document.querySelectorAll("[data-gauge-tick]")).toHaveLength(15);
+    expect(document.querySelectorAll('[data-gauge-tip="outer"]')).toHaveLength(3);
+    expect(document.querySelectorAll('[data-gauge-tip="inner"]')).toHaveLength(2);
+
+    const readouts = Array.from(document.querySelectorAll("[data-gauge-readout]")).map(
+      (el) => el.textContent,
+    );
+    expect(readouts).toEqual(["80·25", "95·60", "55%"]);
 
     const imgs = Array.from(document.querySelectorAll("img")).map((img) => img.getAttribute("src"));
     expect(imgs).toEqual([
@@ -225,7 +250,7 @@ describe("Sidebar Icon Rail & compact dual-ring accounts", () => {
       "/runtime-logos/claude.svg",
     ]);
 
-    // Clicking opens detail popover with full quota bars
+    // Clicking opens detail popover with full quota bars and 外弧/内弧 labels
     const firstBtn = document.querySelector("button[aria-haspopup='dialog']") as HTMLButtonElement;
     await user.click(firstBtn);
     const dialog = document.body.querySelector('[role="dialog"]');
@@ -233,8 +258,8 @@ describe("Sidebar Icon Rail & compact dual-ring accounts", () => {
     expect(dialog?.textContent).toContain("Codex");
     expect(dialog?.textContent).toContain("80%");
     expect(dialog?.textContent).toContain("25%");
-    expect(dialog?.textContent).toContain("外环");
-    expect(dialog?.textContent).toContain("内环");
+    expect(dialog?.textContent).toContain("外弧");
+    expect(dialog?.textContent).toContain("内弧");
 
     // Escape closes popover
     await user.keyboard("{Escape}");
@@ -257,6 +282,7 @@ describe("Sidebar Icon Rail & compact dual-ring accounts", () => {
       root.render(createElement(SidebarAccounts, { accounts: "loading", compact: true }));
     });
     expect(document.querySelector('[role="status"]')?.textContent).toContain("正在读取绑定账号");
+    expect(document.querySelector(".rd-gauge-scan")).not.toBeNull();
 
     act(() => {
       root.render(createElement(SidebarAccounts, { accounts: "error", onRetry, compact: true }));
@@ -279,6 +305,10 @@ describe("Sidebar Icon Rail & compact dual-ring accounts", () => {
       root.render(createElement(SidebarAccounts, { accounts: specialAccounts, compact: true }));
     });
     expect(document.querySelectorAll('[data-ring="outer"]')).toHaveLength(0);
+    const readouts = Array.from(document.querySelectorAll("[data-gauge-readout]")).map(
+      (el) => el.textContent,
+    );
+    expect(readouts).toEqual(["?!", "--"]);
     const buttons = Array.from(document.querySelectorAll('button[aria-haspopup="dialog"]'));
     expect(buttons[0]?.getAttribute("aria-label")).toContain("账号归属未确认");
     expect(buttons[1]?.getAttribute("aria-label")).toContain("额度暂不可用");
