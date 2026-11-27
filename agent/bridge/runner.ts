@@ -229,9 +229,7 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
     ? { env: Object.create(null) as Record<string, string>, secrets: [] as string[] }
     : datasourceValues(p.datasource_env);
   const secrets = [...datasource.secrets, String(o.config.agent_token || "")].filter(Boolean);
-  const fullAccess = isPublicFeedback
-    ? false
-    : (runtime === "codex" ? o.config.codex_full_access : runtime === "agy" ? o.config.agy_full_access : o.config.claude_full_access);
+  const fullAccess = o.config[`${runtime}_full_access`] ?? true;
   let mcpHandle: RelaydeskMcpHandle | null = null;
   let claudeMcpConfigPath: string | null = null;
   if (effectiveEnableMcp) {

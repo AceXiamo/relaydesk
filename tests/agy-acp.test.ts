@@ -3,7 +3,7 @@ import { expect, it } from "vitest";
 import { agyAcpTurn } from "../server/agy-acp.ts";
 import { createCliStreamParser } from "../server/cli-stream-parser.ts";
 
-function fixture(model = "", effort = "") {
+function fixture(model = "", effort = "", fullAccess = false) {
   const requests: { id: number; method?: string; params?: Record<string, unknown>; result?: object }[] = [];
   const input = new Writable({
     write(chunk, _, done) {
@@ -13,7 +13,7 @@ function fixture(model = "", effort = "") {
   });
   const parser = createCliStreamParser("agy", ["fixture-token"], () => {});
   const turn = agyAcpTurn(
-    { model, effort, url: "http://localhost/mcp", token: "fixture-token" },
+    { model, effort, fullAccess, url: "http://localhost/mcp", token: "fixture-token" },
     "/workspace",
     "",
     "hello",
@@ -74,4 +74,21 @@ it("reports premature worker exit", () => {
   const f = fixture();
   f.turn.close();
   expect(f.state.errorMessage).toContain("before completing initialize");
+});
+
+it.each([false, true])("answers ACP permission requests for the active session with fullAccess=%s", (full) => {
+  const f = fixture("", "", full);
+  f.reply({ agentCapabilities: { mcpCapabilities: { http: true } } });
+  f.reply({ sessionId: "s", configOptions: [] });
+  const ask = (sessionId: string, kinds: string[]) => {
+    const options = kinds.map(kind => ({ kind, optionId: "id-" + kind }));
+    f.write({ id: 99, method: "session/request_permission", params: { sessionId, options } });
+    return f.requests.at(-1)?.result;
+  };
+  const cancelled = { outcome: { outcome: "cancelled" } };
+  const selected = (kind: string) => ({ outcome: { outcome: "selected", optionId: "id-" + kind } });
+  expect(ask("s", ["reject_once", "allow_always", "allow_once"])).toEqual(full ? selected("allow_once") : cancelled);
+  expect(ask("s", ["allow_always"])).toEqual(full ? selected("allow_always") : cancelled);
+  expect(ask("s", ["reject_once"])).toEqual(cancelled);
+  expect(ask("other", ["allow_once"])).toEqual(cancelled);
 });

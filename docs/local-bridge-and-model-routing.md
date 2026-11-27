@@ -183,13 +183,13 @@ export interface ModelCatalogItem {
 
 ### 3.2 本机 Bridge 配置文件与 CLI 配置自动发现
 
-受信任节点可在本机 bridge 配置中分别启用 `codex_full_access` 和 `claude_full_access`。两项默认关闭，只有 JSON 布尔值 `true` 才生效。授权覆盖该节点承接的所有已绑定项目。每个新回合和续聊都按当前回合的权限重新判定。
+面板发起的本机可写联网回合默认使用全权限，覆盖 Codex、Claude 和 AGY。节点可分别设置 `codex_full_access`、`claude_full_access`、`agy_full_access` 为 `false` 以关闭。AGY 在全权限回合自动批准当前会话的工具请求。授权覆盖该节点承接的所有已绑定项目。每个新回合和续聊都按当前回合的权限重新判定。
 
-| 本机回合 | Codex | Claude |
-| --- | --- | --- |
-| 可写、允许联网，且对应 CLI 已启用全权限 | `exec` 和 `exec resume` 均使用 `--dangerously-bypass-approvals-and-sandbox` | `bypassPermissions`，可调用本机配置的 MCP 和内置工具 |
-| 可写，关闭联网或未启用对应开关 | `workspace-write` 沙箱，按本回合设置限制命令联网 | 可写工具白名单 |
-| 只读对话、工单讨论、PR 审计 | `read-only` 沙箱 | 只读工具白名单 |
+| 本机回合 | Codex | Claude | AGY |
+| --- | --- | --- | --- |
+| 可写、允许联网，且未关闭对应全权限开关 | `exec` 和 `exec resume` 均使用 `--dangerously-bypass-approvals-and-sandbox` | `bypassPermissions`，可调用本机配置的 MCP 和内置工具 | `--dangerously-skip-permissions`，ACP 路径自动批准当前会话的工具确认 |
+| 可写，关闭联网或关闭对应开关 | `workspace-write` 沙箱，按本回合设置限制命令联网 | 可写工具白名单 | 受限模式（ACP 下为 `--sandbox` + `accept-edits`，不自动批准工具确认） |
+| 只读对话、工单讨论、PR 审计 | `read-only` 沙箱 | 只读工具白名单 | `--sandbox`（ACP 下为 `default` 模式） |
 
 全权限回合可访问运行 bridge 的系统账户有权使用的文件和服务，范围可超出项目工作目录。`allowed_roots` 约束项目目录绑定。数据源凭据下发仍由项目绑定的 `allow_datasource_secrets` 单独控制。关闭对应开关后，节点加载新配置，后续回合恢复受限模式，含已有线程的续聊。云端执行沿用云端权限配置。
 
@@ -202,8 +202,9 @@ export interface ModelCatalogItem {
   "agent_name": "MacBook Pro (主力)",
   "max_concurrency": 2,
   "accept_cli_runs": true,
-  "codex_full_access": false,
-  "claude_full_access": false,
+  "codex_full_access": true,
+  "claude_full_access": true,
+  "agy_full_access": true,
   "auto_detect_cli_configs": true,
   "allowed_roots": ["/Users/you/work"],
   "runtimes": {

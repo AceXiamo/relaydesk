@@ -293,7 +293,7 @@ export function buildCliInvocation(params: {
       return {
         args: ["acp", "--process-per-session", ...(fullAccess ? ["--dangerously-skip-permissions"] : ["--sandbox"]), ...addDirArgs],
         env, secrets,
-        acp: { url: params.mcp.url, token: params.mcp.agyToken, model: agyModel,
+        acp: { fullAccess, url: params.mcp.url, token: params.mcp.agyToken, model: agyModel,
           effort: hasExplicitEffort && !isEffortUnsupportedModel ? agyEffort[effort] : "",
           mode: fullAccess ? undefined : sandboxMode === "workspace-write" ? "accept-edits" : "default" },
       };

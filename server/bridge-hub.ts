@@ -14,6 +14,7 @@ import type { Store } from "./store.ts";
 import { type buildWorkspaceManifest, readBridgeWorkspaceFile, writeBridgeWorkspaceFile } from "./workspace.ts";
 
 export interface BridgeChatStart {
+  run_id?: string;
   session_id: string;
   project_id: string;
   runtime: ChatRuntime;
@@ -700,8 +701,8 @@ export class BridgeHub {
     }
     if (this.isChatSessionRunning(effectivePayload.session_id)) throw new ApiError(409, "会话正在运行");
     const conn = this.live(agentId)!;
-    const id = randomUUID();
-    const { datasource_env, pg_read_only_enforced, ...start } = effectivePayload;
+    const id = effectivePayload.run_id || randomUUID();
+    const { run_id: _runId, datasource_env, pg_read_only_enforced, ...start } = effectivePayload;
     const grant = !isPublicFeedback && binding.allow_datasource_secrets ? { datasource_env, pg_read_only_enforced } : {};
     const allowedReadPaths = isPublicFeedback
       ? new Set((effectivePayload.workspace_manifest?.files ?? []).map((f) => `files/${f.path}`))

@@ -5,6 +5,7 @@ export interface AgyAcpOptions {
   token: string;
   model: string;
   effort: string;
+  fullAccess?: boolean;
   mode?: "default" | "accept-edits";
 }
 
@@ -70,9 +71,15 @@ export function agyAcpTurn(
     const msg = JSON.parse(line);
     if (msg.method) {
       if (msg.id != null) {
-        if (msg.method === "session/request_permission")
-          send({ id: msg.id, result: { outcome: { outcome: "cancelled" } } });
-        else send({ id: msg.id, error: { code: -32601, message: "Unsupported client method" } });
+        if (msg.method === "session/request_permission") {
+          const choices = options.fullAccess && sessionId && msg.params?.sessionId === sessionId &&
+            Array.isArray(msg.params.options) ? msg.params.options : [];
+          const allow = (kind: string) => choices.find((o: { kind?: string; optionId?: string } | null) =>
+            o?.kind === kind && typeof o.optionId === "string" && o.optionId.length > 0);
+          const selected = allow("allow_once") ?? allow("allow_always");
+          const outcome = selected ? { outcome: "selected", optionId: selected.optionId } : { outcome: "cancelled" };
+          send({ id: msg.id, result: { outcome } });
+        } else send({ id: msg.id, error: { code: -32601, message: "Unsupported client method" } });
         return;
       }
       if (msg.method !== "session/update" || msg.params?.sessionId !== sessionId) return;

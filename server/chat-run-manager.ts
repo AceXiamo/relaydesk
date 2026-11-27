@@ -699,6 +699,7 @@ export class ChatRunManager {
         result = await this.bridgeHub!.runChatTurn(
           localAgentId,
           {
+            run_id: run.id,
             session_id: sessionId,
             project_id: projectInfo.id,
             runtime: session.runtime,
@@ -1013,7 +1014,11 @@ export class ChatRunManager {
           ? rawEffort
           : "default";
       const requestedSandbox: ChatSandboxMode =
-        params.sandbox_mode === "workspace-write" ? "workspace-write" : "read-only";
+        params.sandbox_mode === "read-only"
+          ? "read-only"
+          : params.sandbox_mode === "workspace-write"
+            ? "workspace-write"
+            : parentSession.sandbox_mode;
       // Child sandbox can never exceed parent sandbox privilege.
       const sandboxMode: ChatSandboxMode =
         parentSession.sandbox_mode === "read-only" ? "read-only" : requestedSandbox;

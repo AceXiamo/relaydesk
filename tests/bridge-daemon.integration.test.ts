@@ -371,7 +371,7 @@ describe("real bridge daemon + HTTP chat", () => {
       expect(await (await s.turn("Inspect local tools")).text()).toContain("event: done");
       return facts(repo).args as string[];
     };
-    expect(await run()).toContain("dontAsk");
+    expect(await run()).toContain("bypassPermissions");
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     config.models.push({ id: "full-access-fixture", runtime: "claude" });
     writeFileSync(configPath, JSON.stringify({ ...config, claude_full_access: true }));
@@ -395,7 +395,7 @@ describe("real bridge daemon + HTTP chat", () => {
     expect(readOnly[readOnly.indexOf("--tools") + 1]).toBe("Read,Grep,Glob");
   });
 
-  it("requires a local Codex opt-in on each fresh or resumed writable network turn", async () => {
+  it("defaults local Codex to full access and honors restrictions on fresh and resumed turns", async () => {
     const { id, p, repo, configPath, agent } = await start();
     const session = await f.session(p, id, "workspace-write");
     await f.ok(session.path, "PATCH", { network_access: true });
@@ -405,8 +405,7 @@ describe("real bridge daemon + HTTP chat", () => {
     };
     const bypass = "--dangerously-bypass-approvals-and-sandbox";
     const defaults = await turn();
-    expect(defaults[defaults.indexOf("--sandbox") + 1]).toBe("workspace-write");
-    expect(defaults).not.toContain(bypass);
+    expect(defaults).toContain(bypass);
 
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     writeFileSync(configPath, JSON.stringify({ ...config, codex_full_access: true, accept_cli_runs: true }));
@@ -692,7 +691,7 @@ describe("real bridge daemon + HTTP chat", () => {
     await f.ok(`${w}/handbook`, "POST", { content: "v1 handbook" });
 
     const s1 = await f.session(p, id);
-    await f.ok(s1.path, "PATCH", { runtime: "agy" });
+    await f.ok(s1.path, "PATCH", { runtime: "agy", sandbox_mode: "workspace-write", network_access: true });
     expect(await (await s1.turn("First agy turn")).text()).toContain("event: done");
     const firstFacts = facts(repo);
     expect(firstFacts.space.startsWith(realpathSync(join(cacheDir, "_sessions")) + "/")).toBe(true);
@@ -706,6 +705,8 @@ describe("real bridge daemon + HTTP chat", () => {
     expect(secondFacts.method).toBe("session/resume");
     expect(secondFacts.resumeId).toBe("local-agy-thread");
     expect(secondFacts.tokenHash).not.toBe(firstFacts.tokenHash);
+    expect(firstFacts.args).toContain("--dangerously-skip-permissions");
+    expect(secondFacts.args).toContain("--dangerously-skip-permissions");
     expect(secondFacts.args).toContain("--process-per-session");
     expect(secondFacts.space).toBe(firstFacts.space);
     expect(secondFacts.handbook).toBe("v2 handbook");

@@ -1101,7 +1101,7 @@ function buildToolDefinitions(hasTasks: boolean, hasDelegate: boolean) {
               sandbox_mode: {
                 type: "string",
                 enum: ["read-only", "workspace-write"],
-                description: "Sandbox mode for the subagent (defaults to 'read-only'; cannot exceed parent session sandbox)",
+                description: "Sandbox mode for the subagent (inherits parent session sandbox by default; pass 'read-only' to narrow; cannot exceed parent session sandbox)",
               },
               mode: {
                 type: "string",

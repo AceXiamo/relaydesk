@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChatRunManager } from "../server/chat-run-manager.ts";
 import { startRelaydeskMcpServer } from "../server/relaydesk-mcp.ts";
 import { Store } from "../server/store.ts";
 
@@ -130,5 +131,119 @@ describe("cross-harness app-owned subagents", () => {
       await rootMcp.close();
       await workerMcp.close();
     }
+  });
+
+  it("inherits parent sandbox_mode and network_access by default and narrows only when read-only is requested", async () => {
+    const dir = makeTempDir("rd-delegate-perms-");
+    const store = new Store(join(dir, "relaydesk.sqlite3"));
+    const project = store.createProject({ name: "Demo", repo: "org/demo" });
+    const manager = new ChatRunManager(store, null);
+
+    const startTurnSpy = vi.spyOn(manager, "startTurn").mockImplementation(({ sessionId }) => {
+      const now = new Date().toISOString();
+      return {
+        runId: `run-${sessionId}`,
+        userMessage: {
+          id: "msg-1",
+          session_id: sessionId,
+          role: "user",
+          content: "mock",
+          events: [],
+          attachments: [],
+          status: "done",
+          created_at: now,
+        },
+        assistantMessage: {
+          id: "msg-2",
+          session_id: sessionId,
+          role: "assistant",
+          content: "",
+          events: [],
+          attachments: [],
+          status: "streaming",
+          created_at: now,
+        },
+        session: store.getChatSession(project.id, sessionId),
+        alreadyRunning: false,
+        completion: Promise.resolve(),
+        subscribe: () => () => {},
+        unsubscribe: () => {},
+      };
+    });
+
+    const runsMap = (manager as unknown as { runs: Map<string, Record<string, unknown>> }).runs;
+    const registerParentRun = (sessionId: string, runId: string) => {
+      runsMap.set(sessionId, {
+        id: runId,
+        projectId: project.id,
+        sessionId,
+        session: store.getChatSession(project.id, sessionId),
+        projectInfo: {
+          id: project.id,
+          name: project.name,
+          repo: project.repo,
+          delivery_mode: "direct_push",
+          target_branch: "main",
+          branch_prefix: "relaydesk",
+        },
+        text: "",
+        events: new Map(),
+        statusMessage: "",
+        subscribers: new Set(),
+        done: false,
+        cancel: () => {},
+      });
+    };
+
+    const writableParent = store.createChatSession(project.id, {
+      title: "Writable Parent",
+      runtime: "agy",
+      sandbox_mode: "workspace-write",
+      network_access: true,
+    });
+    registerParentRun(writableParent.id, "parent-run-w");
+
+    const inherited = (await manager.handleDelegateRpc({
+      projectId: project.id,
+      sessionId: writableParent.id,
+      runId: "parent-run-w",
+      action: "delegate_task",
+      params: { runtime: "codex", prompt: "Edit a file", mode: "async" },
+    })) as { session_id: string };
+    const inheritedChild = store.getChatSession(project.id, inherited.session_id);
+    expect(inheritedChild.sandbox_mode).toBe("workspace-write");
+    expect(inheritedChild.network_access).toBe(true);
+
+    const narrowed = (await manager.handleDelegateRpc({
+      projectId: project.id,
+      sessionId: writableParent.id,
+      runId: "parent-run-w",
+      action: "delegate_task",
+      params: { runtime: "codex", prompt: "Read only check", sandbox_mode: "read-only", mode: "async" },
+    })) as { session_id: string };
+    const narrowedChild = store.getChatSession(project.id, narrowed.session_id);
+    expect(narrowedChild.sandbox_mode).toBe("read-only");
+    expect(narrowedChild.network_access).toBe(true);
+
+    const readOnlyParent = store.createChatSession(project.id, {
+      title: "ReadOnly Parent",
+      runtime: "agy",
+      sandbox_mode: "read-only",
+      network_access: false,
+    });
+    registerParentRun(readOnlyParent.id, "parent-run-ro");
+
+    const capped = (await manager.handleDelegateRpc({
+      projectId: project.id,
+      sessionId: readOnlyParent.id,
+      runId: "parent-run-ro",
+      action: "delegate_task",
+      params: { runtime: "codex", prompt: "Try write", sandbox_mode: "workspace-write", mode: "async" },
+    })) as { session_id: string };
+    const cappedChild = store.getChatSession(project.id, capped.session_id);
+    expect(cappedChild.sandbox_mode).toBe("read-only");
+    expect(cappedChild.network_access).toBe(false);
+
+    expect(startTurnSpy).toHaveBeenCalledTimes(3);
   });
 });
