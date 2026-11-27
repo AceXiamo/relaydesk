@@ -8,6 +8,7 @@ import {
   DeployStatusBadge,
   EmptyState,
   LivePulseDot,
+  Modal,
   PriorityBadge,
   ReleaseStatusBadge,
   ReleaseTriggerBadge,
@@ -62,6 +63,8 @@ export function ReleasesView({
   const [deployDocExists, setDeployDocExists] = useState<boolean>(false);
   const [triggering, setTriggering] = useState(false);
   const [reverifyingId, setReverifyingId] = useState<string | null>(null);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [approveTarget, setApproveTarget] = useState<ReleaseRecord | null>(null);
   const [showAdvancedTrigger, setShowAdvancedTrigger] = useState(false);
   const [triggerPrompt, setTriggerPrompt] = useState("");
   const [forceEmpty, setForceEmpty] = useState(false);
@@ -103,6 +106,7 @@ export function ReleasesView({
 
   useEffect(() => {
     setPolicy(project?.deploy_policy ?? null);
+    setApproveTarget(null);
     void load(false);
   }, [project?.id, project?.deploy_policy, load]);
 
@@ -185,6 +189,25 @@ export function ReleasesView({
       );
     } finally {
       setReverifyingId(null);
+    }
+  };
+
+  const handleApprove = async (rel: ReleaseRecord) => {
+    setApprovingId(rel.id);
+    try {
+      const res = await api.approveProjectRelease(project.id, rel.id);
+      toast.success(`已手动验收通过 ${releaseCode(res.release.number)}`);
+      setApproveTarget(null);
+      onMutated?.();
+      await load(true);
+    } catch (err) {
+      toast.error(
+        err instanceof ClientApiError
+          ? err.message
+          : "手动验收失败，请刷新后重试",
+      );
+    } finally {
+      setApprovingId(null);
     }
   };
 
@@ -368,23 +391,35 @@ export function ReleasesView({
                   包含 {activeRelease.task_snapshot.length} 个任务 · 开始于{" "}
                   {formatRelativeTime(activeRelease.created_at)}
                   {activeRelease.status === "verifying"
-                    ? "，关联任务已保留归属；点击「重新验收」将沿用原发布单仅执行健康与版本核验，不会重复部署。"
+                    ? "，关联任务已保留归属；可点击「重新验收」自动核验，或在人工确认线上正常后执行「手动验收」。"
                     : "，期间已自动锁定本项目其他自动派发。"}
                 </p>
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2 shrink-0">
               {activeRelease.status === "verifying" && (
-                <Button
-                  variant="primary"
-                  size="sm"
-                  loading={reverifyingId === activeRelease.id}
-                  disabled={Boolean(reverifyingId)}
-                  onClick={() => void handleReverify(activeRelease)}
-                  icon="shield-check"
-                >
-                  重新验收
-                </Button>
+                <>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    loading={reverifyingId === activeRelease.id}
+                    disabled={Boolean(reverifyingId) || Boolean(approvingId)}
+                    onClick={() => void handleReverify(activeRelease)}
+                    icon="shield-check"
+                  >
+                    重新验收
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    loading={approvingId === activeRelease.id}
+                    disabled={Boolean(reverifyingId) || Boolean(approvingId)}
+                    onClick={() => setApproveTarget(activeRelease)}
+                    icon="check-circle-2"
+                  >
+                    手动验收
+                  </Button>
+                </>
               )}
               {activeRelease.session_id && (
                 <Button
@@ -686,12 +721,30 @@ export function ReleasesView({
                             size="xs"
                             loading={reverifyingId === rel.id}
                             disabled={
-                              Boolean(reverifyingId) || activeRelease?.status === "running"
+                              Boolean(reverifyingId) ||
+                              Boolean(approvingId) ||
+                              activeRelease?.status === "running"
                             }
                             onClick={() => void handleReverify(rel)}
                             icon="shield-check"
                           >
                             重新验收
+                          </Button>
+                        )}
+                        {rel.status === "verifying" && (
+                          <Button
+                            variant="secondary"
+                            size="xs"
+                            loading={approvingId === rel.id}
+                            disabled={
+                              Boolean(reverifyingId) ||
+                              Boolean(approvingId) ||
+                              activeRelease?.status === "running"
+                            }
+                            onClick={() => setApproveTarget(rel)}
+                            icon="check-circle-2"
+                          >
+                            手动验收
                           </Button>
                         )}
                         {rel.summary && (
@@ -751,6 +804,70 @@ export function ReleasesView({
           )}
         </section>
       </div>
+
+      {/* Manual approval confirmation modal */}
+      <Modal
+        open={approveTarget !== null}
+        onClose={() => {
+          if (!approvingId) setApproveTarget(null);
+        }}
+        title={
+          approveTarget
+            ? `确认手动验收 ${releaseCode(approveTarget.number)}？`
+            : "确认手动验收？"
+        }
+        subtitle="请确认线上服务已实际更新并运行正常。"
+        maxWidth="sm"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={Boolean(approvingId)}
+              onClick={() => setApproveTarget(null)}
+            >
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              icon="check-circle-2"
+              loading={Boolean(approveTarget && approvingId === approveTarget.id)}
+              disabled={Boolean(approvingId)}
+              onClick={() => {
+                if (approveTarget) void handleApprove(approveTarget);
+              }}
+            >
+              确认验收通过
+            </Button>
+          </>
+        }
+      >
+        {approveTarget && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--rd-subtle)]/60 px-3 py-2.5 flex flex-wrap items-center gap-2 text-xs">
+              <span className="font-mono font-semibold text-[var(--text-primary)]">
+                {releaseCode(approveTarget.number)}
+              </span>
+              <ReleaseStatusBadge status={approveTarget.status} compact />
+              {(approveTarget.deploy_ref || approveTarget.target_sha) && (
+                <span className="inline-flex items-center gap-1 font-mono text-[11px] px-1.5 py-0.5 rounded bg-[var(--surface-hover)] text-[var(--text-secondary)]">
+                  <Icon name="git-commit-horizontal" size={11} />
+                  {approveTarget.deploy_ref || approveTarget.target_sha.slice(0, 12)}
+                </span>
+              )}
+              <span className="text-[var(--text-muted)]">
+                · 包含 {approveTarget.task_snapshot.length} 个任务
+              </span>
+            </div>
+            <p className="text-[13px] leading-relaxed text-[var(--text-secondary)]">
+              {approveTarget.task_snapshot.length > 0
+                ? `确认后将直接把本次发布标记为「发布成功」，并将关联的 ${approveTarget.task_snapshot.length} 个任务标记为已部署，同时解除待验收状态。此操作不可撤销。`
+                : "确认后将直接把本次发布标记为「发布成功」，并解除待验收状态。此操作不可撤销。"}
+            </p>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

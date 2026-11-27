@@ -3904,11 +3904,14 @@ export class Store {
       deploy_ref?: string;
       target_sha?: string;
       deployed_task_ids?: string[];
-      author?: "agent" | "system";
+      author?: "agent" | "system" | "human";
     },
   ): { release: ReleaseRecord; updatedTaskIds: string[] } {
     return this.transaction(true, () => {
       const row = this.findProjectRelease(projectId, releaseRef);
+      if (payload.author === "human" && (row.status !== "verifying" || payload.status !== "succeeded")) {
+        throw new ApiError(409, "仅待验收的发布可手动确认通过");
+      }
       if (row.status === "succeeded") {
         throw new ApiError(409, `Release REL-${row.number} is already finished (${row.status})`);
       }

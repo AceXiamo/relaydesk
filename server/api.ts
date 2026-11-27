@@ -689,6 +689,16 @@ export class ApiRouter {
           );
           return;
         }
+        if (parts.length === 5 && parts[4] === "approve" && method === "POST") {
+          const current = this.store.getRelease(projectId, parts[3]);
+          const { release } = this.store.finishRelease(projectId, current.id, {
+            status: "succeeded",
+            author: "human",
+            summary: ["操作者已手动确认验证通过。", current.summary].filter(Boolean).join("\n\n"),
+          });
+          this.sendJson(req, res, 200, { release }, meta);
+          return;
+        }
         if (parts.length === 5 && parts[4] === "reverify" && method === "POST") {
           const hasBody =
             Number(req.headers["content-length"]) > 0 ||

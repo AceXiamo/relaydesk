@@ -978,6 +978,22 @@ describe("RD-9 self-restart verification recovery, MCP tools & reverify", () => 
     expect(dupReverify.status).toBe(409);
   });
 
+  it("accepts operator approval only while verifying and syncs the linked task once", async () => {
+    const projectId = await f.project("Manual approval");
+    await f.ok(`/projects/${projectId}/deploy-policy`, "PUT", { mode: "manual" });
+    const { task } = await f.ok(`/projects/${projectId}/tasks`, "POST", { title: "Approval", body: "b" });
+    f.srv.store.chatAgentTaskOp(projectId, "transition_task", { task: task.id, status: "done", delivery_ref: "main@123abcd" });
+    const { release } = f.srv.store.createRelease(projectId, { trigger: "immediate", taskIds: [task.id] });
+    const path = `/projects/${projectId}/releases/${release.id}/approve`;
+    expect((await f.api(path, "POST", {})).status).toBe(409);
+    f.srv.store.finishRelease(projectId, release.id, { status: "verifying", summary: "Health checked", deploy_ref: "main@123abcd" });
+    const result = await f.ok(path, "POST", {});
+    expect(result.release).toMatchObject({ status: "succeeded", deploy_ref: "main@123abcd", summary: expect.stringContaining("手动确认验证通过") });
+    expect(result.release.summary).toContain("Health checked");
+    expect(f.srv.store.getTaskView(task.id).deploy_status).toBe("deployed");
+    expect((await f.api(path, "POST", {})).status).toBe(409);
+  });
+
   it("allows console reverify on an existing failed release (REL-2 style) to correct false failure while preserving original reason", async () => {
     const projectId = await f.project("RelayDesk REL-2");
     const { token } = await f.register("mac-reverify");

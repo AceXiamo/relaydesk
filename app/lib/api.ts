@@ -541,6 +541,12 @@ export const api = {
       "POST",
       payload ?? {},
     ),
+  approveProjectRelease: (projectId: string, releaseId: string) =>
+    request<{ release: ReleaseRecord }>(
+      `/api/projects/${encodeURIComponent(projectId)}/releases/${encodeURIComponent(releaseId)}/approve`,
+      "POST",
+      {},
+    ),
 
   /* ── Feedback Agent & Portal Links & AI Deploy Gate ─────────────────── */
 
