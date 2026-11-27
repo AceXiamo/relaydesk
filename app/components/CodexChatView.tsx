@@ -30,13 +30,11 @@ import type {
 } from "~/lib/types.ts";
 import {
   ChatFailureNotice,
-  FollowUpList,
   PromptBar,
   SubagentDetailPanel,
   SubagentDock,
   ThinkingTrace,
   ToolChipsGroup,
-  type QuickPromptItem,
   type RichPromptEditorHandle,
   type TraceEntry,
 } from "./agent-chat/AgentPrimitives.tsx";
@@ -66,57 +64,40 @@ interface CodexChatViewProps {
   onExpandMainSidebar?: () => void;
 }
 
-const STARTER_PROMPTS: QuickPromptItem[] = [
+interface EmptyChatScene {
+  id: string;
+  src: string;
+  alt: string;
+  caption: string;
+}
+
+const EMPTY_CHAT_SCENES: readonly EmptyChatScene[] = [
   {
-    icon: "folder-open",
-    title: "盘点项目空间上下文",
-    subtitle: "总览 files/ 目录、HANDBOOK.md 与已同步代码仓库",
-    prompt: "请先查看当前项目空间 files/ 目录、HANDBOOK.md 以及已同步的仓库，给我一份精简的项目上下文总览。",
+    id: "coffee",
+    src: "/images/chat/empty-coffee.webp",
+    alt: "手捧咖啡等待指令的桌面小机器人插画",
+    caption: "咖啡还热着，随时等你发话",
   },
   {
-    icon: "database",
-    title: "分析数据库结构与核心数据",
-    subtitle: "检查 SQLite 或外部数据源的表结构、行数与关键分布",
-    prompt: "请检查项目空间里的 SQLite 数据库或已配置数据源，列出每张表的结构、行数和核心数据分布。",
+    id: "fishing",
+    src: "/images/chat/empty-fishing.webp",
+    alt: "在玻璃代码卡片边垂钓 Bug 的桌面小机器人插画",
+    caption: "甩竿摸鱼中，丢个线索就帮你捞 Bug",
   },
   {
-    icon: "code-2",
-    title: "结合代码仓库定位核心模块",
-    subtitle: "浏览 repos/ 目录，识别入口架构与潜在风险点",
-    prompt: "请浏览 repos/ 下已同步的绑定仓库结构，指出核心入口模块以及常见风险点。",
-  },
-  {
-    icon: "book-open",
-    title: "起草或优化项目手册",
-    subtitle: "整理目录结构、验证命令与日常排查约定（HANDBOOK.md）",
-    prompt: "请结合现有项目文件和代码仓库，帮我整理一份结构清晰的 HANDBOOK.md 草案（包含目录结构、验证命令与排查约定）。",
+    id: "paperplane",
+    src: "/images/chat/empty-paperplane.webp",
+    alt: "发射蓝图纸飞机的桌面小机器人插画",
+    caption: "纸飞机已上膛，抛个想法直接起飞",
   },
 ];
 
-function buildContextualFollowUps(msg: ChatMessageRecord): QuickPromptItem[] {
-  const hasTools = msg.events.length > 0;
-  const hasCode = msg.content.includes("```");
-  const list: QuickPromptItem[] = [];
-  if (hasTools) {
-    list.push({
-      icon: "file-text",
-      title: "展开关键证据与文件位置",
-      prompt: "请把刚才分析中涉及的关键文件路径、行号或数据查询结果整理成简明对照表。",
-    });
+function initialEmptySceneIndex(seed: string): number {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
   }
-  if (hasCode) {
-    list.push({
-      icon: "shield-check",
-      title: "补充边界情况与验证步骤",
-      prompt: "请检查上述方案有哪些边界情况或风险，并给出可直接执行的验证命令。",
-    });
-  }
-  list.push({
-    icon: "layers",
-    title: "整理为可执行的下一步清单",
-    prompt: "请把上面的结论浓缩成一份按优先级排序的行动清单（含改动范围和验收标准）。",
-  });
-  return list.slice(0, 2);
+  return hash % EMPTY_CHAT_SCENES.length;
 }
 
 type TimeGroupKey = "今天" | "昨天" | "最近 7 天" | "更早";
@@ -216,6 +197,8 @@ export function CodexChatView({
   const pendingSandboxModeRef = useRef<ChatSandboxMode | null>(null);
   const [grantingDbSecrets, setGrantingDbSecrets] = useState(false);
   const justCreatedId = useRef<string | null>(null);
+  const [emptySceneIndex, setEmptySceneIndex] = useState(() => initialEmptySceneIndex(projectId ?? ""));
+  const emptyScene = EMPTY_CHAT_SCENES[emptySceneIndex % EMPTY_CHAT_SCENES.length];
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     bottomRef.current?.scrollIntoView({ behavior, block: "end" });
@@ -337,6 +320,7 @@ export function CodexChatView({
   useEffect(() => {
     if (!projectId) return;
     prevProjectIdRef.current = projectId;
+    setEmptySceneIndex(initialEmptySceneIndex(projectId));
     void loadContextCatalog();
     void loadSessions();
     return () => { prevProjectIdRef.current = null; };
@@ -553,6 +537,7 @@ export function CodexChatView({
     setActiveSession(null);
     setMessages([]);
     setEditingTitle(false);
+    setEmptySceneIndex((prev) => (prev + 1) % EMPTY_CHAT_SCENES.length);
     composerRef.current?.focus();
   };
 
@@ -1297,7 +1282,13 @@ export function CodexChatView({
           onScroll={handleThreadScroll}
           className="flex-1 overflow-y-auto rd-scroll px-3 sm:px-4 pt-4 sm:pt-6 pb-6 sm:pb-8"
         >
-          <div className="max-w-[740px] mx-auto">
+          <div
+            className={`max-w-[740px] mx-auto ${
+              !messagesLoading && messages.length === 0
+                ? "min-h-full flex flex-col justify-center"
+                : ""
+            }`}
+          >
             {messagesLoading ? (
               <div className="py-20 flex items-center justify-center">
                 <div className="inline-flex items-center gap-2.5 text-[13px] text-[var(--text-muted)]">
@@ -1306,13 +1297,47 @@ export function CodexChatView({
                 </div>
               </div>
             ) : messages.length === 0 ? (
-              <div className="pt-8 pb-4 space-y-7">
-                {/* Hero Header */}
-                <div className="space-y-2.5">
-                  <div
-                    style={{ ["--stagger-delay" as string]: "0ms" }}
-                    className="rd-stagger-in inline-flex items-center gap-2 px-2.5 py-1 rounded-full rd-plate text-[11.5px] text-[var(--text-secondary)]"
+              <div className="py-6 sm:py-10 flex flex-col items-center text-center space-y-5">
+                {/* Playful Transparent Illustration Stage */}
+                <div
+                  style={{ ["--stagger-delay" as string]: "0ms" }}
+                  className="rd-stagger-in flex flex-col items-center gap-2"
+                >
+                  <button
+                    type="button"
+                    data-empty-chat-illustration={emptyScene.id}
+                    aria-label="切换空白页插画"
+                    title="点一下换个摸鱼姿势"
+                    onClick={() =>
+                      setEmptySceneIndex((prev) => (prev + 1) % EMPTY_CHAT_SCENES.length)
+                    }
+                    className="group relative inline-flex items-center justify-center rounded-3xl p-2 focus:outline-none rd-focus-ring cursor-pointer"
                   >
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-4 rounded-full bg-[radial-gradient(circle,rgba(255,90,44,0.12)_0%,transparent_70%)] dark:bg-[radial-gradient(circle,rgba(99,102,241,0.18)_0%,rgba(255,90,44,0.08)_45%,transparent_72%)] blur-xl"
+                    />
+                    <img
+                      key={emptyScene.id}
+                      src={emptyScene.src}
+                      alt={emptyScene.alt}
+                      width={192}
+                      height={192}
+                      draggable={false}
+                      className="relative h-36 w-36 sm:h-44 sm:w-44 object-contain select-none animate-rd-content-swap transition-transform duration-200 ease-[var(--ease-out)] group-hover:scale-[1.03] group-active:scale-[0.97]"
+                    />
+                  </button>
+                  <p className="text-[12px] text-[var(--text-muted)] tracking-tight">
+                    {emptyScene.caption}
+                  </p>
+                </div>
+
+                {/* Centered Project Identity */}
+                <div
+                  style={{ ["--stagger-delay" as string]: "50ms" }}
+                  className="rd-stagger-in flex flex-col items-center space-y-2.5 max-w-lg"
+                >
+                  <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full rd-plate text-[11.5px] text-[var(--text-secondary)]">
                     <LivePulseDot
                       tone={currentAuthMode === "unavailable" ? "zinc" : "emerald"}
                       active={currentAuthMode !== "unavailable"}
@@ -1326,25 +1351,21 @@ export function CodexChatView({
                       </span>
                     )}
                   </div>
-                  <h2
-                    style={{ ["--stagger-delay" as string]: "40ms" }}
-                    className="rd-stagger-in text-[22px] font-semibold tracking-tight text-[var(--text-primary)]"
-                  >
+                  <h2 className="text-[20px] sm:text-[22px] font-semibold tracking-tight text-[var(--text-primary)]">
                     {project.name}
                   </h2>
-                  <p
-                    style={{ ["--stagger-delay" as string]: "80ms" }}
-                    className="rd-stagger-in text-[13.5px] text-[var(--text-muted)] max-w-xl leading-relaxed"
-                  >
-                    工作区已挂载项目文件、数据库、手册与已同步代码仓库。输入{" "}
-                    <kbd className="rd-kbd">@</kbd> 引用具体资源，或输入{" "}
+                  <p className="text-[13px] sm:text-[13.5px] text-[var(--text-muted)] leading-relaxed">
+                    输入 <kbd className="rd-kbd">@</kbd> 引用项目文件、数据库或工单，或输入{" "}
                     <kbd className="rd-kbd">/</kbd> 调用快捷指令。
                   </p>
                 </div>
 
-                {/* Compact Context Bar */}
+                {/* Compact Context Pills */}
                 {workspaceSummary && (
-                  <div className="flex flex-wrap items-center gap-2 text-[12px]">
+                  <div
+                    style={{ ["--stagger-delay" as string]: "90ms" }}
+                    className="rd-stagger-in flex flex-wrap items-center justify-center gap-1.5 sm:gap-2 text-[12px]"
+                  >
                     <button
                       type="button"
                       onClick={onOpenWorkspace}
@@ -1381,7 +1402,7 @@ export function CodexChatView({
                 )}
 
                 {runtimeInfo && currentAuthMode === "unavailable" && !targetUnavailableReason && (
-                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/8 px-3.5 py-3 text-[12.5px] text-amber-700 dark:text-amber-300 flex items-center justify-between gap-3">
+                  <div className="max-w-lg w-full text-left rounded-xl border border-amber-500/30 bg-amber-500/8 px-3.5 py-3 text-[12.5px] text-amber-700 dark:text-amber-300 flex items-center justify-between gap-3">
                     <span>
                       当前服务器未检测到本机 <code className="font-mono">{currentRuntime}</code> 可执行文件，请在下方切换引擎或检查 CLI 设置。
                     </span>
@@ -1390,20 +1411,11 @@ export function CodexChatView({
                     </Button>
                   </div>
                 )}
-
-                {/* Sleek List-Style Starter Prompts (Beautiful UI style) */}
-                <FollowUpList
-                  heading="快速开始"
-                  items={STARTER_PROMPTS}
-                  disabled={streaming || settingsBusy || currentAuthMode === "unavailable"}
-                  onSelect={(p) => void handleSend(p)}
-                />
               </div>
             ) : (
               <div className="space-y-7">
                 {messages.map((msg, idx) => {
                   const isUser = msg.role === "user";
-                  const isLastMessage = idx === messages.length - 1;
                   const isStreamingMsg = msg.status === "streaming";
                   const trace = turn?.assistant.id === msg.id ? turn.trace : turnTraces[msg.id] ?? turn?.previous.find(t => t.assistant.id === msg.id)?.trace;
                   const prevUserMsg =
@@ -1512,15 +1524,6 @@ export function CodexChatView({
                   const messageRuntime = msg.runtime ?? (isStreamingMsg ? currentRuntime : undefined);
 
                   // Editorial Borderless Assistant Turn
-                  const followUps =
-                    isLastMessage &&
-                    !streaming &&
-                    msg.status === "done" &&
-                    visibleContent &&
-                    !input.trim()
-                      ? buildContextualFollowUps(msg)
-                      : [];
-
                   return (
                     <article
                       key={msg.id}
@@ -1639,17 +1642,6 @@ export function CodexChatView({
                             <span>转为工单</span>
                           </button>}
                         </div>
-                      )}
-
-                      {/* Contextual Follow-up Suggestions */}
-                      {followUps.length > 0 && (
-                        <FollowUpList
-                          heading="继续追问"
-                          items={followUps}
-                          compact
-                          disabled={streaming || settingsBusy || currentAuthMode === "unavailable"}
-                          onSelect={(p) => void handleSend(p)}
-                        />
                       )}
                     </article>
                   );
