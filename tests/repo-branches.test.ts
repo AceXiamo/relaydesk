@@ -12,7 +12,11 @@ import {
   fetchGithubRepoBranchOverviewAcrossConnections,
   upsertGithubConnection,
 } from "../server/github.ts";
-import { matchTasksForBranch, mergeRepoBranches } from "../server/repo-branches.ts";
+import {
+  annotateGitGraphWithOverview,
+  matchTasksForBranch,
+  mergeRepoBranches,
+} from "../server/repo-branches.ts";
 import {
   getProjectReposDir,
   getProjectReposStatus,
@@ -269,6 +273,8 @@ describe("repo branches panel backend", () => {
       local_only: 1,
       with_pr: 1,
       with_task: 1,
+      merged: 0,
+      unmerged: 0,
     });
     expect(merged.branches.map((b) => b.name)).toEqual([
       "main",
@@ -311,6 +317,97 @@ describe("repo branches panel backend", () => {
     expect(apiMerged.branches.map((b) => b.name)).toEqual(["main"]);
     expect(apiMerged.branches[0].is_local_current).toBe(false);
     expect(apiMerged.local_workdir?.remote_repo).toBe("acme/web");
+
+    // Merge status & graph ref annotation
+    const compared = mergeRepoBranches({
+      repo: "acme/web",
+      project: {
+        repo: "acme/web",
+        repos: ["acme/web"],
+        delivery_mode: "pr_automerge",
+        target_branch: "main",
+        branch_prefix: "relaydesk",
+      },
+      githubConfigured: true,
+      remoteOverview: {
+        repo: "acme/web",
+        html_url: "https://github.com/acme/web",
+        private: false,
+        default_branch: "main",
+        branches: [
+          { name: "main", protected: true, sha: "1111111" },
+          { name: "feat/done", protected: false, sha: "2222222" },
+          { name: "feat/open", protected: false, sha: "3333333" },
+          { name: "feat/div", protected: false, sha: "4444444" },
+        ],
+        pulls_by_branch: {
+          "feat/open": {
+            number: 55,
+            title: "Open PR",
+            html_url: "https://github.com/acme/web/pull/55",
+            draft: false,
+            base_ref: "main",
+            author: "bob",
+            updated_at: "2026-11-27T12:00:00Z",
+          },
+        },
+        prs_unavailable: false,
+      },
+      remoteCompareByBranch: {
+        "feat/done": { ahead_by: 0, behind_by: 2, status: "behind" },
+        "feat/open": { ahead_by: 3, behind_by: 0, status: "ahead" },
+        "feat/div": { ahead_by: 1, behind_by: 4, status: "diverged" },
+      },
+      mirror: null,
+      localWorkdir: null,
+      tasks: [makeTask({ id: "t55", number: 55, title: "Open PR work", delivery_ref: "feat/open" })],
+    });
+    expect(compared.counts.merged).toBe(1);
+    expect(compared.counts.unmerged).toBe(2);
+    expect(Object.fromEntries(compared.branches.map((b) => [b.name, b.merge_status]))).toEqual({
+      main: "base",
+      "feat/done": "merged",
+      "feat/open": "ahead",
+      "feat/div": "diverged",
+    });
+
+    const annotated = annotateGitGraphWithOverview(
+      {
+        repo: "acme/web",
+        source: "local",
+        base_branch: "main",
+        base_first_parent_shas: ["1111111"],
+        commits: [
+          {
+            sha: "3333333",
+            short_sha: "3333333",
+            parents: ["1111111"],
+            message: "feat: open",
+            author_name: "bob",
+            date: "2026-11-27T12:00:00Z",
+            refs: [
+              { name: "feat/open", kind: "remote" },
+              { name: "feat/open", kind: "local", is_head: true },
+            ],
+          },
+        ],
+        truncated: false,
+        fetched_at: "2026-11-27T12:00:00Z",
+      },
+      compared,
+    );
+    expect(annotated.commits[0].refs).toEqual([
+      expect.objectContaining({
+        name: "feat/open",
+        kind: "local",
+        is_head: true,
+        merge_status: "ahead",
+        ahead_of_base: 3,
+        behind_base: 0,
+        open_pr_number: 55,
+        linked_task_numbers: [55],
+      }),
+    ]);
   });
 
   it("fetches GitHub overview and branch detail across connections with 403 PR fallback and slash-branch compare encoding", async () => {
@@ -552,6 +649,80 @@ describe("repo branches panel backend", () => {
         );
         return;
       }
+      if (url === "/repos/acme/web/compare/main...feat/rd-2") {
+        res.end(
+          JSON.stringify({
+            status: "ahead",
+            ahead_by: 1,
+            behind_by: 0,
+            total_commits: 1,
+            html_url: "https://github.com/acme/web/compare/main...feat/rd-2",
+            files: [],
+          }),
+        );
+        return;
+      }
+      if (url === "/repos/acme/web/commits?sha=main&per_page=40") {
+        res.end(
+          JSON.stringify([
+            {
+              sha: "1111111aaaa",
+              html_url: "https://github.com/acme/web/commit/1111111aaaa",
+              parents: [{ sha: "0000000base" }, { sha: "3333333merged" }],
+              commit: {
+                message: "Merge pull request #8 from acme/feat/merged",
+                author: { name: "Alice", date: "2026-11-27T11:30:00Z" },
+              },
+              author: { login: "alice" },
+            },
+            {
+              sha: "0000000base",
+              html_url: "https://github.com/acme/web/commit/0000000base",
+              parents: [],
+              commit: {
+                message: "chore: init main",
+                author: { name: "Alice", date: "2026-11-27T09:00:00Z" },
+              },
+              author: { login: "alice" },
+            },
+          ]),
+        );
+        return;
+      }
+      if (url === "/repos/acme/web/commits?sha=feat%2Frd-2&per_page=12") {
+        res.end(
+          JSON.stringify([
+            {
+              sha: "2222222bbbb",
+              html_url: "https://github.com/acme/web/commit/2222222bbbb",
+              parents: [{ sha: "1111111aaaa" }],
+              commit: {
+                message: "feat: build graph fallback RD-2",
+                author: { name: "Bob", date: "2026-11-27T12:00:00Z" },
+              },
+              author: { login: "bob" },
+            },
+          ]),
+        );
+        return;
+      }
+      if (url === "/repos/acme/web/commits?sha=3333333merged&per_page=5") {
+        res.end(
+          JSON.stringify([
+            {
+              sha: "3333333merged",
+              html_url: "https://github.com/acme/web/commit/3333333merged",
+              parents: [{ sha: "0000000base" }],
+              commit: {
+                message: "feat: second parent subtree",
+                author: { name: "Alice", date: "2026-11-27T10:30:00Z" },
+              },
+              author: { login: "alice" },
+            },
+          ]),
+        );
+        return;
+      }
       res.statusCode = 404;
       res.end(JSON.stringify({ message: "Not Found" }));
     });
@@ -629,6 +800,17 @@ describe("repo branches panel backend", () => {
       "origin",
       "https://x-access-token:SUPER_SECRET_SHOULD_NOT_LEAK@github.com/acme/web.git",
     ]);
+    // Create a feature branch and merge it with --no-ff into main so both merged & merge-node paths exist
+    git(repoWorkdir, ["checkout", "-b", "feat/merged"]);
+    writeFileSync(join(repoWorkdir, "merged.ts"), "export const merged = true;\n", "utf8");
+    git(repoWorkdir, ["add", "merged.ts"]);
+    git(repoWorkdir, ["commit", "-m", "feat: merged subtree"]);
+    git(repoWorkdir, ["checkout", "main"]);
+    git(repoWorkdir, ["merge", "--no-ff", "feat/merged", "-m", "Merge feat/merged into main"]);
+    // Create a stash commit to verify refs/stash is excluded from the git graph
+    writeFileSync(join(repoWorkdir, "temp-stash.txt"), "stashed\n", "utf8");
+    git(repoWorkdir, ["stash", "push", "-u", "-m", "secret stash should stay hidden"]);
+
     git(repoWorkdir, ["checkout", "-b", "local-wip"]);
     writeFileSync(join(repoWorkdir, "wip.ts"), "export const wip = true;\n", "utf8");
     git(repoWorkdir, ["add", "wip.ts"]);
@@ -656,7 +838,7 @@ describe("repo branches panel backend", () => {
         .poll(async () => {
           const { agents } = await f.ok("/bridge/agents");
           const a = agents.find((x: { id: string }) => x.id === liveReg.id);
-          return Boolean(a?.online && a?.capabilities?.git_inspect);
+          return Boolean(a?.online && a?.capabilities?.git_inspect && a?.capabilities?.git_graph);
         }, { timeout: 5000 })
         .toBe(true);
 
@@ -672,12 +854,42 @@ describe("repo branches panel backend", () => {
         untracked_count: 1,
         detailed: true,
       });
+      const mainBranch = liveOverview.branches.find((b: { name: string }) => b.name === "main");
+      const mergedBranch = liveOverview.branches.find(
+        (b: { name: string }) => b.name === "feat/merged",
+      );
       const localOnly = liveOverview.branches.find((b: { name: string }) => b.name === "local-wip");
+      expect(mainBranch.merge_status).toBe("base");
+      expect(mergedBranch).toMatchObject({
+        merge_status: "merged",
+        ahead_of_base: 0,
+      });
       expect(localOnly).toMatchObject({
         source: "local",
         is_local_current: true,
+        merge_status: "ahead",
+        ahead_of_base: 1,
+        behind_base: 0,
         subject: "feat: local only branch commit",
       });
+
+      const localGraph = await f.ok(
+        `/projects/${project.id}/workspace/repos/graph?repo=acme/web`,
+      );
+      expect(JSON.stringify(localGraph)).not.toContain("SUPER_SECRET_SHOULD_NOT_LEAK");
+      expect(JSON.stringify(localGraph)).not.toContain("secret stash should stay hidden");
+      expect(localGraph.source).toBe("local");
+      expect(localGraph.base_branch).toBe("main");
+      expect(localGraph.base_first_parent_shas.length).toBeGreaterThanOrEqual(2);
+      const mergeNode = localGraph.commits.find(
+        (c: { parents: string[]; message: string }) =>
+          c.parents.length === 2 && c.message.includes("Merge feat/merged"),
+      );
+      expect(mergeNode).toBeDefined();
+      expect(localGraph.base_first_parent_shas).toContain(mergeNode.sha);
+      expect(
+        localGraph.commits.some((c: { sha: string }) => c.sha === mergeNode.parents[1]),
+      ).toBe(true);
 
       const localDetail = await f.ok(
         `/projects/${project.id}/workspace/repos/branch-detail?repo=acme/web&branch=local-wip&source=local&base=main`,
@@ -696,6 +908,16 @@ describe("repo branches panel backend", () => {
       // Validation boundaries
       expect(
         (await f.api(`/projects/${project.id}/workspace/repos/branches?repo=other/repo`)).status,
+      ).toBe(400);
+      expect(
+        (await f.api(`/projects/${project.id}/workspace/repos/graph?repo=other/repo`)).status,
+      ).toBe(400);
+      expect(
+        (
+          await f.api(
+            `/projects/${project.id}/workspace/repos/graph?repo=acme/web&base=-bad`,
+          )
+        ).status,
       ).toBe(400);
       expect(
         (
@@ -721,7 +943,7 @@ describe("repo branches panel backend", () => {
         ).status,
       ).toBe(400);
 
-      // Disabled binding does not query Bridge
+      // Disabled binding falls back cleanly to GitHub overview & commit graph
       await f.ok(`/projects/${project.id}/agent-bindings/${liveReg.id}`, "PATCH", {
         enabled: false,
       });
@@ -729,8 +951,27 @@ describe("repo branches panel backend", () => {
         `/projects/${project.id}/workspace/repos/branches?repo=acme/web`,
       );
       expect(disabledOverview.local_workdir).toBeNull();
+      const disabledGraph = await f.ok(
+        `/projects/${project.id}/workspace/repos/graph?repo=acme/web`,
+      );
+      expect(disabledGraph.source).toBe("remote");
+      expect(disabledGraph.base_branch).toBe("main");
+      expect(disabledGraph.commits.map((c: { sha: string }) => c.sha)).toEqual([
+        "2222222bbbb",
+        "1111111aaaa",
+        "3333333merged",
+        "0000000base",
+      ]);
+      const rd2Commit = disabledGraph.commits.find(
+        (c: { sha: string }) => c.sha === "2222222bbbb",
+      );
+      expect(rd2Commit.refs[0]).toMatchObject({
+        name: "feat/rd-2",
+        open_pr_number: 9,
+        linked_task_numbers: [2],
+      });
     } finally {
       await daemon.close();
     }
-  });
+  }, 30_000);
 });

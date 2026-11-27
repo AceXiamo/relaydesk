@@ -41,6 +41,7 @@ import type {
   ReleaseRecord,
   RepoBranchDetailPayload,
   RepoBranchesOverviewPayload,
+  RepoGitGraphPayload,
   TaskDetailPayload,
   TaskMessage,
   TaskPriority,
@@ -699,6 +700,23 @@ export const api = {
     if (params.base) qs.set("base", params.base);
     return request<RepoBranchDetailPayload>(
       `/api/projects/${encodeURIComponent(projectId)}/workspace/repos/branch-detail?${qs.toString()}`,
+      "GET",
+      undefined,
+      signal,
+    );
+  },
+  getWorkspaceRepoGraph: (
+    projectId: string,
+    params?: { repo?: string; base?: string; limit?: number },
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams();
+    if (params?.repo) qs.set("repo", params.repo);
+    if (params?.base) qs.set("base", params.base);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<RepoGitGraphPayload>(
+      `/api/projects/${encodeURIComponent(projectId)}/workspace/repos/graph${suffix}`,
       "GET",
       undefined,
       signal,

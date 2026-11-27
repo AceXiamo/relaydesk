@@ -2,13 +2,18 @@ import {
   DEFAULT_BRANCH_PREFIX,
   isValidGitRefName,
 } from "./store.ts";
-import type { GithubRepoBranchOverview } from "./github.ts";
+import type { GithubBranchCompareStatus, GithubRepoBranchOverview } from "./github.ts";
 import type {
   AgentProjectInfo,
   RepoBranchItem,
   RepoBranchLinkedTask,
+  RepoBranchMergeStatus,
   RepoBranchPullRequest,
   RepoBranchesOverviewPayload,
+  RepoGitGraphCommit,
+  RepoGitGraphPayload,
+  RepoGitGraphRef,
+  RepoLocalBranchInfo,
   RepoLocalWorkdirStatus,
   RepoMirrorEntry,
   TaskRecord,
@@ -122,6 +127,7 @@ export interface MergeRepoBranchesInput {
   >;
   githubConfigured: boolean;
   remoteOverview: GithubRepoBranchOverview | null;
+  remoteCompareByBranch?: Record<string, GithubBranchCompareStatus>;
   remoteError?: string;
   mirror: RepoMirrorEntry | null;
   localWorkdir: RepoLocalWorkdirStatus | null;
@@ -167,6 +173,7 @@ export function mergeRepoBranches(input: MergeRepoBranchesInput): RepoBranchesOv
     ahead: number | null;
     behind: number | null;
     upstream_gone: boolean;
+    local_branch?: RepoLocalBranchInfo;
   };
 
   const map = new Map<string, DraftItem>();
@@ -203,6 +210,7 @@ export function mergeRepoBranches(input: MergeRepoBranchesInput): RepoBranchesOv
         existing.ahead = lb.ahead;
         existing.behind = lb.behind;
         existing.upstream_gone = lb.upstream_gone;
+        existing.local_branch = lb;
       } else {
         map.set(lb.name, {
           name: lb.name,
@@ -218,6 +226,7 @@ export function mergeRepoBranches(input: MergeRepoBranchesInput): RepoBranchesOv
           ahead: lb.ahead,
           behind: lb.behind,
           upstream_gone: lb.upstream_gone,
+          local_branch: lb,
         });
       }
     }
@@ -253,6 +262,9 @@ export function mergeRepoBranches(input: MergeRepoBranchesInput): RepoBranchesOv
     }
   }
 
+  const baseDraft = map.get(compareBase);
+  const baseBranchSha = baseDraft ? (baseDraft.remote_sha || baseDraft.local_sha || "").toLowerCase() : "";
+
   const branches: RepoBranchItem[] = [];
   for (const draft of map.values()) {
     const isDefault = Boolean(defaultBranch && draft.name === defaultBranch);
@@ -270,6 +282,56 @@ export function mergeRepoBranches(input: MergeRepoBranchesInput): RepoBranchesOv
     );
     const githubUrl =
       draft.source === "local" ? "" : `${repoHtmlUrl}/tree/${encodeRefPath(draft.name)}`;
+
+    let mergeStatus: RepoBranchMergeStatus = "unknown";
+    let aheadOfBase: number | null = null;
+    let behindBase: number | null = null;
+
+    if (draft.name === compareBase) {
+      mergeStatus = "base";
+      aheadOfBase = 0;
+      behindBase = 0;
+    } else if (
+      draft.local_branch &&
+      (draft.local_branch.merged_into_base !== undefined ||
+        draft.local_branch.ahead_of_base !== undefined)
+    ) {
+      const lb = draft.local_branch;
+      if (lb.ahead_of_base !== undefined) {
+        aheadOfBase = lb.ahead_of_base;
+        behindBase = lb.behind_base ?? 0;
+        if (aheadOfBase === 0) {
+          mergeStatus = "merged";
+        } else if (behindBase > 0) {
+          mergeStatus = "diverged";
+        } else {
+          mergeStatus = "ahead";
+        }
+      } else if (lb.merged_into_base) {
+        mergeStatus = "merged";
+        aheadOfBase = 0;
+        behindBase = lb.behind_base ?? null;
+      }
+    } else if (input.remoteCompareByBranch?.[draft.name]) {
+      const cmp = input.remoteCompareByBranch[draft.name];
+      aheadOfBase = cmp.ahead_by;
+      behindBase = cmp.behind_by;
+      if (cmp.ahead_by === 0) {
+        mergeStatus = "merged";
+      } else if (cmp.behind_by > 0) {
+        mergeStatus = "diverged";
+      } else {
+        mergeStatus = "ahead";
+      }
+    } else if (
+      sha.length >= 7 &&
+      baseBranchSha.length >= 7 &&
+      sha.slice(0, 7).toLowerCase() === baseBranchSha.slice(0, 7)
+    ) {
+      mergeStatus = "merged";
+      aheadOfBase = 0;
+      behindBase = 0;
+    }
 
     branches.push({
       name: draft.name,
@@ -289,6 +351,9 @@ export function mergeRepoBranches(input: MergeRepoBranchesInput): RepoBranchesOv
       ahead: draft.ahead,
       behind: draft.behind,
       upstream_gone: draft.upstream_gone,
+      merge_status: mergeStatus,
+      ahead_of_base: aheadOfBase,
+      behind_base: behindBase,
       open_pr: openPr,
       linked_tasks: linkedTasks,
       github_url: githubUrl,
@@ -337,7 +402,70 @@ export function mergeRepoBranches(input: MergeRepoBranchesInput): RepoBranchesOv
       local_only: branches.filter((b) => b.source === "local").length,
       with_pr: branches.filter((b) => Boolean(b.open_pr)).length,
       with_task: branches.filter((b) => b.linked_tasks.length > 0).length,
+      merged: branches.filter((b) => b.merge_status === "merged").length,
+      unmerged: branches.filter((b) => b.merge_status === "ahead" || b.merge_status === "diverged")
+        .length,
     },
     fetched_at: input.fetchedAt || new Date().toISOString(),
+  };
+}
+
+export function annotateGitGraphWithOverview(
+  graph: RepoGitGraphPayload,
+  overview: Pick<RepoBranchesOverviewPayload, "branches"> | null,
+): RepoGitGraphPayload {
+  const branchByName = new Map<string, RepoBranchItem>();
+  for (const b of overview?.branches ?? []) {
+    branchByName.set(b.name, b);
+  }
+
+  const commits: RepoGitGraphCommit[] = graph.commits.map((commit) => {
+    const mergedRefs = new Map<string, RepoGitGraphRef>();
+    for (const ref of commit.refs) {
+      const key = ref.kind === "tag" ? `tag:${ref.name}` : `branch:${ref.name}`;
+      const existing = mergedRefs.get(key);
+      const branch = ref.kind === "tag" ? undefined : branchByName.get(ref.name);
+      const enriched: RepoGitGraphRef = {
+        ...ref,
+        ...(existing?.is_head || ref.is_head ? { is_head: true } : {}),
+        ...(existing?.kind === "local" ? { kind: "local" } : {}),
+        ...(branch
+          ? {
+              is_default: branch.is_default,
+              is_target: branch.is_target,
+              merge_status: branch.merge_status,
+              ahead_of_base: branch.ahead_of_base,
+              behind_base: branch.behind_base,
+              ...(branch.open_pr ? { open_pr_number: branch.open_pr.number } : {}),
+              ...(branch.linked_tasks.length > 0
+                ? { linked_task_numbers: branch.linked_tasks.map((t) => t.number) }
+                : {}),
+            }
+          : {}),
+      };
+      mergedRefs.set(key, enriched);
+    }
+
+    const refs = Array.from(mergedRefs.values()).sort((a, b) => {
+      if (Boolean(a.is_head) !== Boolean(b.is_head)) return a.is_head ? -1 : 1;
+      if (Boolean(a.is_default) !== Boolean(b.is_default)) return a.is_default ? -1 : 1;
+      if (Boolean(a.is_target) !== Boolean(b.is_target)) return a.is_target ? -1 : 1;
+      if (a.kind !== b.kind) {
+        if (a.kind === "tag") return 1;
+        if (b.kind === "tag") return -1;
+        return a.kind === "local" ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
+
+    return {
+      ...commit,
+      refs,
+    };
+  });
+
+  return {
+    ...graph,
+    commits,
   };
 }

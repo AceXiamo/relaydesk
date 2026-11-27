@@ -45,8 +45,10 @@ import {
 import {
   GithubError,
   fetchGithubBranchDetailAcrossConnections,
+  fetchGithubBranchMergeStatusesAcrossConnections,
   fetchGithubBranchesAcrossConnections,
   fetchGithubRepoBranchOverviewAcrossConnections,
+  fetchGithubRepoCommitGraphAcrossConnections,
   fetchGithubRepositories,
   fetchGithubRepositoriesAcrossConnections,
   inspectGithubToken,
@@ -57,6 +59,7 @@ import {
   resolveScopeOwner,
   toGithubConnectionSummary,
   upsertGithubConnection,
+  type GithubBranchCompareStatus,
   type GithubRepoBranchOverview,
 } from "./github.ts";
 import { isLoopbackHost } from "./loopback.ts";
@@ -96,7 +99,7 @@ import {
   testUtilityAiConnection,
 } from "./utility-ai.ts";
 import { getProjectReposStatus, syncProjectRepos } from "./repo-workspace.ts";
-import { isSafeGitBranchQuery, mergeRepoBranches } from "./repo-branches.ts";
+import { annotateGitGraphWithOverview, isSafeGitBranchQuery, mergeRepoBranches } from "./repo-branches.ts";
 import { getWorkspaceInlineMime } from "../app/lib/workspace-media.ts";
 import {
   addWorkspaceExternalDatasource,
@@ -2318,6 +2321,7 @@ export class ApiRouter {
 
       const connections = readGithubConnections(this.store.dbPath);
       const localCandidate = this.resolveProjectLocalGitCandidate(projectInfo.id);
+      const baseCandidate = projectInfo.target_branch?.trim() || "";
 
       const [remoteResult, localResult] = await Promise.all([
         (async (): Promise<{ overview: GithubRepoBranchOverview | null; error?: string }> => {
@@ -2341,6 +2345,7 @@ export class ApiRouter {
               localCandidate.id,
               projectInfo.id,
               targetRepo,
+              baseCandidate || undefined,
             );
             if (!inspected) return null;
             return {
@@ -2355,6 +2360,50 @@ export class ApiRouter {
         })(),
       ]);
 
+      const projectRepoCount = projectInfo.repos.length || (projectInfo.repo ? 1 : 0);
+      const localMatchesRepo = Boolean(
+        localResult &&
+          (localResult.remote_repo
+            ? localResult.remote_repo.toLowerCase() === targetRepo.toLowerCase() ||
+              (remoteResult.overview?.repo &&
+                localResult.remote_repo.toLowerCase() === remoteResult.overview.repo.toLowerCase())
+            : projectRepoCount <= 1),
+      );
+      const compareBase =
+        baseCandidate ||
+        remoteResult.overview?.default_branch ||
+        (localMatchesRepo ? localResult?.current_branch : "") ||
+        "main";
+
+      let remoteCompareByBranch: Record<string, GithubBranchCompareStatus> | undefined;
+      if (connections.length > 0 && remoteResult.overview && compareBase) {
+        const coveredLocally = new Set(
+          localMatchesRepo && localResult
+            ? localResult.branches
+                .filter(
+                  (b) => b.merged_into_base !== undefined || b.ahead_of_base !== undefined,
+                )
+                .map((b) => b.name)
+            : [],
+        );
+        const missingRemoteBranches = remoteResult.overview.branches
+          .map((b) => b.name)
+          .filter((name) => name !== compareBase && !coveredLocally.has(name))
+          .slice(0, 12);
+        if (missingRemoteBranches.length > 0) {
+          try {
+            remoteCompareByBranch = await fetchGithubBranchMergeStatusesAcrossConnections(
+              connections,
+              targetRepo,
+              compareBase,
+              missingRemoteBranches,
+            );
+          } catch {
+            // Non-fatal: overview still works with unknown merge_status
+          }
+        }
+      }
+
       const reposStatus = getProjectReposStatus(this.store.dbPath, projectInfo);
       const mirror =
         reposStatus.repos.find((r) => r.repo.toLowerCase() === targetRepo.toLowerCase()) ?? null;
@@ -2365,11 +2414,122 @@ export class ApiRouter {
         project: projectInfo,
         githubConfigured: connections.length > 0,
         remoteOverview: remoteResult.overview,
+        remoteCompareByBranch,
         remoteError: remoteResult.error,
         mirror,
         localWorkdir: localResult,
         tasks,
       });
+    }
+
+    // GET /api/projects/:id/workspace/repos/graph
+    if (
+      subparts.length === 2 &&
+      subparts[0] === "repos" &&
+      subparts[1] === "graph" &&
+      method === "GET"
+    ) {
+      const requestedRepo = query.get("repo")?.trim() || "";
+      let targetRepo = projectInfo.repos[0] ?? "";
+      if (requestedRepo) {
+        const matched = projectInfo.repos.find((r) => r.toLowerCase() === requestedRepo.toLowerCase());
+        if (!matched) {
+          throw new ApiError(400, "指定仓库未绑定到当前项目");
+        }
+        targetRepo = matched;
+      }
+
+      const rawBase = (query.get("base") ?? "").trim();
+      if (rawBase && !isSafeGitBranchQuery(rawBase)) {
+        throw new ApiError(400, "无效的基线分支名称");
+      }
+      const limit = Math.min(Math.max(Math.floor(Number(query.get("limit")) || 80), 20), 120);
+
+      if (!targetRepo) {
+        return {
+          repo: "",
+          source: "remote",
+          base_branch: rawBase,
+          base_first_parent_shas: [],
+          commits: [],
+          truncated: false,
+          fetched_at: new Date().toISOString(),
+        };
+      }
+
+      const connections = readGithubConnections(this.store.dbPath);
+      const localCandidate = this.resolveProjectLocalGitCandidate(projectInfo.id);
+      const projectRepoCount = projectInfo.repos.length || (projectInfo.repo ? 1 : 0);
+
+      if (localCandidate && this.bridgeHub && localCandidate.capabilities.git_graph) {
+        try {
+          const localGraph = await this.bridgeHub.inspectProjectGitGraph(
+            localCandidate.id,
+            projectInfo.id,
+            {
+              repo: targetRepo,
+              baseBranch: rawBase || projectInfo.target_branch?.trim() || undefined,
+              limit,
+            },
+          );
+          if (localGraph && localGraph.commits.length > 0) {
+            const graphRepoLower = localGraph.repo.toLowerCase();
+            const targetLower = targetRepo.toLowerCase();
+            if (graphRepoLower ? graphRepoLower === targetLower : projectRepoCount <= 1) {
+              return {
+                ...localGraph,
+                repo: targetRepo,
+              };
+            }
+          }
+        } catch {
+          // Fall back to GitHub commit graph when Bridge query fails or repo mismatches
+        }
+      }
+
+      if (connections.length > 0) {
+        const overview = await fetchGithubRepoBranchOverviewAcrossConnections(
+          connections,
+          targetRepo,
+        );
+        const compareBase =
+          rawBase ||
+          projectInfo.target_branch?.trim() ||
+          overview.default_branch ||
+          overview.branches[0]?.name ||
+          "main";
+        const graph = await fetchGithubRepoCommitGraphAcrossConnections(connections, targetRepo, {
+          baseBranch: compareBase,
+          branches: overview.branches.map((b) => ({
+            name: b.name,
+            sha: b.sha,
+            hasPr: Boolean(overview.pulls_by_branch[b.name]),
+          })),
+          limit,
+        });
+        const tasks = this.store.transaction(false, () => this.store.listTasks(projectInfo.id));
+        const baseOverview = mergeRepoBranches({
+          repo: targetRepo,
+          project: projectInfo,
+          githubConfigured: true,
+          remoteOverview: overview,
+          mirror: null,
+          localWorkdir: null,
+          tasks,
+        });
+        return annotateGitGraphWithOverview(graph, baseOverview);
+      }
+
+      return {
+        repo: targetRepo,
+        source: "remote",
+        base_branch: rawBase || projectInfo.target_branch?.trim() || "",
+        base_first_parent_shas: [],
+        commits: [],
+        truncated: false,
+        fetched_at: new Date().toISOString(),
+        error: "尚未配置 GitHub Key 且当前无支持提交拓扑的本机在线节点",
+      };
     }
 
     // GET /api/projects/:id/workspace/repos/branch-detail

@@ -565,6 +565,8 @@ export interface RepoBranchLinkedTask {
   delivery_ref: string;
 }
 
+export type RepoBranchMergeStatus = "base" | "merged" | "ahead" | "diverged" | "unknown";
+
 export interface RepoLocalBranchInfo {
   name: string;
   current: boolean;
@@ -574,6 +576,9 @@ export interface RepoLocalBranchInfo {
   ahead: number;
   behind: number;
   upstream_gone: boolean;
+  merged_into_base?: boolean;
+  ahead_of_base?: number;
+  behind_base?: number;
   author: string;
   subject: string;
 }
@@ -615,6 +620,9 @@ export interface RepoBranchItem {
   ahead: number | null;
   behind: number | null;
   upstream_gone: boolean;
+  merge_status: RepoBranchMergeStatus;
+  ahead_of_base: number | null;
+  behind_base: number | null;
   open_pr: RepoBranchPullRequest | null;
   linked_tasks: RepoBranchLinkedTask[];
   github_url: string;
@@ -641,8 +649,46 @@ export interface RepoBranchesOverviewPayload {
     local_only: number;
     with_pr: number;
     with_task: number;
+    merged: number;
+    unmerged: number;
   };
   fetched_at: string;
+}
+
+export interface RepoGitGraphRef {
+  name: string;
+  kind: "local" | "remote" | "tag";
+  is_head?: boolean;
+  is_default?: boolean;
+  is_target?: boolean;
+  merge_status?: RepoBranchMergeStatus;
+  ahead_of_base?: number | null;
+  behind_base?: number | null;
+  open_pr_number?: number;
+  linked_task_numbers?: number[];
+}
+
+export interface RepoGitGraphCommit {
+  sha: string;
+  short_sha: string;
+  parents: string[];
+  message: string;
+  author_name: string;
+  author_login?: string;
+  date: string;
+  html_url?: string;
+  refs: RepoGitGraphRef[];
+}
+
+export interface RepoGitGraphPayload {
+  repo: string;
+  source: "local" | "remote";
+  base_branch: string;
+  base_first_parent_shas: string[];
+  commits: RepoGitGraphCommit[];
+  truncated: boolean;
+  fetched_at: string;
+  error?: string;
 }
 
 export interface RepoBranchCommitItem {
@@ -744,7 +790,7 @@ export interface BridgeAgentSummary {
   bindings: BridgeAgentBindingSummary[];
   runtimes: Partial<Record<ChatRuntime, BridgeRuntimeStatus>>;
   models: ModelCatalogItem[];
-  capabilities: { allowed_roots_enabled?: boolean; db_clients?: string[]; git_inspect?: boolean };
+  capabilities: { allowed_roots_enabled?: boolean; db_clients?: string[]; git_inspect?: boolean; git_graph?: boolean };
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;

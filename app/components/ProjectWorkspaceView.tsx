@@ -7,6 +7,7 @@ import type {
   ProjectDetail,
   ProjectReposSyncStatus,
   RepoBranchesOverviewPayload,
+  RepoGitGraphPayload,
   TaskRecord,
   WorkspaceDatabaseEntry,
   WorkspaceDatabaseKind,
@@ -331,12 +332,16 @@ export function ProjectWorkspaceView({
   const [repoBranches, setRepoBranches] = useState<RepoBranchesOverviewPayload | null>(null);
   const [repoBranchesLoading, setRepoBranchesLoading] = useState(false);
   const [repoBranchesError, setRepoBranchesError] = useState("");
+  const [repoGraph, setRepoGraph] = useState<RepoGitGraphPayload | null>(null);
+  const [repoGraphLoading, setRepoGraphLoading] = useState(false);
+  const [repoGraphError, setRepoGraphError] = useState("");
   const [repoSubpath, setRepoSubpath] = useState("");
   const [repoEntries, setRepoEntries] = useState<WorkspaceRepoFileEntry[]>([]);
   const [repoListLoading, setRepoListLoading] = useState(false);
   const [repoFile, setRepoFile] = useState<WorkspaceRepoFileContent | null>(null);
   const [repoFileLoading, setRepoFileLoading] = useState(false);
   const repoBranchesSeqRef = useRef(0);
+  const repoGraphSeqRef = useRef(0);
 
   const fileUploadInputRef = useRef<HTMLInputElement>(null);
   const sqliteUploadInputRef = useRef<HTMLInputElement>(null);
@@ -446,6 +451,8 @@ export function ProjectWorkspaceView({
     setRepoSubpath("");
     setRepoBranches(null);
     setRepoBranchesError("");
+    setRepoGraph(null);
+    setRepoGraphError("");
     setRepoSubView("branches");
     if (!projectId) return;
     void refreshFiles();
@@ -866,6 +873,33 @@ export function ProjectWorkspaceView({
     [projectId],
   );
 
+  const loadRepoGraph = useCallback(
+    async (repo: string, signal?: AbortSignal) => {
+      if (!projectId || !repo) {
+        setRepoGraph(null);
+        setRepoGraphError("");
+        return;
+      }
+      const seq = ++repoGraphSeqRef.current;
+      setRepoGraphLoading(true);
+      setRepoGraphError("");
+      try {
+        const res = await api.getWorkspaceRepoGraph(projectId, { repo, limit: 80 }, signal);
+        if (seq !== repoGraphSeqRef.current) return;
+        setRepoGraph(res);
+      } catch (err) {
+        if (seq !== repoGraphSeqRef.current) return;
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setRepoGraphError(err instanceof Error ? err.message : "加载提交拓扑失败");
+      } finally {
+        if (seq === repoGraphSeqRef.current) {
+          setRepoGraphLoading(false);
+        }
+      }
+    },
+    [projectId],
+  );
+
   const taskBranchDigest = useMemo(
     () =>
       (tasks ?? [])
@@ -879,8 +913,9 @@ export function ProjectWorkspaceView({
     if (tab !== "repos" || !activeRepo) return;
     const controller = new AbortController();
     void loadRepoBranches(activeRepo, controller.signal);
+    void loadRepoGraph(activeRepo, controller.signal);
     return () => controller.abort();
-  }, [tab, activeRepo, loadRepoBranches, taskBranchDigest]);
+  }, [tab, activeRepo, loadRepoBranches, loadRepoGraph, taskBranchDigest]);
 
   const loadRepoDir = useCallback(
     async (repo: string, subpath: string) => {
@@ -930,7 +965,10 @@ export function ProjectWorkspaceView({
         toast.success("仓库镜像已同步");
       }
       if (firstReady && repoSubView === "code") void loadRepoDir(target, repoSubpath);
-      if (target) void loadRepoBranches(target);
+      if (target) {
+        void loadRepoBranches(target);
+        void loadRepoGraph(target);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "同步仓库失败");
     } finally {
@@ -2374,6 +2412,8 @@ export function ProjectWorkspaceView({
                         setRepoFile(null);
                         setRepoBranches(null);
                         setRepoBranchesError("");
+                        setRepoGraph(null);
+                        setRepoGraphError("");
                         setMobilePane("list");
                       }}
                     />
@@ -2425,8 +2465,11 @@ export function ProjectWorkspaceView({
                     size="xs"
                     variant="secondary"
                     icon="refresh-cw"
-                    loading={repoBranchesLoading}
-                    onClick={() => void loadRepoBranches(activeRepo)}
+                    loading={repoBranchesLoading || repoGraphLoading}
+                    onClick={() => {
+                      void loadRepoBranches(activeRepo);
+                      void loadRepoGraph(activeRepo);
+                    }}
                   >
                     刷新分支
                   </Button>
@@ -2452,9 +2495,17 @@ export function ProjectWorkspaceView({
                 overview={repoBranches}
                 overviewLoading={repoBranchesLoading}
                 overviewError={repoBranchesError}
+                graph={repoGraph}
+                graphLoading={repoGraphLoading}
+                graphError={repoGraphError}
+                tasks={tasks ?? []}
                 mobilePane={mobilePane}
                 onMobilePaneChange={setMobilePane}
-                onRefresh={() => activeRepo && void loadRepoBranches(activeRepo)}
+                onRefresh={() => {
+                  if (!activeRepo) return;
+                  void loadRepoBranches(activeRepo);
+                  void loadRepoGraph(activeRepo);
+                }}
                 onBrowseBranchCode={(branch) => void handleBrowseBranchCode(branch)}
                 onSelectTask={onSelectTask}
                 onOpenChatWithContext={(ref, prompt) => onOpenChatWithContext(ref, prompt)}

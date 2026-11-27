@@ -31,6 +31,8 @@ import type {
   RepoBranchCommitItem,
   RepoBranchComparison,
   RepoBranchDetailPayload,
+  RepoGitGraphCommit,
+  RepoGitGraphRef,
   RepoLocalBranchInfo,
 } from "../../app/lib/types.ts";
 import { bridgeCatalogPaths, detectBridgeCatalog, type BridgeCatalog, type BridgeCatalogConfig } from "./catalog.ts";
@@ -234,12 +236,20 @@ function isValidBridgeGitRef(value: string): boolean {
   return value.split("/").every((part) => Boolean(part) && !part.startsWith(".") && !part.endsWith(".lock"));
 }
 
-function runBridgeGit(cwd: string, args: string[], timeoutMs = 3000) {
+function runBridgeGit(
+  cwd: string,
+  args: string[],
+  timeoutMsOrOpts: number | { timeoutMs?: number; maxBuffer?: number } = 3000,
+) {
+  const timeoutMs =
+    typeof timeoutMsOrOpts === "number" ? timeoutMsOrOpts : (timeoutMsOrOpts.timeoutMs ?? 3000);
+  const maxBuffer =
+    typeof timeoutMsOrOpts === "number" ? 512 * 1024 : (timeoutMsOrOpts.maxBuffer ?? 512 * 1024);
   return spawnSync("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", ...args], {
     cwd,
     encoding: "utf8",
     timeout: timeoutMs,
-    maxBuffer: 512 * 1024,
+    maxBuffer,
     env: {
       ...process.env,
       GIT_TERMINAL_PROMPT: "0",
@@ -311,7 +321,30 @@ function parseTrackCounts(track: string): { ahead: number; behind: number; upstr
   };
 }
 
-function inspectLocalGitStatus(cwd: string, requestedRepo?: string) {
+function resolveBaseRefForStatus(
+  repoDir: string,
+  baseBranch?: string,
+): { name: string; ref: string } | null {
+  const cleanBase = baseBranch?.trim() ?? "";
+  if (cleanBase && isValidBridgeGitRef(cleanBase)) {
+    const resolved = resolveLocalCompareRef(repoDir, cleanBase);
+    if (resolved) return { name: cleanBase, ref: resolved };
+  }
+  const candidates: Array<{ name: string; ref: string }> = [
+    { name: "main", ref: "refs/heads/main" },
+    { name: "main", ref: "refs/remotes/origin/main" },
+    { name: "master", ref: "refs/heads/master" },
+    { name: "master", ref: "refs/remotes/origin/master" },
+    { name: "HEAD", ref: "HEAD" },
+  ];
+  for (const item of candidates) {
+    const check = runBridgeGit(repoDir, ["rev-parse", "--verify", "--quiet", item.ref], 1500);
+    if (check.status === 0) return item;
+  }
+  return null;
+}
+
+function inspectLocalGitStatus(cwd: string, requestedRepo?: string, baseBranch?: string) {
   const target = resolveGitRepoDir(cwd, requestedRepo);
   if (!target) {
     return {
@@ -389,6 +422,55 @@ function inspectLocalGitStatus(cwd: string, requestedRepo?: string) {
     }
   }
 
+  const baseResolved = resolveBaseRefForStatus(target.dir, baseBranch);
+  if (baseResolved && branches.length > 0) {
+    const mergedSet = new Set<string>();
+    const mergedRes = runBridgeGit(
+      target.dir,
+      ["branch", "--merged", baseResolved.ref, "--format=%(refname:short)"],
+      2000,
+    );
+    if (mergedRes.status === 0 && mergedRes.stdout) {
+      for (const line of mergedRes.stdout.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed) mergedSet.add(trimmed);
+      }
+    }
+    const prioritized = [
+      ...branches.filter((b) => !mergedSet.has(b.name)),
+      ...branches.filter((b) => mergedSet.has(b.name)),
+    ].slice(0, 30);
+    const countedNames = new Set(prioritized.map((b) => b.name));
+
+    for (const b of branches) {
+      if (b.name === baseResolved.name) {
+        b.merged_into_base = true;
+        b.ahead_of_base = 0;
+        b.behind_base = 0;
+        continue;
+      }
+      if (!countedNames.has(b.name) || !isValidBridgeGitRef(b.name)) {
+        if (mergedSet.has(b.name)) b.merged_into_base = true;
+        continue;
+      }
+      const countsRes = runBridgeGit(
+        target.dir,
+        ["rev-list", "--left-right", "--count", `${baseResolved.ref}...refs/heads/${b.name}`],
+        1500,
+      );
+      if (countsRes.status === 0 && countsRes.stdout) {
+        const [behindRaw = "0", aheadRaw = "0"] = countsRes.stdout.trim().split(/\s+/);
+        const behindBase = Math.max(0, Number(behindRaw) || 0);
+        const aheadBase = Math.max(0, Number(aheadRaw) || 0);
+        b.ahead_of_base = aheadBase;
+        b.behind_base = behindBase;
+        b.merged_into_base = mergedSet.has(b.name) || aheadBase === 0;
+      } else if (mergedSet.has(b.name)) {
+        b.merged_into_base = true;
+      }
+    }
+  }
+
   return {
     ok: true,
     workdir: cwd,
@@ -402,6 +484,130 @@ function inspectLocalGitStatus(cwd: string, requestedRepo?: string) {
     unstaged_count: unstaged,
     untracked_count: untracked,
     branches,
+  };
+}
+
+function parseDecoratedRefs(raw: string): RepoGitGraphRef[] {
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  const refs: RepoGitGraphRef[] = [];
+  for (const seg of trimmed.split(",")) {
+    const item = seg.trim();
+    if (!item) continue;
+    if (item === "origin/HEAD" || item.startsWith("origin/HEAD ->")) continue;
+    if (item.startsWith("HEAD -> ")) {
+      const name = item.slice("HEAD -> ".length).trim();
+      if (name) refs.push({ name: name.slice(0, 200), kind: "local", is_head: true });
+      continue;
+    }
+    if (item === "HEAD") continue;
+    if (item.startsWith("tag: ")) {
+      const name = item.slice("tag: ".length).trim();
+      if (name) refs.push({ name: name.slice(0, 200), kind: "tag" });
+      continue;
+    }
+    if (item.startsWith("origin/")) {
+      const name = item.slice("origin/".length).trim();
+      if (name && name !== "HEAD") refs.push({ name: name.slice(0, 200), kind: "remote" });
+      continue;
+    }
+    refs.push({ name: item.slice(0, 200), kind: "local" });
+  }
+  return refs.slice(0, 40);
+}
+
+function inspectLocalGitGraph(
+  cwd: string,
+  requestedRepo?: string,
+  baseBranch?: string,
+  limitRaw?: unknown,
+) {
+  const limit = Math.min(Math.max(Math.floor(Number(limitRaw) || 80), 20), 120);
+  const cleanBase = baseBranch?.trim() ?? "";
+  if (cleanBase && !isValidBridgeGitRef(cleanBase)) {
+    throw new Error("无效的基线分支名称");
+  }
+  const target = resolveGitRepoDir(cwd, requestedRepo);
+  if (!target) {
+    return {
+      ok: true,
+      repo: requestedRepo || "",
+      source: "local" as const,
+      base_branch: cleanBase,
+      base_first_parent_shas: [] as string[],
+      commits: [] as RepoGitGraphCommit[],
+      truncated: false,
+      fetched_at: new Date().toISOString(),
+      error: "未在绑定目录中找到 Git 仓库",
+    };
+  }
+
+  const baseResolved = resolveBaseRefForStatus(target.dir, cleanBase);
+  const logRes = runBridgeGit(
+    target.dir,
+    [
+      "log",
+      "--topo-order",
+      "--branches",
+      "--remotes=origin",
+      `--max-count=${limit + 1}`,
+      "--format=%H%x09%h%x09%P%x09%an%x09%aI%x09%D%x09%s",
+    ],
+    { timeoutMs: 4000, maxBuffer: 1024 * 1024 },
+  );
+
+  const commits: RepoGitGraphCommit[] = [];
+  let truncated = false;
+  if (logRes.status === 0 && logRes.stdout) {
+    const lines = logRes.stdout.split(/\r?\n/).filter(Boolean);
+    if (lines.length > limit) {
+      truncated = true;
+    }
+    for (const line of lines.slice(0, limit)) {
+      const [sha = "", shortSha = "", parentsStr = "", authorName = "", date = "", decorations = "", ...msgParts] =
+        line.split("\t");
+      if (!sha) continue;
+      const parents = parentsStr
+        .split(/\s+/)
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .slice(0, 16);
+      commits.push({
+        sha: sha.slice(0, 64),
+        short_sha: (shortSha || sha.slice(0, 7)).slice(0, 16),
+        parents,
+        message: msgParts.join("\t").slice(0, 400) || shortSha || sha.slice(0, 7),
+        author_name: authorName.slice(0, 120),
+        date: date.slice(0, 64),
+        refs: parseDecoratedRefs(decorations),
+      });
+    }
+  }
+
+  const baseFirstParentShas: string[] = [];
+  if (baseResolved) {
+    const fpRes = runBridgeGit(
+      target.dir,
+      ["rev-list", "--first-parent", `--max-count=${limit + 40}`, baseResolved.ref],
+      3000,
+    );
+    if (fpRes.status === 0 && fpRes.stdout) {
+      for (const line of fpRes.stdout.split(/\r?\n/)) {
+        const sha = line.trim();
+        if (sha) baseFirstParentShas.push(sha.slice(0, 64));
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    repo: target.remoteRepo || "",
+    source: "local" as const,
+    base_branch: baseResolved?.name || cleanBase,
+    base_first_parent_shas: baseFirstParentShas,
+    commits,
+    truncated,
+    fetched_at: new Date().toISOString(),
   };
 }
 
@@ -686,6 +892,7 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
     ...cat,
     allowed_roots_enabled: !!c.allowed_roots?.length,
     git_inspect: true,
+    git_graph: true,
     projects: projects(c, home),
   });
   const log = (msg: string) => {
@@ -1320,14 +1527,40 @@ export async function startBridgeDaemon(o: BridgeDaemonOptions): Promise<{ close
         if (!f.id) return;
         const pid = f.payload.project_id;
         const requestedRepo = typeof f.payload.repo === "string" ? f.payload.repo : undefined;
+        const baseBranch = typeof f.payload.base_branch === "string" ? f.payload.base_branch : undefined;
         try {
           if (typeof pid !== "string" || !validProjectId(pid)) throw new Error("Invalid project_id");
           const proj = config.projects?.[pid];
           if (!proj) throw new Error("Project is not locally bound");
           const cwd = projectWorkdir(proj, config, home);
-          send(socket, "repo.git_status.result", inspectLocalGitStatus(cwd, requestedRepo), f.id);
+          send(
+            socket,
+            "repo.git_status.result",
+            inspectLocalGitStatus(cwd, requestedRepo, baseBranch),
+            f.id,
+          );
         } catch (e) {
           send(socket, "repo.git_status.result", { ok: false, error: message(e) }, f.id);
+        }
+      }
+      if (f.type === "repo.git_graph") {
+        if (!f.id) return;
+        const pid = f.payload.project_id;
+        const requestedRepo = typeof f.payload.repo === "string" ? f.payload.repo : undefined;
+        const baseBranch = typeof f.payload.base_branch === "string" ? f.payload.base_branch : undefined;
+        try {
+          if (typeof pid !== "string" || !validProjectId(pid)) throw new Error("Invalid project_id");
+          const proj = config.projects?.[pid];
+          if (!proj) throw new Error("Project is not locally bound");
+          const cwd = projectWorkdir(proj, config, home);
+          send(
+            socket,
+            "repo.git_graph.result",
+            inspectLocalGitGraph(cwd, requestedRepo, baseBranch, f.payload.limit),
+            f.id,
+          );
+        } catch (e) {
+          send(socket, "repo.git_graph.result", { ok: false, error: message(e) }, f.id);
         }
       }
       if (f.type === "repo.git_branch_detail") {

@@ -13,6 +13,7 @@ import type {
   ChatSandboxMode,
   ChatStreamEvent,
   RepoBranchDetailPayload,
+  RepoGitGraphPayload,
   RepoLocalWorkdirStatus,
 } from "../app/lib/types.ts";
 import type { RunChatTurnResult } from "./codex-chat.ts";
@@ -81,7 +82,7 @@ const catalog = z.object({
   runtimes: z.object({ claude: runtime.optional(), codex: runtime.optional(), agy: runtime.optional() }).optional(),
   projects: z.array(report).max(1000).optional(), models: z.unknown().optional(),
   allowed_roots_enabled: z.boolean().optional(), db_clients: z.array(text(64)).max(64).optional(),
-  git_inspect: z.boolean().optional(),
+  git_inspect: z.boolean().optional(), git_graph: z.boolean().optional(),
 });
 const localBranchInfoSchema = z.object({
   name: text(200).min(1),
@@ -92,6 +93,9 @@ const localBranchInfoSchema = z.object({
   ahead: z.number().int().min(0).default(0),
   behind: z.number().int().min(0).default(0),
   upstream_gone: z.boolean().default(false),
+  merged_into_base: z.boolean().optional(),
+  ahead_of_base: z.number().int().min(0).optional(),
+  behind_base: z.number().int().min(0).optional(),
   author: text(120).default(""),
   subject: text(240).default(""),
 });
@@ -138,6 +142,29 @@ const gitBranchDetailResultSchema = z.object({
       deletions: z.number().int().min(0),
     })).max(50),
   }).nullable().default(null),
+  error: text(1024).optional(),
+});
+const gitGraphResultSchema = z.object({
+  ok: z.boolean(),
+  repo: text(200).default(""),
+  source: z.literal("local").default("local"),
+  base_branch: text(200).default(""),
+  base_first_parent_shas: z.array(text(64).min(1)).max(200).default([]),
+  commits: z.array(z.object({
+    sha: text(64).min(1),
+    short_sha: text(16).min(1),
+    parents: z.array(text(64).min(1)).max(16).default([]),
+    message: text(400),
+    author_name: text(120).default(""),
+    date: text(64).default(""),
+    refs: z.array(z.object({
+      name: text(200).min(1),
+      kind: z.enum(["local", "remote", "tag"]),
+      is_head: z.boolean().optional(),
+    })).max(40).default([]),
+  })).max(150).default([]),
+  truncated: z.boolean().default(false),
+  fetched_at: text(64).default(""),
   error: text(1024).optional(),
 });
 const frame = z.object({ type: text(64), id: text(128).min(1).optional(), payload: z.record(z.string(), z.unknown()) });
@@ -505,13 +532,15 @@ export class BridgeHub {
       }
     }
     const gitInspect = p.git_inspect === true || (!hello && current.capabilities.git_inspect === true);
+    const gitGraph = p.git_graph === true || (!hello && current.capabilities.git_graph === true);
     this.store.updateBridgeAgentTelemetry(conn.id, {
       hostname: p.hostname ?? current.hostname, platform: p.platform ?? current.platform, bridge_version: p.bridge_version ?? current.bridge_version,
       max_concurrency: p.max_concurrency ?? current.max_concurrency, accept_cli_runs: p.accept_cli_runs ?? current.accept_cli_runs,
       runtimes: p.runtimes ?? (hello ? {} : current.runtimes), models: p.models !== undefined ? sanitizeBridgeModels(p.models) : hello ? [] : current.models,
       capabilities: { allowed_roots_enabled: p.allowed_roots_enabled ?? (!hello && current.capabilities.allowed_roots_enabled === true),
         db_clients: p.db_clients ?? (hello ? [] : current.capabilities.db_clients),
-        ...(gitInspect ? { git_inspect: true } : {}) }, last_seen_at: new Date().toISOString(),
+        ...(gitInspect ? { git_inspect: true } : {}),
+        ...(gitGraph ? { git_graph: true } : {}) }, last_seen_at: new Date().toISOString(),
     });
   }
   private receive(conn: Connection, type: string, id: string | undefined, p: Payload) {
@@ -668,11 +697,17 @@ export class BridgeHub {
         this.notifyAvailability([value.project_id]);
       }
       pending.settle({ workdir: value.workdir, path_error: value.path_error, path_ok: value.path_ok });
-    } else if (type === "repo.git_status.result" || type === "repo.git_branch_detail.result") {
+    } else if (
+      type === "repo.git_status.result" ||
+      type === "repo.git_branch_detail.result" ||
+      type === "repo.git_graph.result"
+    ) {
       const pending = id && conn.gitQueries.get(id);
       if (!pending) return;
       if (type === "repo.git_status.result") {
         pending.settle(gitStatusResultSchema.parse(p));
+      } else if (type === "repo.git_graph.result") {
+        pending.settle(gitGraphResultSchema.parse(p));
       } else {
         pending.settle(gitBranchDetailResultSchema.parse(p));
       }
@@ -753,6 +788,7 @@ export class BridgeHub {
     agentId: string,
     projectId: string,
     repo?: string,
+    baseBranch?: string,
   ): Promise<Omit<RepoLocalWorkdirStatus, "agent_id" | "agent_name" | "online"> | null> {
     const conn = this.live(agentId);
     if (!conn) return null;
@@ -780,7 +816,11 @@ export class BridgeHub {
         conn,
         projectId,
         "repo.git_status",
-        { project_id: projectId, ...(repo ? { repo } : {}) },
+        {
+          project_id: projectId,
+          ...(repo ? { repo } : {}),
+          ...(baseBranch ? { base_branch: baseBranch } : {}),
+        },
       );
       if (!res.ok) {
         return fallbackStatus(res.error || "本机节点无法读取 Git 状态");
@@ -803,6 +843,44 @@ export class BridgeHub {
     } catch (err) {
       return fallbackStatus(err instanceof Error ? err.message : "本机节点 Git 状态查询失败");
     }
+  }
+  async inspectProjectGitGraph(
+    agentId: string,
+    projectId: string,
+    params: { repo?: string; baseBranch?: string; limit?: number } = {},
+  ): Promise<RepoGitGraphPayload | null> {
+    const conn = this.live(agentId);
+    if (!conn) return null;
+    this.assertWorkspaceAccess(agentId, projectId);
+    const agent = this.agent(agentId);
+    if (!agent.capabilities.git_graph) {
+      return null;
+    }
+    const res = await this.sendGitQuery<z.infer<typeof gitGraphResultSchema>>(
+      conn,
+      projectId,
+      "repo.git_graph",
+      {
+        project_id: projectId,
+        ...(params.repo ? { repo: params.repo } : {}),
+        ...(params.baseBranch ? { base_branch: params.baseBranch } : {}),
+        ...(params.limit ? { limit: params.limit } : {}),
+      },
+      5000,
+    );
+    if (!res.ok) {
+      throw new ApiError(400, res.error || "本机节点无法读取提交拓扑");
+    }
+    return {
+      repo: res.repo || params.repo || "",
+      source: "local",
+      base_branch: res.base_branch || params.baseBranch || "",
+      base_first_parent_shas: res.base_first_parent_shas,
+      commits: res.commits,
+      truncated: res.truncated,
+      fetched_at: res.fetched_at || new Date().toISOString(),
+      ...(res.error ? { error: res.error } : {}),
+    };
   }
   async inspectProjectBranchDetail(
     agentId: string,

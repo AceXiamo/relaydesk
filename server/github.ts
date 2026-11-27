@@ -24,6 +24,9 @@ import type {
   RepoBranchComparison,
   RepoBranchDetailPayload,
   RepoBranchPullRequest,
+  RepoGitGraphCommit,
+  RepoGitGraphPayload,
+  RepoGitGraphRef,
 } from "../app/lib/types.ts";
 
 export class GithubError extends Error {
@@ -1375,6 +1378,7 @@ interface RawGithubPull {
 interface RawGithubCommit {
   sha?: string;
   html_url?: string;
+  parents?: Array<{ sha?: string }>;
   commit?: {
     message?: string;
     author?: { name?: string; date?: string } | null;
@@ -1919,6 +1923,381 @@ export async function fetchGithubBranchDetailAcrossConnections(
     repo,
     (token, fullName) => fetchGithubBranchDetail(token, fullName, branch, baseBranch, apiBaseOverride),
     "所有已配置的 GitHub Key 均无法读取该分支详情。",
+  );
+}
+
+export interface GithubBranchCompareStatus {
+  ahead_by: number;
+  behind_by: number;
+  status: "ahead" | "behind" | "diverged" | "identical";
+}
+
+export async function fetchGithubBranchMergeStatuses(
+  token: string,
+  repo: string,
+  baseBranch: string,
+  branchNames: ReadonlyArray<string>,
+  apiBaseOverride?: string,
+): Promise<Record<string, GithubBranchCompareStatus>> {
+  const parsed = parseGithubRepoSlug(repo);
+  if (!parsed) {
+    throw new GithubError("无效的仓库格式，请使用 owner/repo。");
+  }
+  const cleanBase = baseBranch.trim();
+  if (!cleanBase || !isSafeGithubRefInput(cleanBase)) {
+    return {};
+  }
+  const targets = Array.from(
+    new Set(
+      branchNames
+        .map((n) => n.trim())
+        .filter((n) => n && n !== cleanBase && isSafeGithubRefInput(n)),
+    ),
+  ).slice(0, 12);
+  if (targets.length === 0) return {};
+
+  const apiBase = getGithubApiBase(apiBaseOverride);
+  const encodedOwner = encodeURIComponent(parsed.owner);
+  const encodedName = encodeURIComponent(parsed.name);
+  const encodedBase = encodeGithubRefPath(cleanBase);
+  const results: Record<string, GithubBranchCompareStatus> = {};
+
+  let cursor = 0;
+  const workerCount = Math.min(4, targets.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (cursor < targets.length) {
+        const idx = cursor;
+        cursor += 1;
+        const branch = targets[idx];
+        try {
+          const res = await githubRequest<RawGithubCompare>(
+            token,
+            `/repos/${encodedOwner}/${encodedName}/compare/${encodedBase}...${encodeGithubRefPath(branch)}`,
+            apiBase,
+          );
+          if (!res.ok || !res.data) continue;
+          const rawStatus = res.data.status;
+          const status: GithubBranchCompareStatus["status"] =
+            rawStatus === "ahead" ||
+            rawStatus === "behind" ||
+            rawStatus === "diverged" ||
+            rawStatus === "identical"
+              ? rawStatus
+              : "identical";
+          results[branch] = {
+            ahead_by:
+              typeof res.data.ahead_by === "number" && Number.isFinite(res.data.ahead_by)
+                ? Math.max(0, res.data.ahead_by)
+                : 0,
+            behind_by:
+              typeof res.data.behind_by === "number" && Number.isFinite(res.data.behind_by)
+                ? Math.max(0, res.data.behind_by)
+                : 0,
+            status,
+          };
+        } catch {
+          // Per-branch compare failure should not fail the overview
+        }
+      }
+    }),
+  );
+
+  return results;
+}
+
+export async function fetchGithubBranchMergeStatusesAcrossConnections(
+  connections: StoredGithubConnection[],
+  repo: string,
+  baseBranch: string,
+  branchNames: ReadonlyArray<string>,
+  apiBaseOverride?: string,
+): Promise<Record<string, GithubBranchCompareStatus>> {
+  return runAcrossOrderedConnections(
+    connections,
+    repo,
+    (token, fullName) =>
+      fetchGithubBranchMergeStatuses(token, fullName, baseBranch, branchNames, apiBaseOverride),
+    "所有已配置的 GitHub Key 均无法读取分支合并状态。",
+  );
+}
+
+export async function fetchGithubRepoCommitGraph(
+  token: string,
+  repo: string,
+  options: {
+    baseBranch: string;
+    branches: ReadonlyArray<{ name: string; sha: string; hasPr?: boolean }>;
+    limit?: number;
+  },
+  apiBaseOverride?: string,
+): Promise<RepoGitGraphPayload> {
+  const parsed = parseGithubRepoSlug(repo);
+  if (!parsed) {
+    throw new GithubError("无效的仓库格式，请使用 owner/repo。");
+  }
+  const limit = Math.min(Math.max(Math.floor(options.limit ?? 80), 20), 120);
+  const cleanBase = options.baseBranch.trim();
+  if (!cleanBase || !isSafeGithubRefInput(cleanBase)) {
+    return {
+      repo: parsed.fullName,
+      source: "remote",
+      base_branch: cleanBase,
+      base_first_parent_shas: [],
+      commits: [],
+      truncated: false,
+      fetched_at: new Date().toISOString(),
+    };
+  }
+
+  const apiBase = getGithubApiBase(apiBaseOverride);
+  const encodedOwner = encodeURIComponent(parsed.owner);
+  const encodedName = encodeURIComponent(parsed.name);
+
+  const commitMap = new Map<
+    string,
+    {
+      sha: string;
+      short_sha: string;
+      parents: string[];
+      message: string;
+      author_name: string;
+      author_login?: string;
+      date: string;
+      html_url: string;
+    }
+  >();
+
+  const collectCommits = (rawList: RawGithubCommit[] | null) => {
+    if (!Array.isArray(rawList)) return;
+    for (const raw of rawList) {
+      if (!raw || typeof raw.sha !== "string" || !raw.sha.trim()) continue;
+      const sha = raw.sha.trim();
+      const parents = Array.isArray(raw.parents)
+        ? raw.parents
+            .map((p) => (typeof p?.sha === "string" ? p.sha.trim() : ""))
+            .filter(Boolean)
+            .slice(0, 16)
+        : [];
+      const fullMsg = typeof raw.commit?.message === "string" ? raw.commit.message.trim() : "";
+      const firstLine = fullMsg.split(/\r?\n/, 1)[0]?.trim() ?? "";
+      const authorLogin =
+        typeof raw.author?.login === "string" && raw.author.login.trim()
+          ? raw.author.login.trim()
+          : undefined;
+      const authorName =
+        (typeof raw.commit?.author?.name === "string" && raw.commit.author.name.trim()) ||
+        authorLogin ||
+        "";
+      const date =
+        (typeof raw.commit?.author?.date === "string" && raw.commit.author.date) ||
+        (typeof raw.commit?.committer?.date === "string" && raw.commit.committer.date) ||
+        "";
+      const htmlUrl = normalizeGithubWebUrl(
+        raw.html_url,
+        `https://github.com/${parsed.fullName}/commit/${sha}`,
+      );
+      if (!commitMap.has(sha)) {
+        commitMap.set(sha, {
+          sha,
+          short_sha: sha.slice(0, 7),
+          parents,
+          message: firstLine || sha.slice(0, 7),
+          author_name: authorName,
+          ...(authorLogin ? { author_login: authorLogin } : {}),
+          date,
+          html_url: htmlUrl,
+        });
+      }
+    }
+  };
+
+  const baseLimit = Math.min(limit, 40);
+  const baseRes = await githubRequest<RawGithubCommit[]>(
+    token,
+    `/repos/${encodedOwner}/${encodedName}/commits?sha=${encodeURIComponent(cleanBase)}&per_page=${baseLimit}`,
+    apiBase,
+  );
+  if (!baseRes.ok) {
+    throwGithubHttpError(baseRes.status);
+  }
+  collectCommits(baseRes.data);
+  const baseTopSha =
+    options.branches.find((b) => b.name === cleanBase)?.sha ||
+    (Array.isArray(baseRes.data) && typeof baseRes.data[0]?.sha === "string"
+      ? baseRes.data[0].sha.trim()
+      : "");
+
+  // Pick up to 6 non-base branches (preferring PRs and commits not already on base)
+  const branchCandidates = options.branches
+    .filter((b) => b.name !== cleanBase && isSafeGithubRefInput(b.name))
+    .sort((a, b) => {
+      if (Boolean(a.hasPr) !== Boolean(b.hasPr)) return a.hasPr ? -1 : 1;
+      const aMissing = a.sha && !commitMap.has(a.sha);
+      const bMissing = b.sha && !commitMap.has(b.sha);
+      if (aMissing !== bMissing) return aMissing ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    })
+    .slice(0, 6);
+
+  await Promise.all(
+    branchCandidates.map(async (b) => {
+      try {
+        const res = await githubRequest<RawGithubCommit[]>(
+          token,
+          `/repos/${encodedOwner}/${encodedName}/commits?sha=${encodeURIComponent(b.name)}&per_page=12`,
+          apiBase,
+        );
+        if (res.ok) collectCommits(res.data);
+      } catch {
+        // Ignore single branch fetch errors
+      }
+    }),
+  );
+
+  // Pull up to 5 missing second-parent subtrees from recent merge commits so branch merges draw cleanly
+  const mergeSecondParents: string[] = [];
+  for (const commit of commitMap.values()) {
+    if (commit.parents.length < 2) continue;
+    for (const pSha of commit.parents.slice(1)) {
+      if (!commitMap.has(pSha) && !mergeSecondParents.includes(pSha)) {
+        mergeSecondParents.push(pSha);
+        if (mergeSecondParents.length >= 5) break;
+      }
+    }
+    if (mergeSecondParents.length >= 5) break;
+  }
+
+  await Promise.all(
+    mergeSecondParents.map(async (sha) => {
+      try {
+        const res = await githubRequest<RawGithubCommit[]>(
+          token,
+          `/repos/${encodedOwner}/${encodedName}/commits?sha=${encodeURIComponent(sha)}&per_page=5`,
+          apiBase,
+        );
+        if (res.ok) collectCommits(res.data);
+      } catch {
+        // Ignore missing second-parent lookup failures
+      }
+    }),
+  );
+
+  // Build first-parent spine starting from baseTopSha
+  const baseFirstParentShas: string[] = [];
+  const seenBase = new Set<string>();
+  let cursorSha = baseTopSha;
+  while (cursorSha && !seenBase.has(cursorSha) && commitMap.has(cursorSha)) {
+    seenBase.add(cursorSha);
+    baseFirstParentShas.push(cursorSha);
+    cursorSha = commitMap.get(cursorSha)?.parents[0] ?? "";
+  }
+
+  // Attach remote branch refs to matching commits
+  const refsBySha = new Map<string, RepoGitGraphRef[]>();
+  for (const b of options.branches) {
+    if (!b.sha || !commitMap.has(b.sha)) continue;
+    const list = refsBySha.get(b.sha) ?? [];
+    list.push({ name: b.name, kind: "remote" });
+    refsBySha.set(b.sha, list);
+  }
+
+  // Topological sort (child before parent) with date-descending tie-breaker
+  const inDegree = new Map<string, number>();
+  for (const sha of commitMap.keys()) inDegree.set(sha, 0);
+  for (const commit of commitMap.values()) {
+    for (const pSha of commit.parents) {
+      if (commitMap.has(pSha)) {
+        inDegree.set(pSha, (inDegree.get(pSha) ?? 0) + 1);
+      }
+    }
+  }
+
+  const cmpFrontier = (aSha: string, bSha: string) => {
+    const a = commitMap.get(aSha)!;
+    const b = commitMap.get(bSha)!;
+    if (a.date !== b.date) return b.date.localeCompare(a.date);
+    return aSha.localeCompare(bSha);
+  };
+
+  const frontier: string[] = [];
+  for (const [sha, deg] of inDegree.entries()) {
+    if (deg === 0) frontier.push(sha);
+  }
+  frontier.sort(cmpFrontier);
+
+  const orderedShas: string[] = [];
+  const emitted = new Set<string>();
+  while (frontier.length > 0 && orderedShas.length < limit) {
+    const sha = frontier.shift()!;
+    if (emitted.has(sha)) continue;
+    emitted.add(sha);
+    orderedShas.push(sha);
+    const commit = commitMap.get(sha)!;
+    let added = false;
+    for (const pSha of commit.parents) {
+      if (!commitMap.has(pSha) || emitted.has(pSha)) continue;
+      const nextDeg = (inDegree.get(pSha) ?? 0) - 1;
+      inDegree.set(pSha, nextDeg);
+      if (nextDeg <= 0) {
+        frontier.push(pSha);
+        added = true;
+      }
+    }
+    if (added) frontier.sort(cmpFrontier);
+  }
+
+  if (orderedShas.length < Math.min(limit, commitMap.size)) {
+    const rest = Array.from(commitMap.keys())
+      .filter((sha) => !emitted.has(sha))
+      .sort(cmpFrontier);
+    for (const sha of rest) {
+      if (orderedShas.length >= limit) break;
+      orderedShas.push(sha);
+    }
+  }
+
+  const commits: RepoGitGraphCommit[] = orderedShas.map((sha) => {
+    const c = commitMap.get(sha)!;
+    return {
+      sha: c.sha,
+      short_sha: c.short_sha,
+      parents: c.parents,
+      message: c.message,
+      author_name: c.author_name,
+      ...(c.author_login ? { author_login: c.author_login } : {}),
+      date: c.date,
+      html_url: c.html_url,
+      refs: refsBySha.get(sha) ?? [],
+    };
+  });
+
+  return {
+    repo: parsed.fullName,
+    source: "remote",
+    base_branch: cleanBase,
+    base_first_parent_shas: baseFirstParentShas,
+    commits,
+    truncated: commitMap.size > commits.length || (Array.isArray(baseRes.data) && baseRes.data.length >= baseLimit),
+    fetched_at: new Date().toISOString(),
+  };
+}
+
+export async function fetchGithubRepoCommitGraphAcrossConnections(
+  connections: StoredGithubConnection[],
+  repo: string,
+  options: {
+    baseBranch: string;
+    branches: ReadonlyArray<{ name: string; sha: string; hasPr?: boolean }>;
+    limit?: number;
+  },
+  apiBaseOverride?: string,
+): Promise<RepoGitGraphPayload> {
+  return runAcrossOrderedConnections(
+    connections,
+    repo,
+    (token, fullName) => fetchGithubRepoCommitGraph(token, fullName, options, apiBaseOverride),
+    "所有已配置的 GitHub Key 均无法读取提交拓扑。",
   );
 }
 
