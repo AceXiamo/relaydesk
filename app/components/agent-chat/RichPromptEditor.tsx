@@ -10,16 +10,26 @@ import {
 import {
   ZERO_WIDTH,
   ensureTextBoundaries,
+  formatRichLinePrefix,
   makeBlockId,
   parseMarkdownToBlocks,
+  parseRichLine,
   serializeBlocksToMarkdown,
+  serializeRichLine,
+  tokenizeInlineMarkdown,
   type EditorBlock,
+  type ParsedRichLine,
 } from "~/lib/chat-markdown.ts";
+import { isMobileComposerDevice, useIsMobileComposer } from "~/lib/mobile-input.ts";
 import { Icon } from "../Icon.tsx";
 
 export interface RichPromptEditorHandle {
   focus: () => void;
 }
+
+export type RichPromptSubmitMode = "enter" | "mod-enter" | "button-only";
+
+type InlineKind = "code" | "bold" | "italic" | "strike";
 
 const INLINE_CODE_CLASS =
   "inline-block align-baseline px-1.5 py-[0.5px] mx-[1px] rounded-[5px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] font-mono text-[12px] leading-[1.45] text-[var(--text-primary)]";
@@ -88,11 +98,55 @@ function isIgnorableEmptyNode(node: Node): boolean {
   return isSentinelBr(node);
 }
 
-function hasVisibleContentAfter(node: Node, root: HTMLElement): boolean {
-  const afterRange = document.createRange();
-  afterRange.selectNodeContents(root);
-  afterRange.setStartAfter(node);
-  const frag = afterRange.cloneContents();
+function getInlineElementKind(node: Node | null): InlineKind | null {
+  if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+  const el = node as HTMLElement;
+  if (el.tagName === "CODE" || el.dataset.inlineCode === "true") return "code";
+  if (el.tagName === "STRONG" || el.dataset.inlineBold === "true") return "bold";
+  if (el.tagName === "EM" || el.dataset.inlineItalic === "true") return "italic";
+  if (el.tagName === "DEL" || el.dataset.inlineStrike === "true") return "strike";
+  return null;
+}
+
+function isLineElement(node: Node | null): node is HTMLDivElement {
+  return (
+    node?.nodeType === Node.ELEMENT_NODE &&
+    (node as HTMLElement).tagName === "DIV" &&
+    (node as HTMLElement).dataset.rdLine === "true"
+  );
+}
+
+function getLineAncestor(node: Node | null, root: HTMLElement): HTMLDivElement | null {
+  let curr: Node | null = node;
+  while (curr && curr !== root) {
+    if (isLineElement(curr)) return curr;
+    curr = curr.parentNode;
+  }
+  return null;
+}
+
+function getInlineFormatAncestor(
+  node: Node | null,
+  root: HTMLElement,
+  onlyCode = false,
+): HTMLElement | null {
+  let curr: Node | null = node;
+  while (curr && curr !== root) {
+    if (isLineElement(curr)) break;
+    const kind = getInlineElementKind(curr);
+    if (kind && (!onlyCode || kind === "code")) {
+      return curr as HTMLElement;
+    }
+    curr = curr.parentNode;
+  }
+  return null;
+}
+
+function getInlineCodeAncestor(node: Node | null, root: HTMLElement): HTMLElement | null {
+  return getInlineFormatAncestor(node, root, true);
+}
+
+function hasVisibleContentInFragment(frag: Node): boolean {
   const walker = document.createTreeWalker(frag, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
   let curr: Node | null = walker.nextNode();
   while (curr) {
@@ -101,13 +155,37 @@ function hasVisibleContentAfter(node: Node, root: HTMLElement): boolean {
     } else if (curr.nodeType === Node.ELEMENT_NODE) {
       const el = curr as HTMLElement;
       if (el.tagName === "BR" && el.dataset.rdSentinel !== "true") return true;
-      if (el.tagName === "CODE" || el.dataset.inlineCode === "true") {
+      if (getInlineElementKind(el) !== null) {
         if ((el.textContent ?? "").replaceAll(ZERO_WIDTH, "").length > 0) return true;
       }
     }
     curr = walker.nextNode();
   }
   return false;
+}
+
+function lineHasVisibleContent(lineEl: HTMLElement): boolean {
+  const walker = document.createTreeWalker(lineEl, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  let curr: Node | null = walker.nextNode();
+  while (curr) {
+    if (curr.nodeType === Node.TEXT_NODE) {
+      if ((curr.textContent ?? "").replaceAll(ZERO_WIDTH, "").length > 0) return true;
+    } else if (curr.nodeType === Node.ELEMENT_NODE) {
+      const el = curr as HTMLElement;
+      if (getInlineElementKind(el) !== null) {
+        if ((el.textContent ?? "").replaceAll(ZERO_WIDTH, "").length > 0) return true;
+      }
+    }
+    curr = walker.nextNode();
+  }
+  return false;
+}
+
+function hasVisibleContentAfter(node: Node, root: HTMLElement): boolean {
+  const afterRange = document.createRange();
+  afterRange.selectNodeContents(root);
+  afterRange.setStartAfter(node);
+  return hasVisibleContentInFragment(afterRange.cloneContents());
 }
 
 function hasRealBrBefore(node: Node, root: HTMLElement): boolean {
@@ -132,20 +210,228 @@ function hasRealBrBefore(node: Node, root: HTMLElement): boolean {
 }
 
 function cleanupStaleSentinels(root: HTMLElement): void {
+  const lineEls = Array.from(root.querySelectorAll("div[data-rd-line='true']")) as HTMLElement[];
+  if (lineEls.length > 0) {
+    for (const lineEl of lineEls) {
+      if (lineHasVisibleContent(lineEl)) {
+        for (const s of Array.from(lineEl.querySelectorAll("br[data-rd-sentinel='true']"))) {
+          s.remove();
+        }
+      } else {
+        const brs = Array.from(lineEl.querySelectorAll("br"));
+        if (brs.length === 0) {
+          lineEl.appendChild(createSentinelBr());
+        } else {
+          brs[0]!.dataset.rdSentinel = "true";
+          for (let i = 1; i < brs.length; i += 1) {
+            brs[i]!.remove();
+          }
+        }
+      }
+    }
+  }
+
   const sentinels = Array.from(root.querySelectorAll("br[data-rd-sentinel='true']"));
   for (const s of sentinels) {
+    if (getLineAncestor(s, root)) continue;
     if (hasVisibleContentAfter(s, root) || !hasRealBrBefore(s, root)) {
       s.remove();
     }
   }
 }
 
-function createInlineCodeElement(text: string): HTMLElement {
-  const el = document.createElement("code");
-  el.setAttribute("data-inline-code", "true");
-  el.className = INLINE_CODE_CLASS;
+function createInlineElement(kind: InlineKind, text: string): HTMLElement {
+  if (kind === "code") {
+    const el = document.createElement("code");
+    el.setAttribute("data-inline-code", "true");
+    el.className = INLINE_CODE_CLASS;
+    el.textContent = text;
+    return el;
+  }
+  if (kind === "bold") {
+    const el = document.createElement("strong");
+    el.setAttribute("data-inline-bold", "true");
+    el.className = "rd-ed-bold";
+    el.textContent = text;
+    return el;
+  }
+  if (kind === "italic") {
+    const el = document.createElement("em");
+    el.setAttribute("data-inline-italic", "true");
+    el.className = "rd-ed-italic";
+    el.textContent = text;
+    return el;
+  }
+  const el = document.createElement("del");
+  el.setAttribute("data-inline-strike", "true");
+  el.className = "rd-ed-strike";
   el.textContent = text;
   return el;
+}
+
+function applyLineBlockMeta(el: HTMLElement, meta: Omit<ParsedRichLine, "content">): void {
+  el.dataset.rdLine = "true";
+  el.dataset.rdBlock = meta.type;
+  delete el.dataset.rdDepth;
+  delete el.dataset.rdIndent;
+  delete el.dataset.rdBullet;
+  delete el.dataset.rdOrder;
+  delete el.dataset.rdStart;
+  delete el.dataset.rdChecked;
+  delete el.dataset.rdLevel;
+
+  switch (meta.type) {
+    case "quote": {
+      const depth = Math.min(3, Math.max(1, Math.trunc(meta.depth ?? 1)));
+      el.dataset.rdDepth = String(depth);
+      el.className = "rd-ed-line rd-ed-quote";
+      break;
+    }
+    case "ul": {
+      const indent = Math.min(3, Math.max(0, Math.trunc(meta.indent ?? 0)));
+      el.dataset.rdIndent = String(indent);
+      el.dataset.rdBullet = meta.bullet ?? "-";
+      el.className = "rd-ed-line rd-ed-li rd-ed-ul";
+      break;
+    }
+    case "ol": {
+      const indent = Math.min(3, Math.max(0, Math.trunc(meta.indent ?? 0)));
+      const order = Math.max(1, Math.trunc(meta.order ?? 1));
+      el.dataset.rdIndent = String(indent);
+      el.dataset.rdOrder = String(order);
+      el.className = "rd-ed-line rd-ed-li rd-ed-ol";
+      break;
+    }
+    case "task": {
+      const indent = Math.min(3, Math.max(0, Math.trunc(meta.indent ?? 0)));
+      el.dataset.rdIndent = String(indent);
+      el.dataset.rdChecked = meta.checked ? "true" : "false";
+      el.className = "rd-ed-line rd-ed-li rd-ed-task";
+      break;
+    }
+    case "h": {
+      const level = Math.min(4, Math.max(1, Math.trunc(meta.level ?? 1)));
+      el.dataset.rdLevel = String(level);
+      el.className = `rd-ed-line rd-ed-h rd-ed-h${level}`;
+      break;
+    }
+    case "p":
+    default:
+      el.className = "rd-ed-line";
+      break;
+  }
+}
+
+function readLineBlockMeta(el: HTMLElement): Omit<ParsedRichLine, "content"> {
+  const type = el.dataset.rdBlock;
+  switch (type) {
+    case "quote":
+      return {
+        type: "quote",
+        depth: Math.min(3, Math.max(1, Number.parseInt(el.dataset.rdDepth || "1", 10) || 1)),
+      };
+    case "ul":
+      return {
+        type: "ul",
+        indent: Math.min(3, Math.max(0, Number.parseInt(el.dataset.rdIndent || "0", 10) || 0)),
+        bullet: (el.dataset.rdBullet as "-" | "*" | "+") || "-",
+      };
+    case "ol":
+      return {
+        type: "ol",
+        indent: Math.min(3, Math.max(0, Number.parseInt(el.dataset.rdIndent || "0", 10) || 0)),
+        order: Math.max(1, Number.parseInt(el.dataset.rdOrder || "1", 10) || 1),
+      };
+    case "task":
+      return {
+        type: "task",
+        indent: Math.min(3, Math.max(0, Number.parseInt(el.dataset.rdIndent || "0", 10) || 0)),
+        checked: el.dataset.rdChecked === "true",
+      };
+    case "h":
+      return {
+        type: "h",
+        level: Math.min(4, Math.max(1, Number.parseInt(el.dataset.rdLevel || "1", 10) || 1)),
+      };
+    default:
+      return { type: "p" };
+  }
+}
+
+function appendInlineNodes(parent: Node, content: string): Node | null {
+  if (!content) return null;
+  const tokens = tokenizeInlineMarkdown(content);
+  let lastNode: Node | null = null;
+  for (const tok of tokens) {
+    if (tok.type === "text") {
+      const tn = document.createTextNode(tok.text);
+      parent.appendChild(tn);
+      lastNode = tn;
+    } else {
+      const el = createInlineElement(tok.type, tok.text);
+      parent.appendChild(el);
+      lastNode = el;
+    }
+  }
+  if (tokens.length > 0 && tokens[tokens.length - 1]!.type !== "text") {
+    const z = document.createTextNode(ZERO_WIDTH);
+    parent.appendChild(z);
+    lastNode = z;
+  }
+  return lastNode;
+}
+
+function createLineElement(parsed: ParsedRichLine): HTMLDivElement {
+  const lineEl = document.createElement("div");
+  applyLineBlockMeta(lineEl, parsed);
+  if (parsed.content) {
+    appendInlineNodes(lineEl, parsed.content);
+  }
+  if (!lineHasVisibleContent(lineEl)) {
+    lineEl.innerHTML = "";
+    lineEl.appendChild(createSentinelBr());
+  }
+  return lineEl;
+}
+
+function renumberOrderedLists(root: HTMLElement): void {
+  const counters = new Map<number, number>();
+  for (const child of Array.from(root.children)) {
+    if (!isLineElement(child)) {
+      counters.clear();
+      continue;
+    }
+    const block = child.dataset.rdBlock;
+    if (block === "ol") {
+      const indent = Math.min(3, Math.max(0, Number.parseInt(child.dataset.rdIndent || "0", 10) || 0));
+      for (const k of Array.from(counters.keys())) {
+        if (k > indent) counters.delete(k);
+      }
+      const prev = counters.get(indent);
+      let nextOrder: number;
+      if (prev !== undefined) {
+        nextOrder = prev + 1;
+        delete child.dataset.rdStart;
+      } else {
+        nextOrder = child.dataset.rdStart
+          ? Math.max(1, Number.parseInt(child.dataset.rdStart, 10) || 1)
+          : 1;
+      }
+      counters.set(indent, nextOrder);
+      if (child.dataset.rdOrder !== String(nextOrder)) {
+        child.dataset.rdOrder = String(nextOrder);
+      }
+    } else if (block === "ul" || block === "task") {
+      const indent = Math.min(3, Math.max(0, Number.parseInt(child.dataset.rdIndent || "0", 10) || 0));
+      for (const k of Array.from(counters.keys())) {
+        if (k >= indent) counters.delete(k);
+      }
+    } else if (block === "p" && !lineHasVisibleContent(child)) {
+      // Blank line preserves loose ordered list numbering
+    } else {
+      counters.clear();
+    }
+  }
 }
 
 function renderInlineMarkdownToDom(container: HTMLElement, text: string): void {
@@ -153,66 +439,157 @@ function renderInlineMarkdownToDom(container: HTMLElement, text: string): void {
   if (!text) return;
   const lines = text.split("\n");
   const frag = document.createDocumentFragment();
-  const inlineRe = /`([^`\n]+)`/g;
+  const inRunByIndent = new Set<number>();
 
-  lines.forEach((line, lineIdx) => {
-    if (lineIdx > 0) {
-      frag.appendChild(document.createElement("br"));
-    }
-    let last = 0;
-    let m: RegExpExecArray | null;
-    inlineRe.lastIndex = 0;
-    while ((m = inlineRe.exec(line)) !== null) {
-      if (m.index > last) {
-        frag.appendChild(document.createTextNode(line.slice(last, m.index)));
+  for (const rawLine of lines) {
+    const parsed = parseRichLine(rawLine);
+    const lineEl = createLineElement(parsed);
+    if (parsed.type === "ol") {
+      const indent = parsed.indent ?? 0;
+      for (const k of Array.from(inRunByIndent)) {
+        if (k > indent) inRunByIndent.delete(k);
       }
-      frag.appendChild(createInlineCodeElement(m[1] ?? ""));
-      last = inlineRe.lastIndex;
+      if (!inRunByIndent.has(indent)) {
+        if ((parsed.order ?? 1) > 1) {
+          lineEl.dataset.rdStart = String(parsed.order);
+        }
+        inRunByIndent.add(indent);
+      }
+    } else if (parsed.type === "ul" || parsed.type === "task") {
+      const indent = parsed.indent ?? 0;
+      for (const k of Array.from(inRunByIndent)) {
+        if (k >= indent) inRunByIndent.delete(k);
+      }
+    } else if (parsed.type === "p" && !parsed.content.trim()) {
+      // Loose list blank separator
+    } else {
+      inRunByIndent.clear();
     }
-    if (last < line.length) {
-      frag.appendChild(document.createTextNode(line.slice(last)));
-    } else if (last > 0) {
-      frag.appendChild(document.createTextNode(ZERO_WIDTH));
-    }
-  });
-
-  if (text.endsWith("\n")) {
-    frag.appendChild(createSentinelBr());
+    frag.appendChild(lineEl);
   }
   container.appendChild(frag);
+  renumberOrderedLists(container);
+}
+
+function serializeInlineNode(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return (node.textContent ?? "").replaceAll(ZERO_WIDTH, "").replace(/\u00A0/g, " ");
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+  const el = node as HTMLElement;
+  const tag = el.tagName;
+  if (tag === "BR") {
+    return el.dataset.rdSentinel === "true" ? "" : "\n";
+  }
+  const kind = getInlineElementKind(el);
+  if (kind) {
+    const inner = (el.textContent ?? "")
+      .replaceAll(ZERO_WIDTH, "")
+      .replace(/\u00A0/g, " ")
+      .replace(/\n/g, " ");
+    if (!inner) return "";
+    if (kind === "code") return `\`${inner}\``;
+    if (kind === "bold") return `**${inner}**`;
+    if (kind === "italic") return `*${inner}*`;
+    return `~~${inner}~~`;
+  }
+  let out = "";
+  for (const child of Array.from(el.childNodes)) {
+    out += serializeInlineNode(child);
+  }
+  return out;
+}
+
+function serializeLineElement(lineEl: HTMLElement): string {
+  if (!lineHasVisibleContent(lineEl)) {
+    return formatRichLinePrefix(readLineBlockMeta(lineEl));
+  }
+  let content = "";
+  for (const child of Array.from(lineEl.childNodes)) {
+    if (
+      child.nodeType === Node.ELEMENT_NODE &&
+      (child as HTMLElement).tagName === "BR" &&
+      ((child as HTMLElement).dataset.rdSentinel === "true" || !hasVisibleContentAfter(child, lineEl))
+    ) {
+      continue;
+    }
+    content += serializeInlineNode(child);
+  }
+  return `${formatRichLinePrefix(readLineBlockMeta(lineEl))}${content}`;
 }
 
 function serializeDomToInlineMarkdown(container: HTMLElement): string {
-  const walk = (node: Node): string => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      return (node.textContent ?? "").replaceAll(ZERO_WIDTH, "");
+  const children = Array.from(container.childNodes);
+  if (children.length === 0) return "";
+
+  const lines: string[] = [];
+  let looseBuf = "";
+  let hasLoose = false;
+
+  const flushLoose = () => {
+    if (hasLoose) {
+      lines.push(looseBuf);
+      looseBuf = "";
+      hasLoose = false;
     }
-    if (node.nodeType !== Node.ELEMENT_NODE) return "";
-    const el = node as HTMLElement;
-    const tag = el.tagName;
-    if (tag === "BR") {
-      return el.dataset.rdSentinel === "true" ? "" : "\n";
-    }
-    if (tag === "CODE" || el.dataset.inlineCode === "true") {
-      const inner = (el.textContent ?? "").replaceAll(ZERO_WIDTH, "").replace(/\n/g, " ");
-      return inner ? `\`${inner}\`` : "";
-    }
-    let inner = "";
-    for (const child of Array.from(el.childNodes)) {
-      inner += walk(child);
-    }
-    if ((tag === "DIV" || tag === "P") && el !== container) {
-      return `\n${inner}`;
-    }
-    return inner;
   };
 
-  let out = "";
-  const children = Array.from(container.childNodes);
-  for (let i = 0; i < children.length; i += 1) {
-    out += walk(children[i]!);
+  for (const child of children) {
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      const el = child as HTMLElement;
+      if (el.tagName === "DIV" || el.tagName === "P") {
+        flushLoose();
+        if (isLineElement(el)) {
+          lines.push(serializeLineElement(el));
+        } else {
+          let inner = "";
+          for (const c of Array.from(el.childNodes)) {
+            if (
+              c.nodeType === Node.ELEMENT_NODE &&
+              (c as HTMLElement).tagName === "BR" &&
+              ((c as HTMLElement).dataset.rdSentinel === "true" || !hasVisibleContentAfter(c, el))
+            ) {
+              continue;
+            }
+            inner += serializeInlineNode(c);
+          }
+          lines.push(inner);
+        }
+        continue;
+      }
+    }
+    hasLoose = true;
+    looseBuf += serializeInlineNode(child);
   }
-  return out.replace(/^\n/, (m) => (children[0]?.nodeName === "DIV" ? "" : m));
+  flushLoose();
+  return lines.join("\n");
+}
+
+function serializeInlineRange(range: Range): string {
+  const span = document.createElement("span");
+  span.appendChild(range.cloneContents());
+  let out = "";
+  for (const child of Array.from(span.childNodes)) {
+    if (
+      child.nodeType === Node.ELEMENT_NODE &&
+      (child as HTMLElement).tagName === "BR" &&
+      ((child as HTMLElement).dataset.rdSentinel === "true" || !hasVisibleContentAfter(child, span))
+    ) {
+      continue;
+    }
+    out += serializeInlineNode(child);
+  }
+  return out;
+}
+
+function fragmentHasInlineElement(frag: DocumentFragment): boolean {
+  const walker = document.createTreeWalker(frag, NodeFilter.SHOW_ELEMENT);
+  let curr: Node | null = walker.nextNode();
+  while (curr) {
+    if (getInlineElementKind(curr) !== null) return true;
+    curr = walker.nextNode();
+  }
+  return false;
 }
 
 function setCaretAtEnd(el: HTMLElement): void {
@@ -229,45 +606,215 @@ function setCaretAtStart(el: HTMLElement): void {
   const sel = window.getSelection();
   if (!sel) return;
   const range = document.createRange();
-  range.selectNodeContents(el);
+  const firstChild = el.firstChild;
+  if (firstChild && isLineElement(firstChild)) {
+    if (firstChild.firstChild && firstChild.firstChild.nodeType === Node.TEXT_NODE) {
+      range.setStart(firstChild.firstChild, 0);
+    } else {
+      range.setStart(firstChild, 0);
+    }
+  } else {
+    range.selectNodeContents(el);
+  }
   range.collapse(true);
   sel.removeAllRanges();
   sel.addRange(range);
 }
 
-function getInlineCodeAncestor(node: Node | null, root: HTMLElement): HTMLElement | null {
-  let curr: Node | null = node;
-  while (curr && curr !== root) {
-    if (curr.nodeType === Node.ELEMENT_NODE) {
-      const el = curr as HTMLElement;
-      if (el.tagName === "CODE" || el.dataset.inlineCode === "true") {
-        return el;
+function setCaretAtStartOfLine(lineEl: HTMLElement): void {
+  const sel = window.getSelection();
+  if (!sel) return;
+  const range = document.createRange();
+  const first = lineEl.firstChild;
+  if (first && first.nodeType === Node.TEXT_NODE) {
+    range.setStart(first, 0);
+  } else {
+    range.setStart(lineEl, 0);
+  }
+  range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function setCaretAtLineCharOffset(lineEl: HTMLElement, targetOffset: number): void {
+  const sel = window.getSelection();
+  if (!sel) return;
+  const range = document.createRange();
+
+  if (!lineHasVisibleContent(lineEl) || targetOffset <= 0) {
+    const first = lineEl.firstChild;
+    if (first && first.nodeType === Node.TEXT_NODE) {
+      const text = first.textContent ?? "";
+      const pos = text === ZERO_WIDTH ? 1 : 0;
+      range.setStart(first, pos);
+    } else {
+      range.setStart(lineEl, 0);
+    }
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return;
+  }
+
+  let remaining = targetOffset;
+  const walker = document.createTreeWalker(lineEl, NodeFilter.SHOW_TEXT);
+  let curr: Node | null = walker.nextNode();
+  let lastText: Text | null = null;
+  while (curr) {
+    const tn = curr as Text;
+    lastText = tn;
+    let visibleCount = 0;
+    for (let i = 0; i < tn.data.length; i += 1) {
+      if (tn.data[i] === ZERO_WIDTH) continue;
+      visibleCount += 1;
+      if (visibleCount === remaining) {
+        range.setStart(tn, i + 1);
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        return;
       }
     }
-    curr = curr.parentNode;
+    remaining -= visibleCount;
+    curr = walker.nextNode();
   }
-  return null;
+
+  if (lastText) {
+    range.setStart(lastText, lastText.data.length);
+  } else {
+    range.selectNodeContents(lineEl);
+    range.collapse(false);
+  }
+  range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function serializeChildSlice(nodes: Node[]): string | null {
+  if (nodes.length === 0) return null;
+  const div = document.createElement("div");
+  for (const n of nodes) {
+    div.appendChild(n.cloneNode(true));
+  }
+  return serializeDomToInlineMarkdown(div);
 }
 
 function getMarkdownBeforeCaret(root: HTMLElement, range: Range): { before: string; after: string } {
-  const beforeRange = document.createRange();
-  beforeRange.selectNodeContents(root);
-  beforeRange.setEnd(range.startContainer, range.startOffset);
-  const beforeFrag = beforeRange.cloneContents();
-  const beforeDiv = document.createElement("div");
-  beforeDiv.appendChild(beforeFrag);
+  const startLine = getLineAncestor(range.startContainer, root);
+  const endLine = getLineAncestor(range.endContainer, root);
 
-  const afterRange = document.createRange();
-  afterRange.selectNodeContents(root);
-  afterRange.setStart(range.endContainer, range.endOffset);
-  const afterFrag = afterRange.cloneContents();
-  const afterDiv = document.createElement("div");
-  afterDiv.appendChild(afterFrag);
+  if (!startLine && !endLine) {
+    const beforeRange = document.createRange();
+    beforeRange.selectNodeContents(root);
+    beforeRange.setEnd(range.startContainer, range.startOffset);
+    const beforeDiv = document.createElement("div");
+    beforeDiv.appendChild(beforeRange.cloneContents());
 
-  return {
-    before: serializeDomToInlineMarkdown(beforeDiv),
-    after: serializeDomToInlineMarkdown(afterDiv),
-  };
+    const afterRange = document.createRange();
+    afterRange.selectNodeContents(root);
+    afterRange.setStart(range.endContainer, range.endOffset);
+    const afterDiv = document.createElement("div");
+    afterDiv.appendChild(afterRange.cloneContents());
+
+    return {
+      before: serializeDomToInlineMarkdown(beforeDiv),
+      after: serializeDomToInlineMarkdown(afterDiv),
+    };
+  }
+
+  const children = Array.from(root.childNodes);
+
+  let before = "";
+  if (startLine) {
+    const startIdx = children.indexOf(startLine);
+    const prefixStr = startIdx > 0 ? serializeChildSlice(children.slice(0, startIdx)) : null;
+    const inlineBeforeRange = document.createRange();
+    inlineBeforeRange.selectNodeContents(startLine);
+    inlineBeforeRange.setEnd(range.startContainer, range.startOffset);
+    const inlineBefore = serializeInlineRange(inlineBeforeRange);
+    const currLineBefore = serializeRichLine({
+      ...readLineBlockMeta(startLine),
+      content: inlineBefore,
+    });
+    before = prefixStr !== null ? `${prefixStr}\n${currLineBefore}` : currLineBefore;
+  } else {
+    const beforeRange = document.createRange();
+    beforeRange.selectNodeContents(root);
+    beforeRange.setEnd(range.startContainer, range.startOffset);
+    const beforeDiv = document.createElement("div");
+    beforeDiv.appendChild(beforeRange.cloneContents());
+    before = serializeDomToInlineMarkdown(beforeDiv);
+  }
+
+  let after = "";
+  if (endLine) {
+    const endIdx = children.indexOf(endLine);
+    const inlineAfterRange = document.createRange();
+    inlineAfterRange.selectNodeContents(endLine);
+    inlineAfterRange.setStart(range.endContainer, range.endOffset);
+    const inlineAfter = serializeInlineRange(inlineAfterRange);
+    const suffixStr =
+      endIdx >= 0 && endIdx < children.length - 1
+        ? serializeChildSlice(children.slice(endIdx + 1))
+        : null;
+    after = suffixStr !== null ? `${inlineAfter}\n${suffixStr}` : inlineAfter;
+  } else {
+    const afterRange = document.createRange();
+    afterRange.selectNodeContents(root);
+    afterRange.setStart(range.endContainer, range.endOffset);
+    const afterDiv = document.createElement("div");
+    afterDiv.appendChild(afterRange.cloneContents());
+    after = serializeDomToInlineMarkdown(afterDiv);
+  }
+
+  return { before, after };
+}
+
+function stripLeadingCharsFromLine(
+  lineEl: HTMLElement,
+  charCount: number,
+  caretOffsetAfterStrip: number,
+  sel: Selection,
+): void {
+  let remaining = charCount;
+  const walker = document.createTreeWalker(lineEl, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  let curr = walker.nextNode();
+  while (curr) {
+    textNodes.push(curr as Text);
+    curr = walker.nextNode();
+  }
+
+  for (const tn of textNodes) {
+    if (remaining <= 0) break;
+    let cutAt = 0;
+    while (cutAt < tn.data.length && remaining > 0) {
+      if (tn.data[cutAt] !== ZERO_WIDTH) {
+        remaining -= 1;
+      }
+      cutAt += 1;
+    }
+    tn.data = tn.data.slice(cutAt);
+    if (tn.data.replaceAll(ZERO_WIDTH, "").length === 0) {
+      tn.parentNode?.removeChild(tn);
+    }
+  }
+
+  if (!lineHasVisibleContent(lineEl)) {
+    lineEl.innerHTML = "";
+    lineEl.appendChild(createSentinelBr());
+    const nextRange = document.createRange();
+    nextRange.setStart(lineEl, 0);
+    nextRange.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(nextRange);
+    return;
+  }
+
+  for (const s of Array.from(lineEl.querySelectorAll("br[data-rd-sentinel='true']"))) {
+    s.remove();
+  }
+  setCaretAtLineCharOffset(lineEl, caretOffsetAfterStrip);
 }
 
 interface TextSegmentProps {
@@ -277,7 +824,8 @@ interface TextSegmentProps {
   showPlaceholder: boolean;
   placeholder: string;
   ariaLabel: string;
-  submitMode: "enter" | "mod-enter";
+  submitMode: RichPromptSubmitMode;
+  isMobileComposer: boolean;
   isFirst: boolean;
   isLast: boolean;
   hasCodeBlocks: boolean;
@@ -300,6 +848,7 @@ function TextSegment({
   placeholder,
   ariaLabel,
   submitMode,
+  isMobileComposer,
   isFirst,
   isLast,
   hasCodeBlocks,
@@ -333,12 +882,12 @@ function TextSegment({
     lastDomTextRef.current = text;
   }, [text]);
 
-  const tryAutoConvertInlineCode = useCallback((el: HTMLElement): boolean => {
+  const tryAutoConvertInlineMarkdown = useCallback((el: HTMLElement): boolean => {
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return false;
     const range = sel.getRangeAt(0);
     if (!el.contains(range.startContainer)) return false;
-    if (getInlineCodeAncestor(range.startContainer, el)) return false;
+    if (getInlineFormatAncestor(range.startContainer, el)) return false;
     if (range.startContainer.nodeType !== Node.TEXT_NODE) return false;
 
     const textNode = range.startContainer as Text;
@@ -347,13 +896,41 @@ function TextSegment({
     const beforeCaret = raw.slice(0, offset);
     const afterCaret = raw.slice(offset);
 
-    // Match `code` just closed by typing the second backtick, never matching `` or ```.
-    const match = /(^|[^`])`([^`\n]+)`$/.exec(beforeCaret);
-    if (!match) return false;
+    let kind: InlineKind | null = null;
+    let prefixKeep = "";
+    let innerText = "";
 
-    const prefixKeep = beforeCaret.slice(0, match.index + (match[1]?.length ?? 0));
-    const codeText = match[2] ?? "";
-    if (!codeText) return false;
+    const codeMatch = /(^|[^`])`([^`\n]+)`$/.exec(beforeCaret);
+    if (codeMatch && codeMatch[2]) {
+      kind = "code";
+      prefixKeep = beforeCaret.slice(0, codeMatch.index + (codeMatch[1]?.length ?? 0));
+      innerText = codeMatch[2];
+    } else {
+      const boldMatch = /\*\*([^\s*\n](?:[^*\n]*[^\s*\n])?)\*\*$/.exec(beforeCaret);
+      if (boldMatch && boldMatch[1]) {
+        kind = "bold";
+        prefixKeep = beforeCaret.slice(0, boldMatch.index);
+        innerText = boldMatch[1];
+      } else {
+        const strikeMatch = /~~([^\s~\n](?:[^~\n]*[^\s~\n])?)~~$/.exec(beforeCaret);
+        if (strikeMatch && strikeMatch[1]) {
+          kind = "strike";
+          prefixKeep = beforeCaret.slice(0, strikeMatch.index);
+          innerText = strikeMatch[1];
+        } else {
+          const italicMatch =
+            /(^|[^A-Za-z0-9_*])\*([^\s*\n](?:[^*\n]*[^\s*\n])?)\*$/.exec(beforeCaret);
+          const firstAfter = afterCaret.replaceAll(ZERO_WIDTH, "")[0] ?? "";
+          if (italicMatch && italicMatch[2] && !/[A-Za-z0-9_*]/.test(firstAfter)) {
+            kind = "italic";
+            prefixKeep = beforeCaret.slice(0, italicMatch.index + (italicMatch[1]?.length ?? 0));
+            innerText = italicMatch[2];
+          }
+        }
+      }
+    }
+
+    if (!kind || !innerText) return false;
 
     const parent = textNode.parentNode;
     if (!parent) return false;
@@ -362,8 +939,8 @@ function TextSegment({
     if (prefixKeep) {
       frag.appendChild(document.createTextNode(prefixKeep));
     }
-    const codeEl = createInlineCodeElement(codeText);
-    frag.appendChild(codeEl);
+    const inlineEl = createInlineElement(kind, innerText);
+    frag.appendChild(inlineEl);
 
     const trailingNode = document.createTextNode(afterCaret || ZERO_WIDTH);
     frag.appendChild(trailingNode);
@@ -376,6 +953,105 @@ function TextSegment({
     sel.removeAllRanges();
     sel.addRange(nextRange);
     return true;
+  }, []);
+
+  const tryAutoConvertLineBlock = useCallback((el: HTMLElement): boolean => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return false;
+    const range = sel.getRangeAt(0);
+    if (!el.contains(range.startContainer)) return false;
+    if (getInlineFormatAncestor(range.startContainer, el)) return false;
+
+    let lineEl = getLineAncestor(range.startContainer, el);
+    if (!lineEl) {
+      // Promote single loose line when user types a Markdown block prefix in an empty/plain editor
+      if (
+        el.querySelector("div[data-rd-line='true']") ||
+        el.querySelector("br:not([data-rd-sentinel='true'])")
+      ) {
+        return false;
+      }
+      const beforeR = document.createRange();
+      beforeR.selectNodeContents(el);
+      beforeR.setEnd(range.startContainer, range.startOffset);
+      const beforeFrag = beforeR.cloneContents();
+      if (fragmentHasInlineElement(beforeFrag)) return false;
+      const beforePlain = serializeInlineRange(beforeR).replaceAll(ZERO_WIDTH, "");
+      if (parseRichLine(beforePlain).type === "p") return false;
+
+      const wrapped = document.createElement("div");
+      applyLineBlockMeta(wrapped, { type: "p" });
+      const savedContainer = range.startContainer;
+      const savedOffset = range.startOffset;
+      while (el.firstChild) {
+        wrapped.appendChild(el.firstChild);
+      }
+      el.appendChild(wrapped);
+      const restored = document.createRange();
+      if (savedContainer === el) {
+        restored.setStart(wrapped, Math.min(savedOffset, wrapped.childNodes.length));
+      } else {
+        restored.setStart(savedContainer, savedOffset);
+      }
+      restored.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(restored);
+      lineEl = wrapped;
+    }
+
+    const activeRange = sel.getRangeAt(0);
+    const beforeRange = document.createRange();
+    beforeRange.selectNodeContents(lineEl);
+    beforeRange.setEnd(activeRange.startContainer, activeRange.startOffset);
+    const beforeFrag = beforeRange.cloneContents();
+    if (fragmentHasInlineElement(beforeFrag)) return false;
+
+    const beforePlain = serializeInlineRange(beforeRange).replaceAll(ZERO_WIDTH, "");
+    if (!beforePlain) return false;
+
+    const meta = readLineBlockMeta(lineEl);
+
+    if (meta.type === "p") {
+      const parsed = parseRichLine(beforePlain);
+      if (parsed.type === "p") return false;
+      const prefixLen = beforePlain.length - parsed.content.length;
+      applyLineBlockMeta(lineEl, parsed);
+      if (parsed.type === "ol" && (parsed.order ?? 1) > 1) {
+        lineEl.dataset.rdStart = String(parsed.order);
+      }
+      stripLeadingCharsFromLine(lineEl, prefixLen, parsed.content.length, sel);
+      renumberOrderedLists(el);
+      return true;
+    }
+
+    if (meta.type === "ul") {
+      const taskUpgrade = /^\[([ xX])\][ \u00A0](.*)$/.exec(beforePlain);
+      if (!taskUpgrade) return false;
+      const checked = (taskUpgrade[1] ?? "").toLowerCase() === "x";
+      const rest = taskUpgrade[2] ?? "";
+      const prefixLen = beforePlain.length - rest.length;
+      applyLineBlockMeta(lineEl, {
+        type: "task",
+        indent: meta.indent ?? 0,
+        checked,
+      });
+      stripLeadingCharsFromLine(lineEl, prefixLen, rest.length, sel);
+      return true;
+    }
+
+    if (meta.type === "quote" && (meta.depth ?? 1) < 3) {
+      const quoteUpgrade = /^((?:>[ \u00A0]?){0,1}>)[ \u00A0](.*)$/.exec(beforePlain);
+      if (!quoteUpgrade) return false;
+      const added = Math.max(1, (quoteUpgrade[1]?.match(/>/g) ?? []).length);
+      const nextDepth = Math.min(3, (meta.depth ?? 1) + added);
+      const rest = quoteUpgrade[2] ?? "";
+      const prefixLen = beforePlain.length - rest.length;
+      applyLineBlockMeta(lineEl, { type: "quote", depth: nextDepth });
+      stripLeadingCharsFromLine(lineEl, prefixLen, rest.length, sel);
+      return true;
+    }
+
+    return false;
   }, []);
 
   const tryAutoConvertCodeFence = useCallback(
@@ -402,58 +1078,194 @@ function TextSegment({
   const syncFromDom = useCallback(() => {
     const el = divRef.current;
     if (!el) return;
+    if (
+      !el.querySelector("div[data-rd-line='true']") &&
+      !hasVisibleContentInFragment(el) &&
+      el.querySelectorAll("br:not([data-rd-sentinel='true'])").length <= 1
+    ) {
+      el.innerHTML = "";
+    }
     cleanupStaleSentinels(el);
     if (!composingRef.current) {
       if (tryAutoConvertCodeFence(el)) return;
-      tryAutoConvertInlineCode(el);
+      tryAutoConvertLineBlock(el);
+      tryAutoConvertInlineMarkdown(el);
     }
-    // Remove empty inline code tags left behind by deleting all characters inside one.
-    for (const codeEl of Array.from(el.querySelectorAll("code[data-inline-code='true']"))) {
-      if (!(codeEl.textContent ?? "").replaceAll(ZERO_WIDTH, "")) {
-        codeEl.remove();
+    // Remove empty inline format tags left behind by deleting all characters inside one.
+    for (const inlineEl of Array.from(
+      el.querySelectorAll(
+        "code[data-inline-code='true'], strong[data-inline-bold='true'], em[data-inline-italic='true'], del[data-inline-strike='true']",
+      ),
+    )) {
+      if (!(inlineEl.textContent ?? "").replaceAll(ZERO_WIDTH, "")) {
+        inlineEl.remove();
       }
+    }
+    if (el.querySelector("div[data-rd-block='ol']")) {
+      renumberOrderedLists(el);
     }
     const serialized = serializeDomToInlineMarkdown(el);
     lastDomTextRef.current = serialized;
     onTextChange(id, serialized);
-  }, [id, onTextChange, tryAutoConvertCodeFence, tryAutoConvertInlineCode]);
+  }, [
+    id,
+    onTextChange,
+    tryAutoConvertCodeFence,
+    tryAutoConvertInlineMarkdown,
+    tryAutoConvertLineBlock,
+  ]);
 
   const insertLineBreak = useCallback(
     (el: HTMLElement, sel: Selection, range: Range) => {
-      const codeAncestor = getInlineCodeAncestor(range.startContainer, el);
-      if (codeAncestor) {
-        range.setStartAfter(codeAncestor);
-        range.collapse(true);
+      const inlineAncestor = getInlineFormatAncestor(range.startContainer, el);
+      if (inlineAncestor) {
+        const isCode = getInlineElementKind(inlineAncestor) === "code";
+        const atEnd = (() => {
+          const test = document.createRange();
+          test.selectNodeContents(inlineAncestor);
+          test.setStart(range.endContainer, range.endOffset);
+          return test.toString().replaceAll(ZERO_WIDTH, "").length === 0;
+        })();
+        if (isCode || atEnd) {
+          range.setStartAfter(inlineAncestor);
+          range.collapse(true);
+        } else {
+          range.deleteContents();
+        }
       } else {
         range.deleteContents();
       }
 
-      const br = document.createElement("br");
-      range.insertNode(br);
+      const lineEl = getLineAncestor(range.startContainer, el);
+      if (!lineEl) {
+        // Promote loose content into uniform line <div> elements before splitting
+        const { before, after } = getMarkdownBeforeCaret(el, range);
+        const beforeLines = before.split("\n");
+        const afterLines = after.split("\n");
+        const currBeforeRaw = beforeLines[beforeLines.length - 1] ?? "";
+        const currAfterRaw = afterLines[0] ?? "";
+        const currParsed = parseRichLine(currBeforeRaw);
 
-      if (!hasVisibleContentAfter(br, el)) {
-        // Strip empty trailing text nodes / old sentinels so caret sits reliably on the new empty line.
-        let sibling = br.nextSibling;
-        while (sibling) {
-          const next = sibling.nextSibling;
-          if (isIgnorableEmptyNode(sibling)) {
-            sibling.parentNode?.removeChild(sibling);
-          }
-          sibling = next;
+        el.innerHTML = "";
+        const frag = document.createDocumentFragment();
+        for (const l of beforeLines.slice(0, -1)) {
+          frag.appendChild(createLineElement(parseRichLine(l)));
         }
-        br.after(createSentinelBr());
+        const firstLineEl = createLineElement(currParsed);
+        frag.appendChild(firstLineEl);
+
+        const nextMeta: Omit<ParsedRichLine, "content"> =
+          currParsed.type === "ul"
+            ? { type: "ul", indent: currParsed.indent ?? 0, bullet: currParsed.bullet ?? "-" }
+            : currParsed.type === "task"
+              ? { type: "task", indent: currParsed.indent ?? 0, checked: false }
+              : currParsed.type === "ol"
+                ? { type: "ol", indent: currParsed.indent ?? 0, order: (currParsed.order ?? 1) + 1 }
+                : currParsed.type === "quote"
+                  ? { type: "quote", depth: currParsed.depth ?? 1 }
+                  : { type: "p" };
+        const newLineEl = createLineElement({ ...nextMeta, content: currAfterRaw });
+        frag.appendChild(newLineEl);
+
+        for (const l of afterLines.slice(1)) {
+          frag.appendChild(createLineElement(parseRichLine(l)));
+        }
+        el.appendChild(frag);
+        renumberOrderedLists(el);
+        setCaretAtStartOfLine(newLineEl);
+        newLineEl.scrollIntoView?.({ block: "nearest" });
+        syncFromDom();
+        return;
       }
 
-      const nextRange = document.createRange();
-      nextRange.setStartAfter(br);
-      nextRange.collapse(true);
-      sel.removeAllRanges();
-      sel.addRange(nextRange);
-      br.scrollIntoView?.({ block: "nearest" });
+      const beforeRange = document.createRange();
+      beforeRange.selectNodeContents(lineEl);
+      beforeRange.setEnd(range.startContainer, range.startOffset);
+      const inlineBefore = serializeInlineRange(beforeRange);
+
+      const afterRange = document.createRange();
+      afterRange.selectNodeContents(lineEl);
+      afterRange.setStart(range.endContainer, range.endOffset);
+      const inlineAfter = serializeInlineRange(afterRange);
+
+      const meta = readLineBlockMeta(lineEl);
+      const lineIsEmpty =
+        !inlineBefore.replaceAll(ZERO_WIDTH, "") && !inlineAfter.replaceAll(ZERO_WIDTH, "");
+
+      if (
+        lineIsEmpty &&
+        (meta.type === "ul" || meta.type === "ol" || meta.type === "task" || meta.type === "quote")
+      ) {
+        if (meta.type === "quote") {
+          if ((meta.depth ?? 1) > 1) {
+            applyLineBlockMeta(lineEl, { type: "quote", depth: (meta.depth ?? 1) - 1 });
+          } else {
+            applyLineBlockMeta(lineEl, { type: "p" });
+          }
+        } else if ((meta.indent ?? 0) > 0) {
+          applyLineBlockMeta(lineEl, {
+            ...meta,
+            indent: (meta.indent ?? 0) - 1,
+            ...(meta.type === "ol" ? { order: 1 } : {}),
+          });
+        } else {
+          applyLineBlockMeta(lineEl, { type: "p" });
+        }
+        lineEl.innerHTML = "";
+        lineEl.appendChild(createSentinelBr());
+        renumberOrderedLists(el);
+        setCaretAtStartOfLine(lineEl);
+        lineEl.scrollIntoView?.({ block: "nearest" });
+        syncFromDom();
+        return;
+      }
+
+      lineEl.innerHTML = "";
+      if (inlineBefore) {
+        appendInlineNodes(lineEl, inlineBefore);
+      }
+      if (!lineHasVisibleContent(lineEl)) {
+        lineEl.innerHTML = "";
+        lineEl.appendChild(createSentinelBr());
+      }
+
+      const nextMeta: Omit<ParsedRichLine, "content"> =
+        meta.type === "ul"
+          ? { type: "ul", indent: meta.indent ?? 0, bullet: meta.bullet ?? "-" }
+          : meta.type === "task"
+            ? { type: "task", indent: meta.indent ?? 0, checked: false }
+            : meta.type === "ol"
+              ? { type: "ol", indent: meta.indent ?? 0, order: (meta.order ?? 1) + 1 }
+              : meta.type === "quote"
+                ? { type: "quote", depth: meta.depth ?? 1 }
+                : { type: "p" };
+
+      const nextLineEl = createLineElement({ ...nextMeta, content: inlineAfter });
+      lineEl.after(nextLineEl);
+      renumberOrderedLists(el);
+      setCaretAtStartOfLine(nextLineEl);
+      nextLineEl.scrollIntoView?.({ block: "nearest" });
       syncFromDom();
     },
     [syncFromDom],
   );
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (disabled) return;
+    const el = divRef.current;
+    if (!el) return;
+    const lineEl = getLineAncestor(e.target as Node | null, el);
+    if (!lineEl || lineEl.dataset.rdBlock !== "task") return;
+
+    const rect = lineEl.getBoundingClientRect();
+    const indent = Math.min(3, Math.max(0, Number.parseInt(lineEl.dataset.rdIndent || "0", 10) || 0));
+    const hitboxRight = rect.left + 26 + indent * 18;
+    if (e.clientX <= hitboxRight) {
+      e.preventDefault();
+      lineEl.dataset.rdChecked = lineEl.dataset.rdChecked === "true" ? "false" : "true";
+      syncFromDom();
+    }
+  };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (disabled) return;
@@ -471,10 +1283,10 @@ function TextSegment({
     // 1. Wrap selected text with backtick -> inline code pill
     if (e.key === "`" && !e.metaKey && !e.ctrlKey && !e.altKey && range && !range.collapsed) {
       const selected = range.toString();
-      if (selected && !selected.includes("\n") && !getInlineCodeAncestor(range.startContainer, el)) {
+      if (selected && !selected.includes("\n") && !getInlineFormatAncestor(range.startContainer, el)) {
         e.preventDefault();
         range.deleteContents();
-        const codeEl = createInlineCodeElement(selected);
+        const codeEl = createInlineElement("code", selected);
         const spacer = document.createTextNode(ZERO_WIDTH);
         range.insertNode(spacer);
         range.insertNode(codeEl);
@@ -488,23 +1300,24 @@ function TextSegment({
       }
     }
 
-    // 2. Exit inline code smoothly with ArrowRight or closing backtick at end of <code>
+    // 2. Exit inline format elements cleanly with ArrowRight or closing backtick at end of <code>
     if (range && range.collapsed) {
-      const codeAncestor = getInlineCodeAncestor(range.startContainer, el);
-      if (codeAncestor) {
-        const atCodeEnd = (() => {
+      const inlineAncestor = getInlineFormatAncestor(range.startContainer, el);
+      if (inlineAncestor) {
+        const isCode = getInlineElementKind(inlineAncestor) === "code";
+        const atEnd = (() => {
           const test = document.createRange();
-          test.selectNodeContents(codeAncestor);
+          test.selectNodeContents(inlineAncestor);
           test.setStart(range.endContainer, range.endOffset);
           return test.toString().replaceAll(ZERO_WIDTH, "").length === 0;
         })();
 
-        if (atCodeEnd && (e.key === "ArrowRight" || e.key === "`")) {
+        if (atEnd && (e.key === "ArrowRight" || (isCode && e.key === "`"))) {
           e.preventDefault();
-          let nextSibling = codeAncestor.nextSibling;
+          let nextSibling = inlineAncestor.nextSibling;
           if (!nextSibling || nextSibling.nodeType !== Node.TEXT_NODE) {
             const z = document.createTextNode(ZERO_WIDTH);
-            codeAncestor.after(z);
+            inlineAncestor.after(z);
             nextSibling = z;
           }
           const nextRange = document.createRange();
@@ -537,7 +1350,129 @@ function TextSegment({
       }
     }
 
-    // 4. Arrow navigation into adjacent code blocks
+    // 4. Tab / Shift+Tab indentation inside list items
+    if (e.key === "Tab" && range && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const lineEl = getLineAncestor(range.startContainer, el);
+      if (lineEl) {
+        const meta = readLineBlockMeta(lineEl);
+        if (meta.type === "ul" || meta.type === "ol" || meta.type === "task") {
+          e.preventDefault();
+          const curIndent = meta.indent ?? 0;
+          const nextIndent = e.shiftKey ? Math.max(0, curIndent - 1) : Math.min(3, curIndent + 1);
+          if (nextIndent !== curIndent) {
+            applyLineBlockMeta(lineEl, {
+              ...meta,
+              indent: nextIndent,
+              ...(meta.type === "ol" ? { order: 1 } : {}),
+            });
+            renumberOrderedLists(el);
+            syncFromDom();
+          }
+          return;
+        }
+      }
+    }
+
+    // 5. Smart Backspace at line offset 0: outdent / unwrap formatted line or merge with previous line
+    if (e.key === "Backspace" && range && range.collapsed && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const lineEl = getLineAncestor(range.startContainer, el);
+      if (lineEl) {
+        const beforeRange = document.createRange();
+        beforeRange.selectNodeContents(lineEl);
+        beforeRange.setEnd(range.startContainer, range.startOffset);
+        const atLineStart = !hasVisibleContentInFragment(beforeRange.cloneContents());
+
+        if (atLineStart) {
+          const meta = readLineBlockMeta(lineEl);
+          if (meta.type === "quote") {
+            e.preventDefault();
+            if ((meta.depth ?? 1) > 1) {
+              applyLineBlockMeta(lineEl, { type: "quote", depth: (meta.depth ?? 1) - 1 });
+            } else {
+              applyLineBlockMeta(lineEl, { type: "p" });
+            }
+            setCaretAtStartOfLine(lineEl);
+            syncFromDom();
+            return;
+          }
+          if (meta.type === "ul" || meta.type === "ol" || meta.type === "task") {
+            e.preventDefault();
+            if ((meta.indent ?? 0) > 0) {
+              applyLineBlockMeta(lineEl, {
+                ...meta,
+                indent: (meta.indent ?? 0) - 1,
+                ...(meta.type === "ol" ? { order: 1 } : {}),
+              });
+            } else {
+              applyLineBlockMeta(lineEl, { type: "p" });
+            }
+            renumberOrderedLists(el);
+            setCaretAtStartOfLine(lineEl);
+            syncFromDom();
+            return;
+          }
+          if (meta.type === "h") {
+            e.preventDefault();
+            applyLineBlockMeta(lineEl, { type: "p" });
+            setCaretAtStartOfLine(lineEl);
+            syncFromDom();
+            return;
+          }
+          const prevEl = lineEl.previousElementSibling;
+          if (prevEl && isLineElement(prevEl)) {
+            e.preventDefault();
+            for (const s of Array.from(prevEl.querySelectorAll("br[data-rd-sentinel='true']"))) {
+              s.remove();
+            }
+            for (const s of Array.from(lineEl.querySelectorAll("br[data-rd-sentinel='true']"))) {
+              s.remove();
+            }
+            const prevWasEmpty = !lineHasVisibleContent(prevEl);
+            if (prevWasEmpty) {
+              prevEl.innerHTML = "";
+            }
+            const lastPrevChild = prevEl.lastChild;
+            while (lineEl.firstChild) {
+              const child = lineEl.firstChild;
+              if (isIgnorableEmptyNode(child) && !prevWasEmpty) {
+                lineEl.removeChild(child);
+                continue;
+              }
+              prevEl.appendChild(child);
+            }
+            lineEl.remove();
+
+            if (!lineHasVisibleContent(prevEl)) {
+              prevEl.innerHTML = "";
+              prevEl.appendChild(createSentinelBr());
+              setCaretAtStartOfLine(prevEl);
+            } else {
+              const nextRange = document.createRange();
+              if (lastPrevChild && lastPrevChild.nodeType === Node.TEXT_NODE) {
+                nextRange.setStart(lastPrevChild, (lastPrevChild as Text).data.length);
+              } else if (lastPrevChild) {
+                nextRange.setStartAfter(lastPrevChild);
+              } else {
+                const first = prevEl.firstChild;
+                if (first && first.nodeType === Node.TEXT_NODE) {
+                  nextRange.setStart(first, 0);
+                } else {
+                  nextRange.setStart(prevEl, 0);
+                }
+              }
+              nextRange.collapse(true);
+              sel!.removeAllRanges();
+              sel!.addRange(nextRange);
+            }
+            renumberOrderedLists(el);
+            syncFromDom();
+            return;
+          }
+        }
+      }
+    }
+
+    // 6. Arrow navigation into adjacent code blocks
     if (e.key === "ArrowUp" && !isFirst && range && range.collapsed) {
       const { before } = getMarkdownBeforeCaret(el, range);
       if (!before.includes("\n")) {
@@ -555,10 +1490,16 @@ function TextSegment({
       }
     }
 
-    // 5. Submit / newline behavior based on submitMode
+    // 7. Submit / newline behavior based on submitMode and mobile device detection
     if (e.key === "Enter") {
+      const effectiveSubmitMode: RichPromptSubmitMode =
+        submitMode === "button-only" || isMobileComposerDevice() ? "button-only" : submitMode;
       const shouldSubmit =
-        submitMode === "mod-enter" ? e.metaKey || e.ctrlKey : !e.shiftKey;
+        effectiveSubmitMode === "button-only"
+          ? false
+          : effectiveSubmitMode === "mod-enter"
+            ? e.metaKey || e.ctrlKey
+            : !e.shiftKey;
       if (!shouldSubmit) {
         e.preventDefault();
         if (sel && range) {
@@ -621,43 +1562,30 @@ function TextSegment({
       }
     }
 
-    if (el && range) {
-      range.deleteContents();
-      const normalized = plain.replace(/\r\n/g, "\n");
-      const lines = normalized.split("\n");
+    if (!el || !range) return;
+
+    range.deleteContents();
+    const normalized = plain.replace(/\r\n/g, "\n");
+    const pastedLines = normalized.split("\n");
+    const activeLine = getLineAncestor(range.startContainer, el);
+    const activeMeta = activeLine ? readLineBlockMeta(activeLine) : ({ type: "p" } as const);
+
+    const beforeCheckRange = document.createRange();
+    if (activeLine) {
+      beforeCheckRange.selectNodeContents(activeLine);
+    } else {
+      beforeCheckRange.selectNodeContents(el);
+    }
+    beforeCheckRange.setEnd(range.startContainer, range.startOffset);
+    const atEmptyLineStart = !hasVisibleContentInFragment(beforeCheckRange.cloneContents());
+
+    const shouldUseBlockPaste =
+      pastedLines.length > 1 ||
+      (activeMeta.type === "p" && atEmptyLineStart && parseRichLine(normalized).type !== "p");
+
+    if (!shouldUseBlockPaste) {
       const frag = document.createDocumentFragment();
-      const inlineRe = /`([^`\n]+)`/g;
-      let lastNode: Node | null = null;
-
-      lines.forEach((line, idx) => {
-        if (idx > 0) {
-          const br = document.createElement("br");
-          frag.appendChild(br);
-          lastNode = br;
-        }
-        let last = 0;
-        let m: RegExpExecArray | null;
-        inlineRe.lastIndex = 0;
-        while ((m = inlineRe.exec(line)) !== null) {
-          if (m.index > last) {
-            const tn = document.createTextNode(line.slice(last, m.index));
-            frag.appendChild(tn);
-            lastNode = tn;
-          }
-          const codeEl = createInlineCodeElement(m[1] ?? "");
-          frag.appendChild(codeEl);
-          const z = document.createTextNode(ZERO_WIDTH);
-          frag.appendChild(z);
-          lastNode = z;
-          last = inlineRe.lastIndex;
-        }
-        if (last < line.length) {
-          const tn = document.createTextNode(line.slice(last));
-          frag.appendChild(tn);
-          lastNode = tn;
-        }
-      });
-
+      const lastNode = appendInlineNodes(frag, normalized);
       range.insertNode(frag);
       if (lastNode) {
         const nextRange = document.createRange();
@@ -667,7 +1595,94 @@ function TextSegment({
         sel!.addRange(nextRange);
       }
       syncFromDom();
+      return;
     }
+
+    const { before, after } = getMarkdownBeforeCaret(el, range);
+    const beforeLines = before.split("\n");
+    const afterLines = after.split("\n");
+    const precedingLines = beforeLines.slice(0, -1);
+    const currBeforeRaw = beforeLines[beforeLines.length - 1] ?? "";
+    const currAfterInline = afterLines[0] ?? "";
+    const followingLines = afterLines.slice(1);
+
+    el.innerHTML = "";
+    const frag = document.createDocumentFragment();
+
+    for (const l of precedingLines) {
+      frag.appendChild(createLineElement(parseRichLine(l)));
+    }
+
+    let caretLineEl: HTMLDivElement;
+    let caretNode: Node | null = null;
+
+    if (pastedLines.length === 1) {
+      const pastedOne = pastedLines[0] ?? "";
+      const parsedBeforePaste = parseRichLine(currBeforeRaw + pastedOne);
+      const lineNode = createLineElement({
+        ...parsedBeforePaste,
+        content: parsedBeforePaste.content + currAfterInline,
+      });
+      if (currAfterInline) {
+        lineNode.innerHTML = "";
+        caretNode = appendInlineNodes(lineNode, parsedBeforePaste.content);
+        appendInlineNodes(lineNode, currAfterInline);
+        if (!lineHasVisibleContent(lineNode)) {
+          lineNode.innerHTML = "";
+          lineNode.appendChild(createSentinelBr());
+        }
+      }
+      caretLineEl = lineNode;
+      frag.appendChild(lineNode);
+    } else {
+      const firstLineRaw = currBeforeRaw
+        ? currBeforeRaw + (pastedLines[0] ?? "")
+        : (pastedLines[0] ?? "");
+      frag.appendChild(createLineElement(parseRichLine(firstLineRaw)));
+
+      for (let i = 1; i < pastedLines.length - 1; i += 1) {
+        frag.appendChild(createLineElement(parseRichLine(pastedLines[i] ?? "")));
+      }
+
+      const lastPastedRaw = pastedLines[pastedLines.length - 1] ?? "";
+      const lastParsed = parseRichLine(lastPastedRaw);
+      const lastLineNode = createLineElement(lastParsed);
+      if (currAfterInline) {
+        lastLineNode.innerHTML = "";
+        caretNode = appendInlineNodes(lastLineNode, lastParsed.content);
+        appendInlineNodes(lastLineNode, currAfterInline);
+        if (!lineHasVisibleContent(lastLineNode)) {
+          lastLineNode.innerHTML = "";
+          lastLineNode.appendChild(createSentinelBr());
+        }
+      }
+      caretLineEl = lastLineNode;
+      frag.appendChild(lastLineNode);
+    }
+
+    for (const l of followingLines) {
+      frag.appendChild(createLineElement(parseRichLine(l)));
+    }
+
+    el.appendChild(frag);
+    cleanupStaleSentinels(el);
+    renumberOrderedLists(el);
+
+    if (caretNode) {
+      const nextRange = document.createRange();
+      nextRange.setStartAfter(caretNode);
+      nextRange.collapse(true);
+      sel!.removeAllRanges();
+      sel!.addRange(nextRange);
+    } else if (!lineHasVisibleContent(caretLineEl)) {
+      setCaretAtStartOfLine(caretLineEl);
+    } else {
+      setCaretAtEnd(caretLineEl);
+    }
+
+    const serialized = serializeDomToInlineMarkdown(el);
+    lastDomTextRef.current = serialized;
+    onTextChange(id, serialized);
   };
 
   return (
@@ -685,10 +1700,12 @@ function TextSegment({
         role="textbox"
         aria-multiline="true"
         aria-label={ariaLabel}
+        enterKeyHint={submitMode === "enter" && !isMobileComposer ? "send" : "enter"}
         contentEditable={!disabled}
         suppressContentEditableWarning
         spellCheck={false}
         onInput={syncFromDom}
+        onMouseDown={handleMouseDown}
         onCompositionStart={() => {
           composingRef.current = true;
         }}
@@ -711,6 +1728,8 @@ interface CodeSegmentCardProps {
   lang: string;
   code: string;
   disabled: boolean;
+  submitMode: RichPromptSubmitMode;
+  isMobileComposer: boolean;
   onChange: (id: string, patch: { lang?: string; code?: string }) => void;
   onRemove: (id: string, unwrapToText?: boolean) => void;
   onExitBelow: (id: string) => void;
@@ -724,6 +1743,8 @@ function CodeSegmentCard({
   lang,
   code,
   disabled,
+  submitMode,
+  isMobileComposer,
   onChange,
   onRemove,
   onExitBelow,
@@ -754,8 +1775,14 @@ function CodeSegmentCard({
     if (disabled) return;
     const el = e.currentTarget;
 
-    // Cmd/Ctrl + Enter submits the message directly from inside a code block
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+    // Cmd/Ctrl + Enter submits the message directly from inside a code block (desktop only)
+    if (
+      e.key === "Enter" &&
+      (e.metaKey || e.ctrlKey) &&
+      !e.nativeEvent.isComposing &&
+      submitMode !== "button-only" &&
+      !isMobileComposerDevice()
+    ) {
       e.preventDefault();
       onSubmit();
       return;
@@ -842,9 +1869,11 @@ function CodeSegmentCard({
           </span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="hidden sm:inline text-[10.5px] text-[var(--text-muted)]">
-            Enter 换行 · ⌘↵ 发送
-          </span>
+          {!isMobileComposer && submitMode !== "button-only" && (
+            <span className="hidden sm:inline text-[10.5px] text-[var(--text-muted)]">
+              Enter 换行 · ⌘↵ 发送
+            </span>
+          )}
           <button
             type="button"
             disabled={disabled}
@@ -877,7 +1906,7 @@ interface RichPromptEditorProps {
   disabled?: boolean;
   placeholder: string;
   ariaLabel?: string;
-  submitMode?: "enter" | "mod-enter";
+  submitMode?: RichPromptSubmitMode;
   className?: string;
   onChange: (nextMarkdown: string) => void;
   onSubmit: () => void;
@@ -901,6 +1930,7 @@ export const RichPromptEditor = forwardRef<RichPromptEditorHandle, RichPromptEdi
     },
     ref,
   ) {
+    const isMobileComposer = useIsMobileComposer();
     const [blocks, setBlocks] = useState<EditorBlock[]>(() => parseMarkdownToBlocks(value));
     const blocksRef = useRef<EditorBlock[]>(blocks);
     blocksRef.current = blocks;
@@ -1124,6 +2154,7 @@ export const RichPromptEditor = forwardRef<RichPromptEditorHandle, RichPromptEdi
               placeholder={placeholder}
               ariaLabel={ariaLabel}
               submitMode={submitMode}
+              isMobileComposer={isMobileComposer}
               isFirst={idx === 0}
               isLast={idx === blocks.length - 1}
               hasCodeBlocks={hasCodeBlocks}
@@ -1144,6 +2175,8 @@ export const RichPromptEditor = forwardRef<RichPromptEditorHandle, RichPromptEdi
               lang={block.lang}
               code={block.code}
               disabled={disabled}
+              submitMode={submitMode}
+              isMobileComposer={isMobileComposer}
               onChange={handleCodeChange}
               onRemove={handleRemoveCode}
               onExitBelow={handleExitCodeBelow}

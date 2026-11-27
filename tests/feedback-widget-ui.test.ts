@@ -512,3 +512,70 @@ it("shows honest offline state and avoids calling diagnose when local node is of
   expect(requests.some((u) => u.includes("/diagnose"))).toBe(false);
   expect(root.textContent).toContain("离线");
 });
+
+it("disables Enter-to-send on mobile devices in widget composer while preserving desktop Enter submit", async () => {
+  const stubMedia = (isMobile: boolean) => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: isMobile && query.includes("max-width: 639.98px"),
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+  };
+
+  let diagnoseCalls = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.endsWith("/widget-config")) {
+        return Response.json({
+          project_name: "MobileDemo",
+          tracking_enabled: true,
+          agent_enabled: true,
+          agent_available: true,
+          upload_enabled: false,
+        });
+      }
+      if (url.endsWith("/widget-feedback/diagnose")) {
+        diagnoseCalls += 1;
+        return new Response('event: done\ndata: {"reply":"ok","outcome":"usage"}\n\n', {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      return Response.json({ tasks: [] });
+    }),
+  );
+
+  stubMedia(true);
+  const root = mount();
+  root.querySelector<HTMLButtonElement>('[data-action="toggle"]')!.click();
+  await vi.waitFor(() =>
+    expect(root.querySelector('[data-role="input"]')).not.toBeNull(),
+  );
+  const input = root.querySelector<HTMLTextAreaElement>('[data-role="input"]')!;
+  expect(input.getAttribute("enterkeyhint")).toBe("enter");
+
+  input.value = "移动端换行测试";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  const mobileEv = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+  input.dispatchEvent(mobileEv);
+  expect(mobileEv.defaultPrevented).toBe(false);
+  expect(diagnoseCalls).toBe(0);
+
+  // Switch to desktop media and verify Enter submits
+  stubMedia(false);
+  input.dispatchEvent(new Event("focus"));
+  expect(input.getAttribute("enterkeyhint")).toBe("send");
+  const desktopEv = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+  input.dispatchEvent(desktopEv);
+  expect(desktopEv.defaultPrevented).toBe(true);
+  await vi.waitFor(() => expect(diagnoseCalls).toBe(1));
+});

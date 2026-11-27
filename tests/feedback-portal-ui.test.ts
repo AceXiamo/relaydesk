@@ -1016,6 +1016,109 @@ describe("PortalFeedbackConversation UI", () => {
     expect(onAbortDiagnoseRun).toHaveBeenCalledWith(capturedRunId);
     window.localStorage.clear();
   });
+
+  it("allows Enter to submit on desktop and suppresses Enter-to-send on mobile devices", async () => {
+    const stubMedia = (isMobile: boolean) => {
+      vi.stubGlobal(
+        "matchMedia",
+        vi.fn((query: string) => ({
+          matches: isMobile && query.includes("max-width: 639.98px"),
+          media: query,
+          onchange: null,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        })),
+      );
+    };
+
+    try {
+      stubMedia(true);
+      const onDiagnose = vi.fn(async () => ({
+        reply: "收到",
+        outcome: "clarify" as const,
+      }));
+      await act(async () => {
+        root.render(
+          createElement(
+            ToastProvider,
+            null,
+            createElement(PortalFeedbackConversation, {
+              config: baseConfig,
+              stagedImages: [],
+              onUploadFiles: vi.fn(async () => {}),
+              onRemoveStagedImage: vi.fn(),
+              onClearStagedImages: vi.fn(),
+              onOpenLightbox: vi.fn(),
+              onDiagnose,
+              onCreateTask: vi.fn(),
+              onSwitchToManual: vi.fn(),
+              onPossibleAuthError: () => false,
+            }),
+          ),
+        );
+      });
+
+      const mobileInput = container.querySelector<HTMLTextAreaElement>(
+        '[data-testid="portal-agent-input"]',
+      )!;
+      expect(mobileInput.getAttribute("enterkeyhint")).toBe("enter");
+      await act(async () => {
+        setReactValue(mobileInput, "第一行");
+      });
+      await act(async () => {
+        mobileInput.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+      });
+      expect(onDiagnose).not.toHaveBeenCalled();
+
+      // Switch to desktop mode and verify Enter submits
+      stubMedia(false);
+      await act(async () => {
+        root.unmount();
+      });
+      root = createRoot(container);
+      await act(async () => {
+        root.render(
+          createElement(
+            ToastProvider,
+            null,
+            createElement(PortalFeedbackConversation, {
+              config: baseConfig,
+              stagedImages: [],
+              onUploadFiles: vi.fn(async () => {}),
+              onRemoveStagedImage: vi.fn(),
+              onClearStagedImages: vi.fn(),
+              onOpenLightbox: vi.fn(),
+              onDiagnose,
+              onCreateTask: vi.fn(),
+              onSwitchToManual: vi.fn(),
+              onPossibleAuthError: () => false,
+            }),
+          ),
+        );
+      });
+
+      const desktopInput = container.querySelector<HTMLTextAreaElement>(
+        '[data-testid="portal-agent-input"]',
+      )!;
+      expect(desktopInput.getAttribute("enterkeyhint")).toBe("send");
+      await act(async () => {
+        setReactValue(desktopInput, "桌面端提交");
+      });
+      await act(async () => {
+        desktopInput.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+      });
+      expect(onDiagnose).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("FeedbackAgentSettingsCard UI", () => {

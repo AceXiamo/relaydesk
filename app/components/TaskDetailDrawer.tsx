@@ -31,6 +31,7 @@ import {
   type SelectOption,
 } from "./ui.tsx";
 import { api, ClientApiError } from "~/lib/api.ts";
+import { useIsMobileComposer } from "~/lib/mobile-input.ts";
 import { resolveLocalTaskAgent } from "~/lib/model-catalog.ts";
 import {
   AUTHOR_LABELS,
@@ -279,6 +280,7 @@ export function TaskDetailDrawer({
   initialTab = "details",
 }: TaskDetailDrawerProps) {
   const toast = useToast();
+  const isMobileComposer = useIsMobileComposer();
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [editingReq, setEditingReq] = useState(false);
   const [reqEditTab, setReqEditTab] = useState<"write" | "preview">("write");
@@ -1813,18 +1815,18 @@ export function TaskDetailDrawer({
                               : "仅留存评论（不唤醒）"}
                           </span>
                         </button>
-                      ) : (
+                      ) : !isMobileComposer ? (
                         <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
                           <Kbd>⌘/Ctrl</Kbd>
                           <span>+</span>
                           <Kbd>Enter</Kbd>
                           <span>发送</span>
                         </span>
-                      )}
+                      ) : null}
                     </div>
 
                     <div className="flex items-center gap-2 ml-auto">
-                      {canReopenTask && (
+                      {canReopenTask && !isMobileComposer && (
                         <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)] mr-1">
                           <Kbd>⌘/Ctrl</Kbd>
                           <span>+</span>

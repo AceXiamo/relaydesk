@@ -12,6 +12,7 @@ import { MarkdownContent } from "./MarkdownContent.tsx";
 import { PortalThinkingTrace } from "./PortalThinkingTrace.tsx";
 import { Button, LivePulseDot, Switch, cn, useToast } from "./ui.tsx";
 import { formatRelativeTime } from "~/lib/format.ts";
+import { isMobileComposerDevice, useIsMobileComposer } from "~/lib/mobile-input.ts";
 import { PortalApiError } from "~/lib/portal-api.ts";
 import {
   clearPortalConversations,
@@ -1019,8 +1020,10 @@ export function PortalFeedbackConversation({
     }
   };
 
+  const isMobileComposer = useIsMobileComposer();
+
   const handleComposerKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !isMobileComposerDevice()) {
       e.preventDefault();
       void handleSend();
     }
@@ -1104,6 +1107,7 @@ export function PortalFeedbackConversation({
         <textarea
           ref={inputRef}
           data-testid="portal-agent-input"
+          enterKeyHint={isMobileComposer ? "enter" : "send"}
           rows={2}
           maxLength={DIAGNOSE_MAX_MESSAGE_CHARS}
           disabled={confirming}
@@ -1122,7 +1126,9 @@ export function PortalFeedbackConversation({
           }}
           placeholder={
             hasConversation
-              ? "继续补充细节或追问…（Enter 发送，Shift+Enter 换行）"
+              ? isMobileComposer
+                ? "继续补充细节或追问…（回车换行，点击按钮发送）"
+                : "继续补充细节或追问…（Enter 发送，Shift+Enter 换行）"
               : "描述你遇到的问题、操作步骤或使用疑问，支持直接粘贴截图…"
           }
           className="w-full resize-none bg-transparent px-3 pt-2 pb-1.5 text-[12.5px] leading-relaxed text-[var(--p-ink)] placeholder:text-[var(--p-ink-3)] focus:outline-none disabled:opacity-60"
@@ -1150,7 +1156,9 @@ export function PortalFeedbackConversation({
             <span className="hidden sm:inline text-[10.5px] text-[var(--p-ink-3)] truncate">
               {historyTrimmedHint
                 ? "已自动保留最近对话上下文"
-                : "Enter 发送 · Shift+Enter 换行"}
+                : isMobileComposer
+                  ? "回车换行 · 点击按钮发送"
+                  : "Enter 发送 · Shift+Enter 换行"}
             </span>
           </div>
 

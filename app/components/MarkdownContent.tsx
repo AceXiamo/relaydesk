@@ -59,8 +59,10 @@ export function hasMarkdownSyntax(text: string): boolean {
     /```/.test(text) ||
     /`[^`\n]+`/.test(text) ||
     /(^|\n)\s*([-*+]|\d+\.)\s+\S/.test(text) ||
-    /(^|\n)\s*>\s+\S/.test(text) ||
+    /(^|\n)\s*>+\s+\S/.test(text) ||
     /\*\*[^*\n]+\*\*|__[^_\n]+__/.test(text) ||
+    /~~[^\s~\n](?:[^~\n]*[^\s~\n])?~~/.test(text) ||
+    /(^|[^A-Za-z0-9_*])\*[^\s*\n](?:[^*\n]*[^\s*\n])?\*(?![A-Za-z0-9_*])/.test(text) ||
     /\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)/i.test(text) ||
     /!\[[^\]\n]*\]\(https?:\/\/[^)\s]+\)/i.test(text) ||
     /(^|\n)\|.+\|\s*\n\s*\|[\s:|-]+\|/.test(text)

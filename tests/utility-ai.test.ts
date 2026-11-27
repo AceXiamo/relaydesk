@@ -15,8 +15,11 @@ import {
 import { buildFallbackSessionTitle, sanitizeGeneratedTitle } from "../server/utility-ai.ts";
 import {
   parseMarkdownToBlocks,
+  parseRichLine,
   preserveSoftLineBreaks,
   serializeBlocksToMarkdown,
+  serializeRichLine,
+  tokenizeInlineMarkdown,
 } from "../app/lib/chat-markdown.ts";
 
 describe("utility AI global config & title helpers", () => {
@@ -102,9 +105,59 @@ describe("utility AI global config & title helpers", () => {
     expect(serializeBlocksToMarkdown(blocks)).toBe(md);
   });
 
-  it("preserves soft line breaks in prose without touching fenced code blocks", () => {
+  it("preserves soft line breaks in prose and consecutive quote lines without touching fenced code blocks", () => {
     const input = "第一行\n第二行\n```bash\necho a\necho b\n```";
     const out = preserveSoftLineBreaks(input);
     expect(out).toBe("第一行  \n第二行\n```bash\necho a\necho b\n```");
+
+    const quoteInput = "> 引用第一行\n> 引用第二行\n>\n>> 嵌套一\n>> 嵌套二";
+    expect(preserveSoftLineBreaks(quoteInput)).toBe(
+      "> 引用第一行  \n> 引用第二行\n>\n>> 嵌套一  \n>> 嵌套二",
+    );
+  });
+
+  it("parses, serializes, and tokenizes rich markdown lines and inline tokens", () => {
+    const lines = [
+      "# 一级标题",
+      "#### 四级标题",
+      "> 一级引用",
+      ">>\u00A0二级引用",
+      "- 无序列表",
+      "  * 缩进无序",
+      "3. 自定义编号",
+      "  1. 嵌套编号",
+      "- [ ] 待办",
+      "  - [x] 已完成",
+      "#tag",
+      ">= 10",
+    ];
+    const parsed = lines.map(parseRichLine);
+    expect(parsed[0]).toEqual({ type: "h", level: 1, content: "一级标题" });
+    expect(parsed[1]).toEqual({ type: "h", level: 4, content: "四级标题" });
+    expect(parsed[2]).toEqual({ type: "quote", depth: 1, content: "一级引用" });
+    expect(parsed[3]).toEqual({ type: "quote", depth: 2, content: "二级引用" });
+    expect(parsed[4]).toEqual({ type: "ul", indent: 0, bullet: "-", content: "无序列表" });
+    expect(parsed[5]).toEqual({ type: "ul", indent: 1, bullet: "*", content: "缩进无序" });
+    expect(parsed[6]).toEqual({ type: "ol", indent: 0, order: 3, content: "自定义编号" });
+    expect(parsed[7]).toEqual({ type: "ol", indent: 1, order: 1, content: "嵌套编号" });
+    expect(parsed[8]).toEqual({ type: "task", indent: 0, checked: false, content: "待办" });
+    expect(parsed[9]).toEqual({ type: "task", indent: 1, checked: true, content: "已完成" });
+    expect(parsed[10]).toEqual({ type: "p", content: "#tag" });
+    expect(parsed[11]).toEqual({ type: "p", content: ">= 10" });
+
+    expect(serializeRichLine(parsed[3]!)).toBe(">> 二级引用");
+    expect(serializeRichLine(parsed[9]!)).toBe("  - [x] 已完成");
+
+    expect(tokenizeInlineMarkdown("普通 `code` **bold** *italic* ~~del~~ 2*3*4")).toEqual([
+      { type: "text", text: "普通 " },
+      { type: "code", text: "code" },
+      { type: "text", text: " " },
+      { type: "bold", text: "bold" },
+      { type: "text", text: " " },
+      { type: "italic", text: "italic" },
+      { type: "text", text: " " },
+      { type: "strike", text: "del" },
+      { type: "text", text: " 2*3*4" },
+    ]);
   });
 });

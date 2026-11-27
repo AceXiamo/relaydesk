@@ -4,6 +4,7 @@ import { api } from "~/lib/api.ts";
 import { chatMessageContent, STOP_LABELS } from "~/lib/chat-content.ts";
 import { messagesWithTurn, type ProjectChatStreams } from "~/lib/chat-streams.ts";
 import { formatRelativeTime } from "~/lib/format.ts";
+import { useIsMobileComposer } from "~/lib/mobile-input.ts";
 import { effortLabels, resolveLocalTaskAgent } from "~/lib/model-catalog.ts";
 import { aggregateSessionSubagents } from "~/lib/subagents.ts";
 import type {
@@ -52,6 +53,7 @@ export function TaskAgentSessionPanel(props: Props) {
 
 function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTaskUpdated }: Props) {
   const toast = useToast();
+  const isMobileComposer = useIsMobileComposer();
   const [data, setData] = useState<SessionHistory>();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -755,7 +757,9 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                       : offlineTarget ? "本机节点离线。上线后可手动发送草稿。"
                       : savingConfig
                         ? "正在保存执行配置…"
-                        : "Enter 发送 · Shift+Enter 换行"}
+                        : isMobileComposer
+                          ? "回车换行 · 点击发送按钮发送"
+                          : "Enter 发送 · Shift+Enter 换行"}
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">

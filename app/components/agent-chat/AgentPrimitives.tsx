@@ -52,6 +52,7 @@ import {
 } from "../MotionPrimitives.tsx";
 import { Select, type SelectOption } from "../Select.tsx";
 import { LivePulseDot } from "../ui.tsx";
+import { isMobileComposerDevice } from "~/lib/mobile-input.ts";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./RichPromptEditor.tsx";
 
 export { PixelGridMatrix, SubagentDetailPanel, SubagentDock, type RichPromptEditorHandle };
@@ -1751,7 +1752,7 @@ export function PromptBar({
         setActiveIndex((i) => (i - 1 + filteredSlash.length) % filteredSlash.length);
         return true;
       }
-      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !isMobileComposerDevice()) {
         e.preventDefault();
         const chosen = filteredSlash[activeIndex % filteredSlash.length];
         if (chosen) pickSlash(chosen);

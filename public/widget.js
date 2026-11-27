@@ -36,6 +36,17 @@
   const MAX_CHARS = 2000;
   const MAX_ATTACHMENTS = 4;
   const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+  const MOBILE_COMPOSER_QUERY =
+    "(max-width: 639.98px), (hover: none) and (pointer: coarse)";
+  function isMobileComposerDevice() {
+    if (typeof window === "undefined") return false;
+    if (typeof window.matchMedia === "function") {
+      try {
+        return window.matchMedia(MOBILE_COMPOSER_QUERY).matches;
+      } catch {}
+    }
+    return window.innerWidth > 0 && window.innerWidth < 640;
+  }
   const KINDS = [
     { id: "功能异常", label: "功能异常", tone: "bug" },
     { id: "改进建议", label: "改进建议", tone: "idea" },
@@ -4454,8 +4465,14 @@
       }
     });
 
+    const syncInputEnterHint = () => {
+      inputEl.setAttribute("enterkeyhint", isMobileComposerDevice() ? "enter" : "send");
+    };
+    syncInputEnterHint();
+    inputEl.addEventListener("focus", syncInputEnterHint);
+
     inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !isMobileComposerDevice()) {
         e.preventDefault();
         if (!sendBtn.disabled) {
           void sendChatMessage();
