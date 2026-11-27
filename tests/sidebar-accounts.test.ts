@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  clampQuotaPercent,
   formatAccountPlan,
   formatResetFull,
   formatResetShort,
   formatWindowLabel,
+  getAccountHarnessLogo,
   getQuotaTone,
+  selectDualRingWindows,
 } from "../app/lib/sidebar-accounts.ts";
 import { sanitizeSidebarAccount } from "../server/sidebar-accounts.ts";
 
@@ -85,5 +88,64 @@ describe("sidebar account normalization and formatting", () => {
     expect(getQuotaTone(0)).toBe("critical");
     expect(getQuotaTone(null)).toBe("unknown");
     expect(getQuotaTone(undefined)).toBe("unknown");
+  });
+
+  it("clamps quota percentages cleanly without inventing defaults for non-finite values", () => {
+    expect(clampQuotaPercent(63.6)).toBe(64);
+    expect(clampQuotaPercent(-4)).toBe(0);
+    expect(clampQuotaPercent(120)).toBe(100);
+    expect(clampQuotaPercent(null)).toBeNull();
+    expect(clampQuotaPercent(undefined)).toBeNull();
+    expect(clampQuotaPercent(Number.NaN)).toBeNull();
+  });
+
+  it("resolves Harness logo paths by service name", () => {
+    expect(getAccountHarnessLogo("Codex")).toBe("/runtime-logos/codex.svg");
+    expect(getAccountHarnessLogo("openai")).toBe("/runtime-logos/codex.svg");
+    expect(getAccountHarnessLogo("Gemini")).toBe("/runtime-logos/agy.svg");
+    expect(getAccountHarnessLogo("agy")).toBe("/runtime-logos/agy.svg");
+    expect(getAccountHarnessLogo("Antigravity")).toBe("/runtime-logos/agy.svg");
+    expect(getAccountHarnessLogo("Claude")).toBe("/runtime-logos/claude.svg");
+    expect(getAccountHarnessLogo("anthropic")).toBe("/runtime-logos/claude.svg");
+    expect(getAccountHarnessLogo("Other")).toBeNull();
+  });
+
+  it("selects outer and inner dual-ring windows in ascending duration order", () => {
+    expect(selectDualRingWindows("Codex", [])).toEqual({ outer: null, inner: null });
+
+    const single = [{ label: "5h", remainingPercent: 72, resetsAt: null }];
+    expect(selectDualRingWindows("Codex", single)).toEqual({
+      outer: single[0],
+      inner: null,
+    });
+
+    const codexReversed = [
+      { label: "7d", remainingPercent: 84, resetsAt: null },
+      { label: "5h", remainingPercent: 60, resetsAt: null },
+    ];
+    expect(selectDualRingWindows("Codex", codexReversed)).toEqual({
+      outer: codexReversed[1],
+      inner: codexReversed[0],
+    });
+
+    const geminiReversed = [
+      { label: "Gemini weekly", remainingPercent: 90, resetsAt: null },
+      { label: "Gemini 5-hour", remainingPercent: 50, resetsAt: null },
+    ];
+    expect(selectDualRingWindows("Gemini", geminiReversed)).toEqual({
+      outer: geminiReversed[1],
+      inner: geminiReversed[0],
+    });
+
+    const multi = [
+      { label: "30d", remainingPercent: 95, resetsAt: null },
+      { label: "5h", remainingPercent: 40, resetsAt: null },
+      { label: "5h", remainingPercent: 18, resetsAt: null },
+      { label: "7d", remainingPercent: 65, resetsAt: null },
+    ];
+    expect(selectDualRingWindows("Codex", multi)).toEqual({
+      outer: multi[2],
+      inner: multi[1],
+    });
   });
 });

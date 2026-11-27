@@ -702,51 +702,6 @@ function ConsoleWorkspace() {
       />
 
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
-        {/* Desktop Collapsed Sidebar Expand Strip (non-chat views or empty project) */}
-        {sidebarCollapsed && !(view === "chat" && currentProject) && (
-          <div className="hidden lg:flex shrink-0 items-center justify-between px-4 h-10 border-b border-[var(--border-subtle)] bg-[var(--surface-sidebar)]/85">
-            <div className="flex items-center gap-2 min-w-0">
-              <button
-                type="button"
-                onClick={toggleSidebarCollapsed}
-                title="展开左侧导航栏 (⌘B)"
-                aria-label="展开左侧导航栏"
-                className="inline-flex items-center gap-1.5 h-7 px-2 rounded-md text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
-              >
-                <Icon name="panel-left-open" size={14} />
-                <span>展开侧边栏</span>
-              </button>
-              {currentProject && (
-                <>
-                  <span className="h-3.5 w-px bg-[var(--border-subtle)]" />
-                  <span className="text-[12px] font-medium text-[var(--text-muted)] truncate">
-                    {currentProject.name}
-                  </span>
-                </>
-              )}
-            </div>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => setCommandOpen(true)}
-                title="快速命令 (⌘K)"
-                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
-              >
-                <Icon name="search" size={14} />
-              </button>
-              <button
-                type="button"
-                onClick={toggleTheme}
-                title={dark ? "切换浅色主题" : "切换深色主题"}
-                aria-label={dark ? "切换浅色主题" : "切换深色主题"}
-                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
-              >
-                <MorphIcon name="moon" activeName="sun" active={dark} size={14} rotate />
-              </button>
-            </div>
-          </div>
-        )}
-
         {/* Mobile Top Bar */}
         <div className="lg:hidden shrink-0 rd-safe-pt border-b border-[var(--border-subtle)] bg-[var(--surface-sidebar)]">
           <div className="flex items-center justify-between gap-2 px-2 h-13">
@@ -844,8 +799,6 @@ function ConsoleWorkspace() {
             onOpenWorkspace={() => changeView("workspace")}
             onOpenCliSettings={openCliSettings}
             onOpenRoutingSettings={openRoutingSettings}
-            mainSidebarCollapsed={sidebarCollapsed}
-            onExpandMainSidebar={toggleSidebarCollapsed}
             onTaskCreated={(task) => {
               void refreshTasks();
               void openTaskDetail(task.id, false);

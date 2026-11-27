@@ -901,6 +901,12 @@
     overflow: hidden;
   }
 
+  .rd-sidebar-shell {
+    transition-property: width;
+    transition-duration: 260ms;
+    transition-timing-function: var(--ease-drawer);
+  }
+
   .rd-digit-in-up {
     animation: rd-digit-in-up 260ms var(--ease-out) both;
   }
@@ -1265,7 +1271,8 @@
     animation-delay: 0ms !important;
   }
 
-  .rd-collapse-grid {
+  .rd-collapse-grid,
+  .rd-sidebar-shell {
     transition-duration: 0.01ms !important;
   }
 

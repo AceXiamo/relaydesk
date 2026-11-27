@@ -60,8 +60,6 @@ interface CodexChatViewProps {
   onOpenCliSettings: () => void;
   onOpenRoutingSettings?: () => void;
   onTaskCreated: (task: TaskRecord) => void;
-  mainSidebarCollapsed?: boolean;
-  onExpandMainSidebar?: () => void;
 }
 
 interface EmptyChatScene {
@@ -125,8 +123,6 @@ export function CodexChatView({
   onOpenCliSettings,
   onOpenRoutingSettings,
   onTaskCreated,
-  mainSidebarCollapsed = false,
-  onExpandMainSidebar,
 }: CodexChatViewProps) {
   const toast = useToast();
   const projectId = project?.id ?? null;
@@ -155,7 +151,50 @@ export function CodexChatView({
   const [messagesLoading, setMessagesLoading] = useState(false);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sessionsMotionReady, setSessionsMotionReady] = useState(false);
+  const desktopSessionsInnerRef = useRef<HTMLDivElement>(null);
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
+
+  const setSessionsOpen = useCallback((nextOrUpdater: boolean | ((prev: boolean) => boolean)) => {
+    setSidebarOpen((prev) => {
+      const next = typeof nextOrUpdater === "function" ? nextOrUpdater(prev) : nextOrUpdater;
+      try {
+        localStorage.setItem("relaydesk.chat_sessions_open", next ? "1" : "0");
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("relaydesk.chat_sessions_open");
+      if (saved === "0") setSidebarOpen(false);
+    } catch {
+      // ignore storage errors
+    }
+    const raf = window.requestAnimationFrame(() => setSessionsMotionReady(true));
+    return () => window.cancelAnimationFrame(raf);
+  }, []);
+
+  useEffect(() => {
+    const node = desktopSessionsInnerRef.current;
+    if (!node) return;
+    if (!sidebarOpen) node.setAttribute("inert", "");
+    else node.removeAttribute("inert");
+  }, [sidebarOpen]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "\\") {
+        e.preventDefault();
+        setSessionsOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [setSessionsOpen]);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [titlingSessionId, setTitlingSessionId] = useState<string | null>(null);
@@ -847,17 +886,6 @@ export function CodexChatView({
     <>
       {/* Sidebar Header */}
       <div className={`px-2.5 pt-2.5 pb-2 flex items-center gap-1.5 ${isMobileOverlay ? "rd-safe-pt" : ""}`}>
-        {!isMobileOverlay && mainSidebarCollapsed && onExpandMainSidebar && (
-          <button
-            type="button"
-            title="展开主导航栏 (⌘B)"
-            aria-label="展开主导航栏"
-            onClick={onExpandMainSidebar}
-            className="hidden lg:inline-flex h-8 w-8 shrink-0 rounded-lg items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
-          >
-            <Icon name="panel-left-open" size={15} />
-          </button>
-        )}
         <button
           type="button"
           disabled={settingsBusy}
@@ -872,9 +900,9 @@ export function CodexChatView({
         </button>
         <button
           type="button"
-          title="收起会话列表"
+          title={isMobileOverlay ? "收起会话列表" : "收起会话列表 (⌘\\)"}
           aria-label="收起会话列表"
-          onClick={() => (isMobileOverlay ? setMobileSessionsOpen(false) : setSidebarOpen(false))}
+          onClick={() => (isMobileOverlay ? setMobileSessionsOpen(false) : setSessionsOpen(false))}
           className="h-9 w-9 lg:h-8 lg:w-8 rounded-lg inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors cursor-pointer"
         >
           <Icon name={isMobileOverlay ? "x" : "panel-left-close"} size={15} />
@@ -1081,11 +1109,19 @@ export function CodexChatView({
   return (
     <div className="flex-1 flex min-h-0 overflow-hidden bg-[var(--surface-canvas)] relative">
       {/* Desktop Left Sessions Sidebar */}
-      {sidebarOpen && (
-        <aside className="hidden lg:flex w-[256px] shrink-0 border-r border-[var(--border-subtle)] bg-[var(--surface-sidebar)] flex-col min-h-0">
+      <aside
+        aria-hidden={!sidebarOpen || undefined}
+        style={!sessionsMotionReady ? { transitionDuration: "0ms" } : undefined}
+        className={`hidden lg:flex shrink-0 flex-col min-h-0 overflow-hidden bg-[var(--surface-sidebar)] rd-sidebar-shell ${
+          sidebarOpen
+            ? "w-[256px] border-r border-[var(--border-subtle)]"
+            : "w-0 border-r-0 pointer-events-none"
+        }`}
+      >
+        <div ref={desktopSessionsInnerRef} className="w-[256px] h-full flex flex-col min-h-0">
           {renderSidebarInner(false)}
-        </aside>
-      )}
+        </div>
+      </aside>
 
       {/* Mobile Overlay Sessions Drawer (< lg, collapsed by default) */}
       {mobileSessionsOpen && (
@@ -1133,25 +1169,14 @@ export function CodexChatView({
             {/* Desktop (>= lg) collapsed sidebar expand controls */}
             {!sidebarOpen && (
               <div className="hidden lg:flex items-center gap-1 shrink-0">
-                {mainSidebarCollapsed && onExpandMainSidebar && (
-                  <button
-                    type="button"
-                    title="展开主导航栏 (⌘B)"
-                    aria-label="展开主导航栏"
-                    onClick={onExpandMainSidebar}
-                    className="inline-flex h-7 w-7 rounded-lg items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
-                  >
-                    <Icon name="panel-left-open" size={15} />
-                  </button>
-                )}
                 <button
                   type="button"
-                  title="展开会话列表"
+                  title="展开会话列表 (⌘\)"
                   aria-label="展开会话列表"
-                  onClick={() => setSidebarOpen(true)}
+                  onClick={() => setSessionsOpen(true)}
                   className="h-7 w-7 rounded-lg inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                 >
-                  <Icon name={mainSidebarCollapsed ? "messages-square" : "panel-left-open"} size={15} />
+                  <Icon name="panel-left-open" size={15} />
                 </button>
                 <button
                   type="button"

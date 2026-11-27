@@ -1,4 +1,73 @@
+import type { SidebarAccount } from "./types.ts";
+
 export type QuotaTone = "healthy" | "low" | "critical" | "unknown";
+
+export function clampQuotaPercent(value: number | null | undefined): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+export function getAccountHarnessLogo(service: string): string | null {
+  switch (service.trim().toLowerCase()) {
+    case "codex":
+    case "openai":
+      return "/runtime-logos/codex.svg";
+    case "gemini":
+    case "agy":
+    case "antigravity":
+      return "/runtime-logos/agy.svg";
+    case "claude":
+    case "anthropic":
+      return "/runtime-logos/claude.svg";
+    default:
+      return null;
+  }
+}
+
+function parseWindowDurationHours(service: string, rawLabel: string): number {
+  const short = formatWindowLabel(service, rawLabel).trim().toLowerCase();
+  const match = /^(\d+(?:\.\d+)?)\s*(m|h|d)$/.exec(short);
+  if (!match) return Number.POSITIVE_INFINITY;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount)) return Number.POSITIVE_INFINITY;
+  const unit = match[2];
+  if (unit === "m") return amount / 60;
+  if (unit === "h") return amount;
+  return amount * 24;
+}
+
+export function selectDualRingWindows(
+  service: string,
+  windows: SidebarAccount["windows"],
+): {
+  outer: SidebarAccount["windows"][number] | null;
+  inner: SidebarAccount["windows"][number] | null;
+} {
+  if (windows.length === 0) return { outer: null, inner: null };
+  if (windows.length === 1) return { outer: windows[0]!, inner: null };
+
+  const ranked = windows.map((window, index) => ({
+    window,
+    index,
+    durationHours: parseWindowDurationHours(service, window.label),
+    remaining: clampQuotaPercent(window.remainingPercent) ?? Number.POSITIVE_INFINITY,
+  }));
+
+  ranked.sort((a, b) => {
+    if (a.durationHours !== b.durationHours) {
+      return a.durationHours - b.durationHours;
+    }
+    if (windows.length > 2 && a.remaining !== b.remaining) {
+      return a.remaining - b.remaining;
+    }
+    return a.index - b.index;
+  });
+
+  return {
+    outer: ranked[0]?.window ?? null,
+    inner: ranked[1]?.window ?? null,
+  };
+}
 
 const KNOWN_PLAN_LABELS: Record<string, string> = {
   pro: "Pro",
