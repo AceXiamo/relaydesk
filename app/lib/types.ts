@@ -751,6 +751,7 @@ export interface ChatSessionRecord {
 }
 
 export interface ChatMessageRecord {
+  runtime?: ChatRuntime;
   id: string;
   session_id: string;
   role: "user" | "assistant" | "system";

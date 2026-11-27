@@ -89,6 +89,16 @@ describe("chat session routing storage", () => {
     expect(store.listChatSessions(project.id).map((row) => row.id)).toEqual([defaults.id]);
   });
 
+  it("preserves the original assistant runtime after switching harnesses", () => {
+    store = new Store(path);
+    const project = store.createProject({ name: "History", repo: "example/chat" });
+    const session = store.createChatSession(project.id, { runtime: "agy" });
+    store.addChatMessage(session.id, { role: "assistant", content: "Earlier reply" });
+    store.addChatMessage(session.id, { role: "assistant", content: "Agy reply", runtime: session.runtime });
+    store.updateChatSession(project.id, session.id, { runtime: "codex" });
+    expect(store.listChatMessages(project.id, session.id).map(message => message.runtime)).toEqual([undefined, "agy"]);
+  });
+
   it("persists Fast without breaking resume and resets it when leaving Codex", () => {
     store = new Store(path);
     const { id } = store.createProject({ name: "Fast", repo: "example/chat" });

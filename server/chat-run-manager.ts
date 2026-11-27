@@ -293,6 +293,7 @@ export class ChatRunManager {
         id: run.assistantMessageId,
         session_id: run.sessionId,
         role: "assistant",
+        runtime: run.session.runtime,
         content: run.content,
         events: Array.from(run.events.values()),
         attachments: [],
@@ -462,6 +463,7 @@ export class ChatRunManager {
       const assistantMsg = this.store.addChatMessage(sessionId, {
         id: createHash("sha256").update(`${sessionId}:${runId}`).digest("hex").slice(0, 32),
         role: "assistant",
+        runtime: current.runtime,
         content: "",
         events: [],
         status: "streaming",

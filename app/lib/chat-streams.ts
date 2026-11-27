@@ -344,7 +344,7 @@ export class ProjectChatStreams {
         run.registered = true;
         run.onAccepted?.();
         run.onAccepted = undefined;
-        update({ submitting: false, session: ev.session, user: ev.user_message, assistant: { ...assistant, id: ev.assistant_message_id } });
+        update({ submitting: false, session: ev.session, user: ev.user_message, assistant: { ...assistant, id: ev.assistant_message_id, runtime: ev.session.runtime } });
         run.retryStop?.();
         run.retryStop = undefined;
         break;

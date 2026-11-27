@@ -5,6 +5,8 @@ import { messagesWithTurn, type ProjectChatStreams, type TurnTrace } from "~/lib
 import { formatRelativeTime } from "~/lib/format.ts";
 import { aggregateSessionSubagents } from "~/lib/subagents.ts";
 import {
+  runtimeDisplayName,
+  runtimeShortName,
   chatTargetAvailability,
   fastSupportForTarget,
   resolveActiveLocalAgent,
@@ -1059,7 +1061,7 @@ export function CodexChatView({
                 tone={currentAuthMode === "unavailable" ? "zinc" : "emerald"}
                 active={currentAuthMode !== "unavailable"}
               />
-              {currentRuntime === "codex" ? "Codex CLI" : "Claude Code"}
+              {runtimeDisplayName(currentRuntime)}
             </span>
             <span className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
               <Icon name="settings" size={11} />
@@ -1303,7 +1305,7 @@ export function CodexChatView({
                       active={currentAuthMode !== "unavailable"}
                     />
                     <span className="font-medium">
-                      {currentRuntime === "codex" ? "Codex CLI" : "Claude Code"}
+                      {runtimeDisplayName(currentRuntime)}
                     </span>
                     {activeConfiguredModel && (
                       <span className="font-mono text-[11px] text-[var(--text-muted)]">
@@ -1488,6 +1490,8 @@ export function CodexChatView({
                     })),
                   ];
 
+                  const messageRuntime = msg.runtime ?? (isStreamingMsg ? currentRuntime : undefined);
+
                   // Editorial Borderless Assistant Turn
                   const followUps =
                     isLastMessage &&
@@ -1511,10 +1515,14 @@ export function CodexChatView({
                       {/* Minimal Turn Meta Header */}
                       <div className="flex items-center gap-2 mb-1.5">
                         <span className="w-5 h-5 rounded-md bg-[var(--surface-subtle)] border border-[var(--border-subtle)] inline-flex items-center justify-center text-[var(--text-secondary)]">
-                          <Icon name="sparkles" size={11} />
+                          {messageRuntime ? (
+                            <img src={`/runtime-logos/${messageRuntime}.svg`} width={14} height={14} alt="" />
+                          ) : (
+                            <Icon name="sparkles" size={11} />
+                          )}
                         </span>
                         <span className="text-[12px] font-semibold text-[var(--text-primary)]">
-                          {isStreamingMsg ? (currentRuntime === "codex" ? "Codex" : "Claude") : "助手"}
+                          {messageRuntime ? runtimeShortName(messageRuntime) : "助手"}
                         </span>
                         {isStreamingMsg && activeConfiguredModel && (
                           <span className="font-mono text-[10.5px] text-[var(--text-muted)]">

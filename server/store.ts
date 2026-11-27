@@ -1078,6 +1078,9 @@ export class Store {
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS tasks_project_deploy ON tasks(project_id, deploy_status, updated_at DESC)");
     const messageCols = this.db.prepare("PRAGMA table_info(chat_messages)").all();
+    if (!messageCols.some((c) => c.name === "runtime")) {
+      this.db.exec("ALTER TABLE chat_messages ADD COLUMN runtime TEXT");
+    }
     if (!messageCols.some((c) => c.name === "error_reason")) {
       this.db.exec("ALTER TABLE chat_messages ADD COLUMN error_reason TEXT");
     }
@@ -3244,6 +3247,7 @@ export class Store {
     attachments_json: string;
     status: "streaming" | "done" | "error" | "aborted";
     created_at: string;
+    runtime?: ChatRuntime | null;
     error_reason?: string | null;
     stop_reason?: ChatMessageRecord["stop_reason"] | null;
   }): ChatMessageRecord {
@@ -3265,6 +3269,7 @@ export class Store {
       id: row.id,
       session_id: row.session_id,
       role: row.role,
+      ...(row.runtime && { runtime: row.runtime }),
       content: row.content,
       events,
       attachments,
@@ -4461,6 +4466,7 @@ export class Store {
     sessionId: string,
     payload: {
       role: "user" | "assistant" | "system";
+      runtime?: ChatRuntime;
       content: string;
       events?: ChatToolEvent[];
       attachments?: ChatContextRef[];
@@ -4478,10 +4484,10 @@ export class Store {
     const status = payload.status ?? "done";
     this.db
       .prepare(
-        `INSERT INTO chat_messages(id, session_id, role, content, events_json, attachments_json, status, created_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chat_messages(id, session_id, role, content, events_json, attachments_json, status, created_at, runtime)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, sessionId, payload.role, payload.content, eventsJson, attachmentsJson, status, now);
+      .run(id, sessionId, payload.role, payload.content, eventsJson, attachmentsJson, status, now, payload.runtime ?? null);
     this.db
       .prepare("UPDATE chat_sessions SET updated_at = ? WHERE id = ?")
       .run(now, sessionId);
