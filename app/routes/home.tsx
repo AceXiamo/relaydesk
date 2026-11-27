@@ -4,6 +4,7 @@ import { ProjectChatStreams } from "~/lib/chat-streams.ts";
 import { AgentExecutionView } from "~/components/AgentExecutionView.tsx";
 import { CodexChatView } from "~/components/CodexChatView.tsx";
 import { Icon } from "~/components/Icon.tsx";
+import { MorphIcon } from "~/components/MotionPrimitives.tsx";
 import {
   CommandPaletteModal,
   CreateFeedbackModal,
@@ -710,7 +711,7 @@ function ConsoleWorkspace() {
                 onClick={toggleSidebarCollapsed}
                 title="展开左侧导航栏 (⌘B)"
                 aria-label="展开左侧导航栏"
-                className="inline-flex items-center gap-1.5 h-7 px-2 rounded-md text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+                className="inline-flex items-center gap-1.5 h-7 px-2 rounded-md text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
               >
                 <Icon name="panel-left-open" size={14} />
                 <span>展开侧边栏</span>
@@ -729,7 +730,7 @@ function ConsoleWorkspace() {
                 type="button"
                 onClick={() => setCommandOpen(true)}
                 title="快速命令 (⌘K)"
-                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
               >
                 <Icon name="search" size={14} />
               </button>
@@ -737,9 +738,10 @@ function ConsoleWorkspace() {
                 type="button"
                 onClick={toggleTheme}
                 title={dark ? "切换浅色主题" : "切换深色主题"}
-                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+                aria-label={dark ? "切换浅色主题" : "切换深色主题"}
+                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
               >
-                <Icon name={dark ? "sun" : "moon"} size={14} />
+                <MorphIcon name="moon" activeName="sun" active={dark} size={14} rotate />
               </button>
             </div>
           </div>
@@ -752,7 +754,7 @@ function ConsoleWorkspace() {
               type="button"
               onClick={() => setMobileNavOpen(true)}
               aria-label="打开导航菜单"
-              className="inline-flex items-center gap-2 min-w-0 flex-1 h-10 px-2 rounded-lg text-left text-[var(--text-primary)] active:bg-[var(--surface-hover)] transition cursor-pointer"
+              className="inline-flex items-center gap-2 min-w-0 flex-1 h-10 px-2 rounded-lg text-left text-[var(--text-primary)] active:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
             >
               <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--surface-card)] border border-[var(--border-subtle)] shrink-0">
                 <Icon name="menu" size={17} />
@@ -774,7 +776,7 @@ function ConsoleWorkspace() {
                 }
                 aria-label={currentProject ? "新建反馈" : "新建项目"}
                 title={currentProject ? "新建反馈" : "新建项目"}
-                className="inline-flex items-center justify-center w-10 h-10 rounded-lg text-indigo-600 dark:text-indigo-400 hover:bg-[var(--surface-hover)] active:bg-[var(--surface-hover)] transition cursor-pointer"
+                className="inline-flex items-center justify-center w-10 h-10 rounded-lg text-indigo-600 dark:text-indigo-400 hover:bg-[var(--surface-hover)] active:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
               >
                 <Icon name="plus" size={19} />
               </button>
@@ -783,7 +785,7 @@ function ConsoleWorkspace() {
                 onClick={() => setCommandOpen(true)}
                 aria-label="搜索与快速命令"
                 title="搜索与快速命令"
-                className="inline-flex items-center justify-center w-10 h-10 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] active:bg-[var(--surface-hover)] transition cursor-pointer"
+                className="inline-flex items-center justify-center w-10 h-10 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] active:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
               >
                 <Icon name="search" size={17} />
               </button>
@@ -792,9 +794,9 @@ function ConsoleWorkspace() {
                 onClick={toggleTheme}
                 aria-label={dark ? "切换浅色主题" : "切换深色主题"}
                 title={dark ? "切换浅色主题" : "切换深色主题"}
-                className="inline-flex items-center justify-center w-10 h-10 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] active:bg-[var(--surface-hover)] transition cursor-pointer"
+                className="inline-flex items-center justify-center w-10 h-10 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] active:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
               >
-                <Icon name={dark ? "sun" : "moon"} size={17} />
+                <MorphIcon name="moon" activeName="sun" active={dark} size={17} rotate />
               </button>
             </div>
           </div>

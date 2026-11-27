@@ -484,7 +484,7 @@ export function Select<T extends string = string>({
         }}
         onKeyDown={handleTriggerKeyDown}
         className={cn(
-          "group inline-flex items-center justify-between border text-left transition-all duration-150 select-none outline-none",
+          "group inline-flex items-center justify-between border text-left transition-[transform,background-color,border-color,box-shadow] duration-150 ease-[var(--ease-out)] enabled:active:scale-[0.985] select-none outline-none",
           "text-[var(--text-primary)] shadow-[var(--rd-shadow-sm)]",
           "focus-visible:border-indigo-500 focus-visible:ring-2 focus-visible:ring-indigo-500/20",
           "disabled:opacity-55 disabled:pointer-events-none",
@@ -548,10 +548,13 @@ export function Select<T extends string = string>({
                 bottom: coords.bottom,
                 width: coords.width,
                 maxHeight: coords.maxHeight,
+                transformOrigin: `${align === "end" ? "right" : "left"} ${
+                  coords.placement === "top" ? "bottom" : "top"
+                }`,
               }}
               className={cn(
                 "z-[55] overflow-y-auto rd-scroll rounded-xl border border-[var(--border-strong)]/80",
-                "bg-[var(--surface-elevated)] p-1",
+                "bg-[var(--rd-plate)]/98 backdrop-blur-md p-1",
                 "shadow-[var(--rd-shadow-lg)] dark:shadow-[0_20px_50px_-12px_rgba(0,0,0,0.78),inset_0_1px_0_rgba(255,255,255,0.06)]",
                 coords.placement === "top"
                   ? "animate-popover-in-up"

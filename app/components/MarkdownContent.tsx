@@ -13,6 +13,7 @@ import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { preserveSoftLineBreaks } from "~/lib/chat-markdown.ts";
 import { Icon } from "./Icon.tsx";
+import { MorphIcon } from "./MotionPrimitives.tsx";
 
 function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -184,11 +185,11 @@ function CodeBlockCard({
   return (
     <div
       className={cn(
-        "max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/70 dark:bg-[#0d0f13] overflow-hidden rd-hairline-glow",
+        "max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--rd-plate)] overflow-hidden shadow-[var(--rd-shadow-plate)]",
         compact ? "my-1.5 first:mt-0 last:mb-0" : "my-2.5 first:mt-0 last:mb-0",
       )}
     >
-      <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-[var(--border-subtle)] bg-[var(--surface-subtle)]/90 dark:bg-white/[0.025]">
+      <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-[var(--border-subtle)] bg-[var(--rd-tray)]/85">
         <span className="inline-flex items-center gap-1.5 text-[11px] font-mono font-medium text-[var(--text-muted)] select-none">
           <Icon name="code-2" size={12} className="opacity-75" />
           <span>{language}</span>
@@ -200,13 +201,19 @@ function CodeBlockCard({
           }}
           aria-label={copied ? "已复制代码" : "复制代码"}
           className={cn(
-            "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium transition-colors rd-focus-ring",
+            "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium transition-colors rd-press rd-focus-ring cursor-pointer",
             copied
               ? "text-emerald-600 dark:text-emerald-400 bg-emerald-500/10"
               : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
           )}
         >
-          <Icon name={copied ? "check" : "copy"} size={11} />
+          <MorphIcon
+            name="copy"
+            activeName="check"
+            active={copied}
+            size={11}
+            activeClassName="text-emerald-600 dark:text-emerald-400"
+          />
           <span>{copied ? "已复制" : "复制"}</span>
         </button>
       </div>

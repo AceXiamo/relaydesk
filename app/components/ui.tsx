@@ -37,6 +37,7 @@ import type {
   TaskStatus,
 } from "../lib/types.ts";
 import { Icon } from "./Icon.tsx";
+import { MorphIcon } from "./MotionPrimitives.tsx";
 
 export function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -63,9 +64,9 @@ export interface ButtonProps extends ComponentPropsWithRef<"button"> {
 
 const BUTTON_VARIANT_STYLES: Record<ButtonVariant, string> = {
   primary:
-    "bg-[var(--rd-accent)] text-[var(--rd-accent-fg)] border border-transparent hover:bg-[var(--rd-accent-hover)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_1px_2px_rgba(0,0,0,0.12)]",
+    "bg-[var(--rd-accent)] text-[var(--rd-accent-fg)] border border-transparent hover:bg-[var(--rd-accent-hover)] shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_2px_rgba(0,0,0,0.14)]",
   secondary:
-    "bg-[var(--rd-surface)] dark:bg-[var(--rd-elevated)] text-[var(--rd-ink)] border border-[var(--rd-border)] hover:bg-[var(--rd-hover)] hover:border-[var(--rd-border-strong)] shadow-[var(--rd-shadow-sm)]",
+    "rd-plate text-[var(--rd-ink)] border border-[var(--rd-border)] hover:bg-[var(--rd-hover)] hover:border-[var(--rd-border-strong)]",
   subtle:
     "bg-[var(--rd-subtle)] text-[var(--rd-ink)] border border-transparent hover:bg-[var(--rd-hover)] hover:border-[var(--rd-border)]",
   ghost:
@@ -106,7 +107,7 @@ export function Button({
       disabled={isDisabled}
       aria-busy={loading || undefined}
       className={cn(
-        "inline-flex items-center justify-center font-medium whitespace-nowrap select-none transition-colors duration-150 rd-focus-ring",
+        "inline-flex items-center justify-center font-medium whitespace-nowrap select-none transition-[transform,background-color,border-color,color,box-shadow] duration-150 ease-[var(--ease-out)] enabled:active:scale-[0.965] rd-focus-ring",
         "disabled:opacity-50 disabled:pointer-events-none",
         BUTTON_VARIANT_STYLES[variant],
         BUTTON_SIZE_STYLES[size],
@@ -847,8 +848,8 @@ export function Modal({
         aria-describedby={subtitle ? subtitleId : undefined}
         tabIndex={-1}
         className={cn(
-          "relative w-full flex flex-col max-h-[90dvh] sm:max-h-[88vh] overflow-hidden rounded-t-2xl sm:rounded-xl outline-none",
-          "bg-[var(--rd-surface)] dark:bg-[var(--rd-elevated)] border-t sm:border border-[var(--rd-border)] shadow-[var(--rd-shadow-lg)] animate-sheet-in sm:animate-modal-in",
+          "relative w-full flex flex-col max-h-[90dvh] sm:max-h-[88vh] overflow-hidden rounded-t-2xl sm:rounded-2xl outline-none",
+          "bg-[var(--rd-plate)] border-t sm:border border-[var(--rd-border)] shadow-[var(--rd-shadow-lg)] animate-sheet-in sm:animate-modal-in",
           MODAL_WIDTH_CLASS[maxWidth],
         )}
       >
@@ -873,7 +874,7 @@ export function Modal({
             type="button"
             onClick={onClose}
             aria-label="关闭弹窗"
-            className="inline-flex items-center justify-center w-9 h-9 sm:w-7 sm:h-7 -mr-1 sm:mr-0 rounded-lg sm:rounded-md text-[var(--rd-muted)] hover:text-[var(--rd-ink)] hover:bg-[var(--rd-hover)] transition-colors rd-focus-ring shrink-0"
+            className="inline-flex items-center justify-center w-9 h-9 sm:w-7 sm:h-7 -mr-1 sm:mr-0 rounded-lg sm:rounded-md text-[var(--rd-muted)] hover:text-[var(--rd-ink)] hover:bg-[var(--rd-hover)] transition-colors rd-press rd-focus-ring shrink-0"
           >
             <Icon name="x" size={16} />
           </button>
@@ -991,10 +992,12 @@ export function CopyButton({
       title={copied ? copiedLabel : label || "复制"}
       className={cn(iconOnly && "px-1.5", className)}
     >
-      <Icon
-        name={copied ? "check" : "copy"}
+      <MorphIcon
+        name="copy"
+        activeName="check"
+        active={copied}
         size={iconSize}
-        className={copied ? "text-emerald-600 dark:text-emerald-400" : undefined}
+        activeClassName="text-emerald-600 dark:text-emerald-400"
       />
       {!iconOnly ? <span>{copied ? copiedLabel : label}</span> : null}
     </Button>
@@ -1032,11 +1035,17 @@ export function EmptyState({
     >
       <div
         className={cn(
-          "flex items-center justify-center rounded-xl border border-[var(--rd-border)] bg-[var(--rd-subtle)] text-[var(--rd-muted)] mb-3.5",
-          compact ? "w-9 h-9" : "w-11 h-11",
+          "inline-flex items-center justify-center rounded-2xl border border-[var(--border-subtle)]/80 rd-tray p-1.5 mb-3.5",
         )}
       >
-        <Icon name={icon} size={compact ? 17 : 20} />
+        <div
+          className={cn(
+            "flex items-center justify-center rounded-[10px] border border-[var(--rd-border)] rd-plate text-[var(--rd-muted)]",
+            compact ? "w-9 h-9" : "w-11 h-11",
+          )}
+        >
+          <Icon name={icon} size={compact ? 17 : 20} />
+        </div>
       </div>
       <h3 className="text-sm font-medium text-[var(--rd-ink)]">{title}</h3>
       <p className="mt-1 text-[13px] leading-relaxed text-[var(--rd-muted)] max-w-sm">
@@ -1070,6 +1079,14 @@ interface ToastItem {
   id: string;
   tone: ToastTone;
   message: string;
+  durationMs: number;
+  leaving?: boolean;
+}
+
+interface ToastTimingMeta {
+  remainingMs: number;
+  startedAt: number;
+  leaving: boolean;
 }
 
 export interface ToastApi {
@@ -1083,22 +1100,25 @@ const ToastContext = createContext<ToastApi | null>(null);
 
 const TOAST_VISUALS: Record<
   ToastTone,
-  { icon: string; iconClass: string; borderClass: string }
+  { icon: string; iconClass: string; borderClass: string; barClass: string }
 > = {
   success: {
     icon: "check-circle-2",
     iconClass: "text-emerald-600 dark:text-emerald-400",
     borderClass: "border-emerald-500/25",
+    barClass: "bg-emerald-500/75 dark:bg-emerald-400/75",
   },
   error: {
     icon: "alert-circle",
     iconClass: "text-rose-600 dark:text-rose-400",
     borderClass: "border-rose-500/30",
+    barClass: "bg-rose-500/80 dark:bg-rose-400/80",
   },
   info: {
     icon: "circle-dot",
     iconClass: "text-indigo-600 dark:text-indigo-400",
     borderClass: "border-[var(--rd-border)]",
+    barClass: "bg-indigo-500/75 dark:bg-indigo-400/75",
   },
 };
 
@@ -1108,54 +1128,147 @@ export interface ToastProviderProps {
 
 export function ToastProvider({ children }: ToastProviderProps) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [isPaused, setIsPaused] = useState(false);
   const timersRef = useRef<Map<string, number>>(new Map());
+  const exitTimersRef = useRef<Map<string, number>>(new Map());
+  const metaRef = useRef<Map<string, ToastTimingMeta>>(new Map());
+  const hoveredRef = useRef(false);
+  const docHiddenRef = useRef(false);
+  const pausedRef = useRef(false);
   const seqRef = useRef(0);
 
-  const dismiss = useCallback((id: string) => {
+  const startDismiss = useCallback((id: string) => {
     const timer = timersRef.current.get(id);
     if (timer !== undefined) {
       window.clearTimeout(timer);
       timersRef.current.delete(id);
     }
-    setToasts((prev) => prev.filter((item) => item.id !== id));
+    const meta = metaRef.current.get(id);
+    if (meta?.leaving) return;
+    if (meta) {
+      meta.leaving = true;
+    }
+    setToasts((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, leaving: true } : item)),
+    );
+    if (!exitTimersRef.current.has(id)) {
+      const exitTimer = window.setTimeout(() => {
+        exitTimersRef.current.delete(id);
+        metaRef.current.delete(id);
+        setToasts((prev) => prev.filter((item) => item.id !== id));
+      }, 180);
+      exitTimersRef.current.set(id, exitTimer);
+    }
   }, []);
+
+  const dismiss = useCallback(
+    (id: string) => {
+      startDismiss(id);
+    },
+    [startDismiss],
+  );
+
+  const syncPauseState = useCallback(() => {
+    const shouldPause = hoveredRef.current || docHiddenRef.current;
+    if (shouldPause === pausedRef.current) return;
+    pausedRef.current = shouldPause;
+    setIsPaused(shouldPause);
+    const now = Date.now();
+
+    if (shouldPause) {
+      for (const [id, timer] of timersRef.current.entries()) {
+        window.clearTimeout(timer);
+        timersRef.current.delete(id);
+        const meta = metaRef.current.get(id);
+        if (meta && !meta.leaving) {
+          meta.remainingMs = Math.max(250, meta.remainingMs - (now - meta.startedAt));
+        }
+      }
+      return;
+    }
+
+    for (const [id, meta] of metaRef.current.entries()) {
+      if (meta.leaving || timersRef.current.has(id)) continue;
+      meta.startedAt = now;
+      const timer = window.setTimeout(() => {
+        timersRef.current.delete(id);
+        startDismiss(id);
+      }, meta.remainingMs);
+      timersRef.current.set(id, timer);
+    }
+  }, [startDismiss]);
 
   const push = useCallback(
     (tone: ToastTone, message: string) => {
       seqRef.current += 1;
       const id = `rd-toast-${seqRef.current}`;
+      const durationMs = tone === "error" ? 4800 : 3200;
+      const now = Date.now();
+      metaRef.current.set(id, {
+        remainingMs: durationMs,
+        startedAt: now,
+        leaving: false,
+      });
+
       setToasts((prev) => {
-        const next = [...prev, { id, tone, message }];
+        const next: ToastItem[] = [...prev, { id, tone, message, durationMs }];
         if (next.length > 5) {
           const dropped = next.shift();
           if (dropped) {
+            metaRef.current.delete(dropped.id);
             const oldTimer = timersRef.current.get(dropped.id);
             if (oldTimer !== undefined) {
               window.clearTimeout(oldTimer);
               timersRef.current.delete(dropped.id);
+            }
+            const oldExit = exitTimersRef.current.get(dropped.id);
+            if (oldExit !== undefined) {
+              window.clearTimeout(oldExit);
+              exitTimersRef.current.delete(dropped.id);
             }
           }
         }
         return next;
       });
 
-      const durationMs = tone === "error" ? 4800 : 3200;
-      const timer = window.setTimeout(() => {
-        timersRef.current.delete(id);
-        setToasts((prev) => prev.filter((item) => item.id !== id));
-      }, durationMs);
-      timersRef.current.set(id, timer);
+      if (!pausedRef.current) {
+        const timer = window.setTimeout(() => {
+          timersRef.current.delete(id);
+          startDismiss(id);
+        }, durationMs);
+        timersRef.current.set(id, timer);
+      }
     },
-    [],
+    [startDismiss],
   );
 
   useEffect(() => {
+    if (typeof document === "undefined") return;
+    docHiddenRef.current = document.visibilityState === "hidden";
+    const onVis = () => {
+      docHiddenRef.current = document.visibilityState === "hidden";
+      syncPauseState();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [syncPauseState]);
+
+  useEffect(() => {
     const timers = timersRef.current;
+    const exitTimers = exitTimersRef.current;
+    const metas = metaRef.current;
     return () => {
       for (const timer of timers.values()) {
         window.clearTimeout(timer);
       }
+      for (const timer of exitTimers.values()) {
+        window.clearTimeout(timer);
+      }
       timers.clear();
+      exitTimers.clear();
+      metas.clear();
     };
   }, []);
 
@@ -1183,16 +1296,25 @@ export function ToastProvider({ children }: ToastProviderProps) {
             <div
               key={item.id}
               role={item.tone === "error" ? "alert" : "status"}
+              onMouseEnter={() => {
+                hoveredRef.current = true;
+                syncPauseState();
+              }}
+              onMouseLeave={() => {
+                hoveredRef.current = false;
+                syncPauseState();
+              }}
               className={cn(
-                "pointer-events-auto flex items-start gap-2.5 px-3.5 py-2.5 rounded-lg border animate-toast-in",
-                "bg-[var(--rd-surface)] dark:bg-[var(--rd-elevated)] text-[var(--rd-ink)] shadow-[var(--rd-shadow-md)]",
+                "rd-toast pointer-events-auto relative overflow-hidden flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl border",
+                item.leaving ? "animate-toast-out" : "animate-toast-in",
+                "bg-[var(--rd-plate)]/95 backdrop-blur-md text-[var(--rd-ink)] shadow-[var(--rd-shadow-md)]",
                 visual.borderClass,
               )}
             >
               <Icon
                 name={visual.icon}
                 size={15}
-                className={cn("mt-0.5", visual.iconClass)}
+                className={cn("mt-0.5 shrink-0", visual.iconClass)}
               />
               <p className="flex-1 min-w-0 text-[13px] leading-snug break-words">
                 {item.message}
@@ -1201,10 +1323,21 @@ export function ToastProvider({ children }: ToastProviderProps) {
                 type="button"
                 onClick={() => dismiss(item.id)}
                 aria-label="关闭提示"
-                className="inline-flex items-center justify-center w-5 h-5 rounded text-[var(--rd-muted)] hover:text-[var(--rd-ink)] hover:bg-[var(--rd-hover)] transition-colors rd-focus-ring shrink-0"
+                className="inline-flex items-center justify-center w-5 h-5 rounded text-[var(--rd-muted)] hover:text-[var(--rd-ink)] hover:bg-[var(--rd-hover)] transition-colors rd-press rd-focus-ring shrink-0"
               >
                 <Icon name="x" size={13} />
               </button>
+              <span
+                aria-hidden="true"
+                style={{
+                  animationDuration: `${item.durationMs}ms`,
+                  animationPlayState: isPaused || item.leaving ? "paused" : "running",
+                }}
+                className={cn(
+                  "rd-toast-bar pointer-events-none absolute bottom-0 left-0 right-0 h-[2px]",
+                  visual.barClass,
+                )}
+              />
             </div>
           );
         })}
@@ -1258,7 +1391,7 @@ export function Switch({
         if (!disabled) onChange(!checked);
       }}
       className={cn(
-        "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-transparent transition-colors duration-150 rd-focus-ring",
+        "group/switch relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-transparent shadow-[inset_0_1px_2px_rgba(0,0,0,0.18)] transition-colors duration-150 ease-[var(--ease-out)] rd-focus-ring",
         checked
           ? "bg-[var(--rd-accent)]"
           : "bg-zinc-300 dark:bg-zinc-700",
@@ -1268,8 +1401,11 @@ export function Switch({
       <span
         aria-hidden="true"
         className={cn(
-          "pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-150",
-          checked ? "translate-x-4" : "translate-x-0.5",
+          "pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-[transform,width] duration-200 ease-[var(--ease-spring)]",
+          !disabled && "group-active/switch:w-[19px]",
+          checked
+            ? "translate-x-4 group-active/switch:translate-x-[13px]"
+            : "translate-x-0.5",
         )}
       />
     </button>

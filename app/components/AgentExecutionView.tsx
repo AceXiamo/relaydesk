@@ -3,6 +3,7 @@ import type { ProjectChatStreams } from "~/lib/chat-streams.ts";
 import { formatRelativeTime, taskCode } from "~/lib/format.ts";
 import type { ProjectDetail, ProjectExecutionRoutingResponse, TaskRecord } from "~/lib/types.ts";
 import { Icon } from "./Icon.tsx";
+import { SegmentedDetent } from "./MotionPrimitives.tsx";
 import { TaskAgentSessionPanel } from "./TaskAgentSessionPanel.tsx";
 import { Button, LivePulseDot, PriorityBadge, StatusBadge } from "./ui.tsx";
 
@@ -30,6 +31,26 @@ export function AgentExecutionView({ project, tasks, streams, routing, onOpenTas
   const [filter, setFilter] = useState<Filter>("all");
   const [selectedId, setSelectedId] = useState<string>();
   const [showMobileSession, setShowMobileSession] = useState(false);
+  const counts = useMemo(() => {
+    const res: Record<Filter, number> = { all: 0, running: 0, queued: 0, waiting: 0, processed: 0 };
+    for (const task of tasks) {
+      if (task.merged_into) continue;
+      const g = category(task);
+      if (!g) continue;
+      res.all += 1;
+      res[g] += 1;
+    }
+    return res;
+  }, [tasks]);
+  const filterOptions = useMemo(
+    () =>
+      (Object.keys(filters) as Filter[]).map((key) => ({
+        value: key,
+        label: key === "all" ? "全部" : filters[key],
+        badge: counts[key] > 0 ? counts[key] : undefined,
+      })),
+    [counts],
+  );
   const rows = useMemo(() => {
     const order = { running: 0, queued: 1, waiting: 2, processed: 3 };
     return tasks.flatMap(task => {
@@ -53,16 +74,40 @@ export function AgentExecutionView({ project, tasks, streams, routing, onOpenTas
         <p className="flex items-center gap-2 text-xs text-[var(--text-muted)]"><LivePulseDot active={Boolean(online)} tone={online ? "emerald" : "zinc"} />
           {online !== undefined ? `${online} 台 Local Agent 在线` : project ? "本机节点状态待确认" : "尚未选择项目"}
         </p>
-        <div aria-label="筛选任务执行" className="flex flex-wrap gap-1">
-          {(Object.keys(filters) as Filter[]).map(key => <button key={key} type="button" aria-pressed={key === filter} onClick={() => { setFilter(key); setSelectedId(undefined); }} className={`rd-focus-ring cursor-pointer rounded-full border px-2 py-1 text-xs ${key === filter ? "border-[var(--rd-accent)] bg-[var(--surface-active)] font-medium text-[var(--text-primary)]" : "border-[var(--border-subtle)] text-[var(--text-muted)] hover:bg-[var(--surface-subtle)]"}`}>{filters[key]}</button>)}
+        <div className="overflow-x-auto no-scrollbar">
+          <SegmentedDetent<Filter>
+            size="xs"
+            ariaLabel="筛选任务执行"
+            options={filterOptions}
+            value={filter}
+            onChange={(key) => {
+              setFilter(key);
+              setSelectedId(undefined);
+            }}
+          />
         </div>
       </header>
       <div className="rd-scroll flex-1 overflow-y-auto">
-        {rows.map(({ task, group }) => <button key={task.id} type="button" aria-current={selected?.id === task.id || undefined} onClick={() => { setSelectedId(task.id); setShowMobileSession(true); }} className={`rd-focus-ring block w-full cursor-pointer border-b border-[var(--border-subtle)] px-4 py-3 text-left ${selected?.id === task.id ? "bg-[var(--surface-active)] shadow-[inset_3px_0_var(--rd-accent)]" : "hover:bg-[var(--surface-subtle)]"}`}>
+        {rows.map(({ task, group }) => (
+          <button
+            key={task.id}
+            type="button"
+            aria-current={selected?.id === task.id || undefined}
+            onClick={() => {
+              setSelectedId(task.id);
+              setShowMobileSession(true);
+            }}
+            className={`rd-focus-ring block w-full cursor-pointer border-b border-[var(--border-subtle)] px-4 py-3 text-left transition-[background-color,box-shadow] duration-150 ${
+              selected?.id === task.id
+                ? "bg-[var(--surface-active)] shadow-[inset_3px_0_var(--rd-accent)]"
+                : "hover:bg-[var(--surface-subtle)]"
+            }`}
+          >
           <div className="flex items-center gap-2 text-[11px] text-[var(--text-muted)]"><span className="font-mono">{taskCode(task.number)}</span><time className="ml-auto">{formatRelativeTime(task.updated_at)}</time></div>
           <p className="my-1.5 line-clamp-2 text-sm font-medium">{task.title}</p>
           <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]"><StatusBadge status={task.status} /><LivePulseDot active={group === "running"} tone={group === "running" ? "emerald" : "zinc"} />{task.agent_session_status === "error" ? "执行异常" : task.agent_session_status === "idle" ? "会话空闲" : filters[group]}</div>
-        </button>)}
+          </button>
+        ))}
         {!rows.length && <p className="px-4 py-8 text-center text-sm text-[var(--text-muted)]">{filter === "all" ? "暂无待分配或已执行的任务" : "此筛选下暂无任务"}</p>}
       </div>
     </aside>

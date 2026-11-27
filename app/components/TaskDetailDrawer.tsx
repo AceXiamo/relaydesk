@@ -12,6 +12,7 @@ import {
   LocalAgentTargetSelect,
 } from "./LocalAgentModelPicker.tsx";
 import { MarkdownContent, hasMarkdownSyntax } from "./MarkdownContent.tsx";
+import { SegmentedDetent, SmoothCollapse } from "./MotionPrimitives.tsx";
 import {
   Button,
   CopyButton,
@@ -684,7 +685,7 @@ export function TaskDetailDrawer({
     <>
       <div className="fixed inset-0 z-40 flex justify-end">
         <div
-          className="fixed inset-0 bg-black/30 dark:bg-black/55 backdrop-blur-[1px] transition-opacity"
+          className="fixed inset-0 bg-black/30 dark:bg-black/55 backdrop-blur-[1px] animate-fade-in"
           onClick={onClose}
         />
 
@@ -745,11 +746,28 @@ export function TaskDetailDrawer({
             </div>
           </div>
 
-          {task && <nav aria-label="任务视图" className="flex gap-4 border-b border-[var(--border-subtle)] px-3.5 sm:px-5">
-            {([ ["details", "任务详情"], ["agent", "Agent 执行会话"] ] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={tab === value} onClick={() => setTab(value)} className={`rd-focus-ring inline-flex cursor-pointer items-center gap-2 border-b-2 py-2.5 text-sm ${tab === value ? "border-[var(--rd-accent)] font-medium text-[var(--text-primary)]" : "border-transparent text-[var(--text-muted)]"}`}>
-              {label}{value === "agent" && isAgentWorking && <LivePulseDot active tone="emerald" />}
-            </button>)}
-          </nav>}
+          {task && (
+            <div className="border-b border-[var(--border-subtle)] px-3.5 sm:px-5 py-2">
+              <SegmentedDetent<"details" | "agent">
+                role="tablist"
+                ariaLabel="任务视图"
+                size="sm"
+                value={tab}
+                onChange={setTab}
+                options={[
+                  { value: "details", label: "任务详情" },
+                  {
+                    value: "agent",
+                    label: "Agent 执行会话",
+                    badge: isAgentWorking ? "运行中" : undefined,
+                    badgeClassName: isAgentWorking
+                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                      : undefined,
+                  },
+                ]}
+              />
+            </div>
+          )}
           {/* Drawer Body */}
           {loading && !task ? (
             <div className="flex-1 flex items-center justify-center text-sm text-[var(--text-muted)] gap-2">
@@ -1022,30 +1040,21 @@ export function TaskDetailDrawer({
                   </div>
 
                   {!isAgentWorking && (
-                    <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40 p-2.5 space-y-2.5">
+                    <div className="rounded-xl border border-[var(--border-subtle)] rd-tray p-2.5 space-y-2.5">
                       <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-1.5" aria-label="分配执行配置">
-                        <div
-                          className="inline-flex h-8 sm:h-7 w-full sm:w-auto items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)]/70 p-0.5"
-                          role="group"
-                          aria-label="选择分配 Harness"
-                        >
-                          {(["codex", "claude", "agy"] as const).map((rt) => (
-                            <button
-                              key={rt}
-                              type="button"
-                              disabled={busyAction !== null || savingDispatchConfig}
-                              aria-pressed={dispatchRuntime === rt}
-                              onClick={() => handleDispatchRuntimeChange(rt)}
-                              className={`rd-focus-ring flex-1 sm:flex-initial rounded-md px-2 py-1 sm:py-0.5 text-[11px] font-medium transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
-                                dispatchRuntime === rt
-                                  ? "bg-[var(--surface-elevated)] text-[var(--text-primary)] shadow-2xs"
-                                  : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                              }`}
-                            >
-                              {rt === "claude" ? "Claude" : rt === "agy" ? "Agy" : "Codex"}
-                            </button>
-                          ))}
-                        </div>
+                        <SegmentedDetent<ChatRuntime>
+                          size="xs"
+                          disabled={busyAction !== null || savingDispatchConfig}
+                          ariaLabel="选择分配 Harness"
+                          value={dispatchRuntime}
+                          onChange={handleDispatchRuntimeChange}
+                          className="col-span-2 sm:col-span-1 w-full sm:w-auto [&>button]:flex-1 sm:[&>button]:flex-initial"
+                          options={[
+                            { value: "codex", label: "Codex" },
+                            { value: "claude", label: "Claude" },
+                            { value: "agy", label: "Agy" },
+                          ]}
+                        />
                         <LocalAgentModelCombobox
                           runtime={dispatchRuntime}
                           agent={dispatchResolvedAgent.agent}
@@ -1585,7 +1594,7 @@ export function TaskDetailDrawer({
                               </span>
                             </button>
 
-                            {expanded && (
+                            <SmoothCollapse open={expanded}>
                               <div className="px-3 pb-2.5 pt-1 border-t border-[var(--border-subtle)]/80 space-y-1.5">
                                 {segment.messages.map((m, idx) => {
                                   const isLast =
@@ -1627,7 +1636,7 @@ export function TaskDetailDrawer({
                                   );
                                 })}
                               </div>
-                            )}
+                            </SmoothCollapse>
                           </div>
                         );
                       }
@@ -1731,7 +1740,7 @@ export function TaskDetailDrawer({
                 <CliRunStatus runs={runs} notice={notice} />
 
                 {/* Beautiful UI-inspired Prompt Bar Composer */}
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] rd-hairline-glow overflow-hidden focus-within:border-indigo-500/60 focus-within:ring-2 focus-within:ring-indigo-500/12 transition-all">
+                <div className="rounded-xl rd-plate rd-hairline-glow overflow-hidden focus-within:border-indigo-500/60 focus-within:ring-2 focus-within:ring-indigo-500/12 transition-[border-color,box-shadow] duration-150">
                   {/* Context-aware quick suggestion chips */}
                   {promptSuggestions.length > 0 && (
                     <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2.5 pb-1">
@@ -1788,7 +1797,7 @@ export function TaskDetailDrawer({
                           aria-checked={autoReopen}
                           title="开启后，发送评论将自动唤醒 Local Agent 并把评论内容直接带入执行会话"
                           onClick={() => setAutoReopen((v) => !v)}
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-all cursor-pointer rd-focus-ring ${
+                          className={`rd-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-[color,background-color,border-color,transform] duration-150 cursor-pointer rd-focus-ring ${
                             autoReopen
                               ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border-emerald-500/30"
                               : "bg-[var(--surface-elevated)] text-[var(--text-muted)] border-[var(--border-subtle)] hover:text-[var(--text-primary)]"
@@ -1870,10 +1879,10 @@ export function TaskDetailDrawer({
                         size={13}
                       />
                     </button>
-                    {mergeOpen && (
+                    <SmoothCollapse open={mergeOpen}>
                       <form
                         onSubmit={handleMerge}
-                        className="mt-3 p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] space-y-3"
+                        className="mt-3 p-3.5 rounded-xl rd-plate space-y-3"
                       >
                         <Select
                           ariaLabel="选择要并入的主任务"
@@ -1909,7 +1918,7 @@ export function TaskDetailDrawer({
                           </Button>
                         </div>
                       </form>
-                    )}
+                    </SmoothCollapse>
                   </section>
                 )}
             </div>

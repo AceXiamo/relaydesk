@@ -25,6 +25,7 @@ import {
   runtimeLabel,
 } from "./LocalAgentModelPicker.tsx";
 import { MarkdownContent } from "./MarkdownContent.tsx";
+import { SegmentedDetent } from "./MotionPrimitives.tsx";
 import { Button, LivePulseDot, useToast } from "./ui.tsx";
 
 type SessionHistory = Awaited<ReturnType<typeof api.getTaskAgentSession>>;
@@ -434,32 +435,22 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
             )}
           </div>
           {!loading && !error && !task.merged_into && (
-            <div className="space-y-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-4 text-left shadow-xs">
+            <div className="space-y-3 rounded-2xl rd-plate p-4 text-left">
               <div className="space-y-1.5">
                 <p className="text-[11.5px] font-medium text-[var(--text-secondary)]">Harness（运行工具）</p>
-                <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="选择任务 Harness">
-                  {(["codex", "claude", "agy"] as const).map((rt) => {
-                    const selected = activeRuntime === rt;
-                    const ready = runtimeAvailability[rt];
-                    return (
-                      <button
-                        key={rt}
-                        type="button"
-                        disabled={dispatching}
-                        aria-pressed={selected}
-                        onClick={() => handleSelectRuntime(rt)}
-                        className={`rd-focus-ring flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50 ${
-                          selected
-                            ? "border-[var(--rd-accent)] bg-[var(--surface-active)] text-[var(--text-primary)]"
-                            : "border-[var(--border-subtle)] bg-[var(--surface-subtle)]/50 text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
-                        }`}
-                      >
-                        <LivePulseDot tone={ready ? "emerald" : "zinc"} active={ready} />
-                        <span>{runtimeLabel(rt)}</span>
-                      </button>
-                    );
-                  })}
-                </div>
+                <SegmentedDetent<ChatRuntime>
+                  fullWidth
+                  size="sm"
+                  disabled={dispatching}
+                  ariaLabel="选择任务 Harness"
+                  value={activeRuntime}
+                  onChange={(rt) => handleSelectRuntime(rt)}
+                  options={(["codex", "claude", "agy"] as const).map((rt) => ({
+                    value: rt,
+                    label: runtimeLabel(rt),
+                    badge: runtimeAvailability[rt] ? "就绪" : undefined,
+                  }))}
+                />
               </div>
 
               <div className="space-y-1.5">
@@ -599,8 +590,8 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
         </div>
         </div>
         <form className="shrink-0 border-t border-[var(--border-subtle)] bg-[var(--surface-canvas)] px-3 py-3 sm:px-4" onSubmit={e => { e.preventDefault(); send(); }}>
-          <div className="mx-auto max-w-3xl space-y-2">
-            <div className="flex flex-wrap items-center justify-between gap-2" aria-label="会话执行配置">
+          <div className="mx-auto max-w-3xl rounded-[20px] border border-[var(--border-subtle)] rd-tray p-[5px]">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1.5 pt-0.5 pb-1.5" aria-label="会话执行配置">
               <div className="flex flex-wrap items-center gap-1.5 min-w-0">
               <LocalAgentTargetSelect
                 projectId={task.project_id}
@@ -613,24 +604,18 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                 className="max-w-[180px]"
                 onChange={handleSelectTarget}
               />
-              <div className="inline-flex h-7 items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/60 p-0.5" role="group" aria-label="切换会话 Harness">
-                {(["codex", "claude", "agy"] as const).map((rt) => (
-                  <button
-                    key={rt}
-                    type="button"
-                    disabled={controlsDisabled}
-                    aria-pressed={activeRuntime === rt}
-                    onClick={() => handleSelectRuntime(rt)}
-                    className={`rd-focus-ring rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
-                      activeRuntime === rt
-                        ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-2xs"
-                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                    }`}
-                  >
-                    {rt === "claude" ? "Claude" : rt === "agy" ? "Agy" : "Codex"}
-                  </button>
-                ))}
-              </div>
+              <SegmentedDetent<ChatRuntime>
+                size="xs"
+                disabled={controlsDisabled}
+                ariaLabel="切换会话 Harness"
+                value={activeRuntime}
+                onChange={(rt) => handleSelectRuntime(rt)}
+                options={[
+                  { value: "codex", label: "Codex" },
+                  { value: "claude", label: "Claude" },
+                  { value: "agy", label: "Agy" },
+                ]}
+              />
               <LocalAgentModelCombobox
                 runtime={activeRuntime}
                 agent={resolvedAgent.agent}
@@ -684,12 +669,20 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                   void handleUploadImages(files);
                 }
               }}
-              className={`relative rounded-xl border bg-[var(--surface-card)] transition-all focus-within:border-indigo-500/60 focus-within:ring-2 focus-within:ring-indigo-500/12 ${
+              className={`relative rounded-[15px] border bg-[var(--rd-plate)] shadow-[var(--rd-shadow-composer)] transition-[border-color,box-shadow] duration-200 focus-within:border-indigo-500/60 focus-within:ring-2 focus-within:ring-indigo-500/12 ${
                 dragOverImage
                   ? "border-indigo-500 ring-2 ring-indigo-500/20"
-                  : "border-[var(--border-subtle)]"
+                  : "border-[var(--border-subtle)]/90"
               }`}
             >
+              {running && (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-x-0 top-0 h-[15px] overflow-hidden rounded-t-[15px]"
+                >
+                  <span className="rd-waterfall-stripe block h-[2px] w-full" />
+                </div>
+              )}
               {attachments.length > 0 && (
                 <div className="flex flex-wrap items-center gap-2 px-3 pt-2.5 pb-1">
                   {attachments.map((att) => (
@@ -743,14 +736,14 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                 }}
               />
 
-              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-subtle)]/70 bg-[var(--surface-subtle)]/35 px-2.5 py-1.5 rounded-b-xl">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-subtle)]/70 bg-[var(--rd-tray)]/45 px-2.5 py-1.5 rounded-b-[15px]">
                 <div className="flex items-center gap-2 min-w-0">
                   <button
                     type="button"
                     disabled={blocked || uploadingImages}
                     onClick={() => imageInputRef.current?.click()}
                     title="上传或粘贴图片"
-                    className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer disabled:opacity-50"
+                    className="rd-press inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-[color,background-color,transform] duration-150 cursor-pointer disabled:opacity-50"
                   >
                     <Icon name={uploadingImages ? "loader-2" : "image"} size={14} className={uploadingImages ? "animate-spin" : undefined} />
                   </button>

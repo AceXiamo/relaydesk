@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { DeployGateEvaluationRow } from "./DeployGateSection.tsx";
 import { Icon } from "./Icon.tsx";
 import { MarkdownContent } from "./MarkdownContent.tsx";
+import { SmoothCollapse } from "./MotionPrimitives.tsx";
 import {
   Button,
   DeployStatusBadge,
@@ -253,8 +254,8 @@ export function ReleasesView({
         </div>
 
         {/* Advanced manual trigger panel */}
-        {showAdvancedTrigger && (
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-4 space-y-3">
+        <SmoothCollapse open={showAdvancedTrigger}>
+          <div className="rounded-xl rd-plate p-4 space-y-3">
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-semibold text-[var(--text-primary)]">
                 手动触发选项
@@ -296,7 +297,7 @@ export function ReleasesView({
               </Button>
             </div>
           </div>
-        )}
+        </SmoothCollapse>
 
         {/* Escalated AI Deploy Gate manual approval banner */}
         {escalatedPendingGates.length > 0 && !activeRelease && (
@@ -401,7 +402,8 @@ export function ReleasesView({
 
         {/* Policy & deploy doc summary strip */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-4 flex flex-col justify-between gap-3">
+          <div className="relative overflow-hidden rounded-xl rd-plate p-4 flex flex-col justify-between gap-3">
+            <span aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 h-[2px] bg-indigo-500/60" />
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="text-[11px] font-medium uppercase tracking-wider text-[var(--text-muted)]">
@@ -448,7 +450,13 @@ export function ReleasesView({
             </div>
           </div>
 
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-4 flex flex-col justify-between gap-3">
+          <div className="relative overflow-hidden rounded-xl rd-plate p-4 flex flex-col justify-between gap-3">
+            <span
+              aria-hidden="true"
+              className={`pointer-events-none absolute inset-x-0 top-0 h-[2px] ${
+                deployDocExists || effectivePolicy.doc_path ? "bg-emerald-500/60" : "bg-amber-500/65"
+              }`}
+            />
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="text-[11px] font-medium uppercase tracking-wider text-[var(--text-muted)]">
@@ -614,14 +622,28 @@ export function ReleasesView({
               />
             </div>
           ) : (
-            <div className="space-y-3">
-              {releases.map((rel) => {
+            <div className="relative pl-6 sm:pl-7 space-y-3 before:content-[''] before:absolute before:left-[9px] sm:before:left-[11px] before:top-4 before:bottom-4 before:w-px before:bg-[var(--border-subtle)]">
+              {releases.map((rel, idx) => {
                 const isExpanded = expandedReleaseId === rel.id;
+                const nodeTone =
+                  rel.status === "succeeded"
+                    ? "bg-emerald-500 border-emerald-500/30"
+                    : rel.status === "failed"
+                      ? "bg-rose-500 border-rose-500/30"
+                      : rel.status === "blocked"
+                        ? "bg-amber-500 border-amber-500/30"
+                        : "bg-indigo-500 border-indigo-500/30";
                 return (
-                  <article
+                  <div
                     key={rel.id}
-                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] overflow-hidden"
+                    className="relative rd-stagger-in"
+                    style={{ ["--stagger-delay" as string]: `${Math.min(idx, 6) * 28}ms` }}
                   >
+                    <span
+                      aria-hidden="true"
+                      className={`absolute -left-6 sm:-left-7 top-4 ml-[5px] sm:ml-[7px] h-2.5 w-2.5 rounded-full ring-4 ring-[var(--surface-card)] ${nodeTone}`}
+                    />
+                    <article className="rounded-xl rd-plate overflow-hidden">
                     <div className="px-4 py-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                       <div className="min-w-0 space-y-1">
                         <div className="flex flex-wrap items-center gap-2">
@@ -703,7 +725,7 @@ export function ReleasesView({
                             key={t.id}
                             type="button"
                             onClick={() => onSelectTask(t.id)}
-                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border border-[var(--border-subtle)] bg-[var(--surface-canvas)] hover:bg-[var(--surface-hover)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer max-w-full"
+                            className="rd-press inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border border-[var(--border-subtle)] bg-[var(--surface-canvas)] hover:bg-[var(--surface-hover)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-[color,background-color,transform] duration-150 cursor-pointer max-w-full"
                           >
                             <span className="font-mono text-[11px] text-[var(--text-muted)]">
                               {taskCode(t.number)}
@@ -714,12 +736,15 @@ export function ReleasesView({
                       </div>
                     )}
 
-                    {rel.summary && (isExpanded || rel.status !== "succeeded") && (
-                      <div className="px-4 py-3 border-t border-[var(--border-subtle)] bg-[var(--surface-canvas)]/60 text-xs">
-                        <MarkdownContent content={rel.summary} />
-                      </div>
+                    {rel.summary && (
+                      <SmoothCollapse open={isExpanded || rel.status !== "succeeded"}>
+                        <div className="px-4 py-3 border-t border-[var(--border-subtle)] bg-[var(--rd-tray)]/55 text-xs">
+                          <MarkdownContent content={rel.summary} />
+                        </div>
+                      </SmoothCollapse>
                     )}
-                  </article>
+                    </article>
+                  </div>
                 );
               })}
             </div>

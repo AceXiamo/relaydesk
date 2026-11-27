@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { prefersReducedMotion } from "~/lib/detent.ts";
 import { SidebarAccounts, useSidebarAccounts } from "./SidebarAccounts.tsx";
 import { Icon } from "./Icon.tsx";
+import { MorphIcon, RollingNumber } from "./MotionPrimitives.tsx";
 import { Kbd, LivePulseDot } from "./ui.tsx";
 import type {
   AuthStatusPayload,
@@ -52,6 +54,46 @@ export function Sidebar({
   const { accounts, reload: reloadAccounts } = useSidebarAccounts();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement>(null);
+  const navRef = useRef<HTMLElement>(null);
+  const itemRefs = useRef<Map<WorkspaceView, HTMLButtonElement>>(new Map());
+  const hasMeasuredNavRef = useRef(false);
+  const [navIndicator, setNavIndicator] = useState<{
+    top: number;
+    height: number;
+    animate: boolean;
+  }>({ top: 0, height: 0, animate: false });
+
+  const measureNav = useCallback(() => {
+    const navEl = navRef.current;
+    const activeBtn = itemRefs.current.get(view);
+    if (!navEl || !activeBtn || activeBtn.offsetHeight <= 0) return;
+
+    let top = 0;
+    let cursor: HTMLElement | null = activeBtn;
+    while (cursor && cursor !== navEl) {
+      top += cursor.offsetTop;
+      cursor = cursor.offsetParent as HTMLElement | null;
+    }
+    const height = activeBtn.offsetHeight;
+    const animate = hasMeasuredNavRef.current && !prefersReducedMotion();
+    hasMeasuredNavRef.current = true;
+
+    setNavIndicator((prev) => {
+      if (prev.top === top && prev.height === height && prev.animate === animate) {
+        return prev;
+      }
+      return { top, height, animate };
+    });
+  }, [view]);
+
+  useLayoutEffect(() => {
+    measureNav();
+    const navEl = navRef.current;
+    if (!navEl || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => measureNav());
+    observer.observe(navEl);
+    return () => observer.disconnect();
+  }, [measureNav, projects.length, tasks.length]);
 
   useEffect(() => {
     if (!switcherOpen) return;
@@ -183,7 +225,7 @@ export function Sidebar({
             type="button"
             onClick={onOpenCommand}
             title="快速命令 (⌘K)"
-            className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+            className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
           >
             <Icon name="search" size={14} />
           </button>
@@ -191,9 +233,10 @@ export function Sidebar({
             type="button"
             onClick={onToggleTheme}
             title={dark ? "切换浅色主题" : "切换深色主题"}
-            className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+            aria-label={dark ? "切换浅色主题" : "切换深色主题"}
+            className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
           >
-            <Icon name={dark ? "sun" : "moon"} size={14} />
+            <MorphIcon name="moon" activeName="sun" active={dark} size={14} rotate />
           </button>
           {onToggleCollapse && (
             <button
@@ -201,7 +244,7 @@ export function Sidebar({
               onClick={onToggleCollapse}
               title="收起左侧导航栏 (⌘B)"
               aria-label="收起左侧导航栏"
-              className="hidden lg:inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+              className="hidden lg:inline-flex items-center justify-center w-7 h-7 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
             >
               <Icon name="panel-left-close" size={14} />
             </button>
@@ -211,7 +254,7 @@ export function Sidebar({
             onClick={onCloseMobile}
             title="关闭导航"
             aria-label="关闭导航"
-            className="lg:hidden inline-flex items-center justify-center w-10 h-10 -mr-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
+            className="lg:hidden inline-flex items-center justify-center w-10 h-10 -mr-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors rd-press cursor-pointer"
           >
             <Icon name="x" size={18} />
           </button>
@@ -224,7 +267,7 @@ export function Sidebar({
           <button
             type="button"
             onClick={() => setSwitcherOpen((o) => !o)}
-            className="group w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] hover:border-[var(--border-strong)] hover:shadow-xs transition-all duration-150 text-left cursor-pointer shadow-2xs"
+            className="group w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl border border-[var(--border-subtle)] rd-plate hover:border-[var(--border-strong)] transition-[border-color,box-shadow,transform] duration-150 ease-[var(--ease-out)] rd-press text-left cursor-pointer"
           >
             <div className="flex items-center gap-2 min-w-0 flex-1">
               <div className="relative w-6 h-6 rounded-md bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
@@ -285,7 +328,10 @@ export function Sidebar({
           </button>
 
           {switcherOpen && (
-            <div className="absolute left-0 right-0 mt-1.5 z-40 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] shadow-lg py-1.5 animate-fade-in">
+            <div
+              style={{ transformOrigin: "top center" }}
+              className="absolute left-0 right-0 mt-1.5 z-40 rounded-xl border border-[var(--border-strong)]/80 bg-[var(--rd-plate)]/98 backdrop-blur-md shadow-[var(--rd-shadow-lg)] py-1.5 animate-popover-in"
+            >
               <div className="px-2.5 py-1 text-[11px] font-medium text-[var(--text-muted)]">
                 项目列表 ({projects.length})
               </div>
@@ -363,7 +409,23 @@ export function Sidebar({
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 overflow-y-auto px-2.5 py-2 space-y-5">
+      <nav ref={navRef} className="relative flex-1 overflow-y-auto px-2.5 py-2 space-y-5">
+        {navIndicator.height > 0 && (
+          <div
+            aria-hidden="true"
+            style={{
+              height: `${navIndicator.height}px`,
+              transform: `translate3d(0, ${navIndicator.top}px, 0)`,
+              transition: navIndicator.animate
+                ? "transform 240ms var(--ease-spring-snappy), height 220ms var(--ease-out)"
+                : "none",
+            }}
+            className="pointer-events-none absolute top-0 left-2.5 right-2.5 rounded-lg bg-[var(--surface-active)] shadow-2xs"
+          >
+            <span className="absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-r-full bg-indigo-500" />
+          </div>
+        )}
+
         <div>
           <div className="px-2.5 pb-1.5 text-[11px] font-medium tracking-wide text-[var(--text-muted)]">
             反馈队列
@@ -374,22 +436,30 @@ export function Sidebar({
               return (
                 <button
                   key={item.id}
+                  ref={(el) => {
+                    if (el) itemRefs.current.set(item.id, el);
+                    else itemRefs.current.delete(item.id);
+                  }}
                   type="button"
                   onClick={() => selectView(item.id)}
-                  className={`group relative w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition-all duration-150 cursor-pointer ${
+                  className={`group relative z-10 w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition-[color,background-color,transform] duration-150 ease-[var(--ease-out)] active:scale-[0.985] cursor-pointer ${
                     active
-                      ? "bg-[var(--surface-active)] text-[var(--text-primary)] font-medium shadow-2xs"
-                      : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+                      ? navIndicator.height > 0
+                        ? "text-[var(--text-primary)] font-medium"
+                        : "bg-[var(--surface-active)] text-[var(--text-primary)] font-medium shadow-2xs"
+                      : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]/75 hover:text-[var(--text-primary)]"
                   }`}
                 >
-                  <span
-                    aria-hidden="true"
-                    className={`absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-r-full transition-opacity duration-150 ${
-                      active
-                        ? "bg-indigo-500 opacity-100"
-                        : "bg-[var(--border-strong)] opacity-0 group-hover:opacity-60"
-                    }`}
-                  />
+                  {navIndicator.height === 0 && (
+                    <span
+                      aria-hidden="true"
+                      className={`absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-r-full transition-opacity duration-150 ${
+                        active
+                          ? "bg-indigo-500 opacity-100"
+                          : "bg-[var(--border-strong)] opacity-0 group-hover:opacity-60"
+                      }`}
+                    />
+                  )}
                   <span className="flex items-center gap-2.5 min-w-0">
                     <Icon
                       name={item.icon}
@@ -423,7 +493,7 @@ export function Sidebar({
                         }`}
                       >
                         {item.pulse && <LivePulseDot tone="amber" active />}
-                        {item.count}
+                        <RollingNumber value={item.count!} />
                       </span>
                     )}
                   </span>
@@ -443,22 +513,30 @@ export function Sidebar({
               return (
                 <button
                   key={item.id}
+                  ref={(el) => {
+                    if (el) itemRefs.current.set(item.id, el);
+                    else itemRefs.current.delete(item.id);
+                  }}
                   type="button"
                   onClick={() => selectView(item.id)}
-                  className={`group relative w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition-all duration-150 cursor-pointer ${
+                  className={`group relative z-10 w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition-[color,background-color,transform] duration-150 ease-[var(--ease-out)] active:scale-[0.985] cursor-pointer ${
                     active
-                      ? "bg-[var(--surface-active)] text-[var(--text-primary)] font-medium shadow-2xs"
-                      : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+                      ? navIndicator.height > 0
+                        ? "text-[var(--text-primary)] font-medium"
+                        : "bg-[var(--surface-active)] text-[var(--text-primary)] font-medium shadow-2xs"
+                      : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]/75 hover:text-[var(--text-primary)]"
                   }`}
                 >
-                  <span
-                    aria-hidden="true"
-                    className={`absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-r-full transition-opacity duration-150 ${
-                      active
-                        ? "bg-indigo-500 opacity-100"
-                        : "bg-[var(--border-strong)] opacity-0 group-hover:opacity-60"
-                    }`}
-                  />
+                  {navIndicator.height === 0 && (
+                    <span
+                      aria-hidden="true"
+                      className={`absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-r-full transition-opacity duration-150 ${
+                        active
+                          ? "bg-indigo-500 opacity-100"
+                          : "bg-[var(--border-strong)] opacity-0 group-hover:opacity-60"
+                      }`}
+                    />
+                  )}
                   <span className="flex items-center gap-2.5 min-w-0">
                     <Icon
                       name={item.icon}
@@ -492,22 +570,30 @@ export function Sidebar({
               return (
                 <button
                   key={item.id}
+                  ref={(el) => {
+                    if (el) itemRefs.current.set(item.id, el);
+                    else itemRefs.current.delete(item.id);
+                  }}
                   type="button"
                   onClick={() => selectView(item.id)}
-                  className={`group relative w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition-all duration-150 cursor-pointer ${
+                  className={`group relative z-10 w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] transition-[color,background-color,transform] duration-150 ease-[var(--ease-out)] active:scale-[0.985] cursor-pointer ${
                     active
-                      ? "bg-[var(--surface-active)] text-[var(--text-primary)] font-medium shadow-2xs"
-                      : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+                      ? navIndicator.height > 0
+                        ? "text-[var(--text-primary)] font-medium"
+                        : "bg-[var(--surface-active)] text-[var(--text-primary)] font-medium shadow-2xs"
+                      : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]/75 hover:text-[var(--text-primary)]"
                   }`}
                 >
-                  <span
-                    aria-hidden="true"
-                    className={`absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-r-full transition-opacity duration-150 ${
-                      active
-                        ? "bg-indigo-500 opacity-100"
-                        : "bg-[var(--border-strong)] opacity-0 group-hover:opacity-60"
-                    }`}
-                  />
+                  {navIndicator.height === 0 && (
+                    <span
+                      aria-hidden="true"
+                      className={`absolute left-0 top-1.5 bottom-1.5 w-[2.5px] rounded-r-full transition-opacity duration-150 ${
+                        active
+                          ? "bg-indigo-500 opacity-100"
+                          : "bg-[var(--border-strong)] opacity-0 group-hover:opacity-60"
+                      }`}
+                    />
+                  )}
                   <span className="flex items-center gap-2.5 min-w-0">
                     <Icon
                       name={item.icon}

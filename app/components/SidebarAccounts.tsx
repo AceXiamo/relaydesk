@@ -10,6 +10,7 @@ import {
 } from "~/lib/sidebar-accounts.ts";
 import type { SidebarAccount } from "~/lib/types.ts";
 import { Icon } from "./Icon.tsx";
+import { RollingNumber, SmoothCollapse } from "./MotionPrimitives.tsx";
 
 const FALLBACK_AVATAR = "https://axm.moe/avatar";
 export type SidebarAccountList = SidebarAccount[] | "loading" | "error";
@@ -112,7 +113,11 @@ function QuotaWindowBar({
         <span
           className={`font-mono text-[11px] font-semibold tabular-nums shrink-0 ${PERCENT_TEXT_STYLES[tone]}`}
         >
-          {clamped !== null ? `${clamped}%` : "未知"}
+          {clamped !== null ? (
+            <RollingNumber value={clamped} format={(n) => `${n}%`} />
+          ) : (
+            "未知"
+          )}
         </span>
       </div>
       <div
@@ -122,12 +127,12 @@ function QuotaWindowBar({
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuetext={clamped !== null ? `剩余 ${clamped}%` : "额度未知"}
-        className="h-[4px] w-full overflow-hidden rounded-full bg-zinc-200/80 dark:bg-white/[0.08]"
+        className="h-[6px] w-full overflow-hidden rounded-full bg-[var(--rd-tray)] ring-1 ring-inset ring-black/[0.04] dark:ring-white/[0.05]"
       >
         {clamped !== null && clamped > 0 && (
           <div
-            className={`h-full rounded-full transition-[width] duration-300 ease-out ${BAR_FILL_STYLES[tone]}`}
-            style={{ width: `${clamped}%`, minWidth: clamped < 3 ? "3px" : undefined }}
+            className={`h-full rounded-full shadow-[inset_0_1px_0_rgba(255,255,255,0.28)] transition-[width] duration-500 ease-[var(--ease-out)] ${BAR_FILL_STYLES[tone]}`}
+            style={{ width: `${clamped}%`, minWidth: clamped < 3 ? "4px" : undefined }}
           />
         )}
       </div>
@@ -163,14 +168,14 @@ function AccountCard({
     .join(" — ");
 
   return (
-    <li className="rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] px-2.5 py-[7px] shadow-2xs">
+    <li className="rounded-xl border border-[var(--border-subtle)] rd-plate px-2.5 py-2">
       <button
         type="button"
         aria-expanded={expanded}
         aria-controls={detailsId}
         title={headerTitle}
         onClick={() => setExpanded((prev) => !prev)}
-        className="group w-full flex items-center gap-2 text-left rounded-md -mx-1 px-1 py-0.5 transition-colors duration-150 hover:bg-[var(--surface-hover)]/80 active:bg-[var(--surface-active)] rd-focus-ring cursor-pointer"
+        className="group w-full flex items-center gap-2 text-left rounded-lg -mx-1 px-1 py-0.5 transition-colors duration-150 hover:bg-[var(--surface-hover)]/80 active:bg-[var(--surface-active)] rd-press rd-focus-ring cursor-pointer"
       >
         <img
           src={account.avatarUrl?.trim() || FALLBACK_AVATAR}
@@ -227,11 +232,8 @@ function AccountCard({
         </div>
       )}
 
-      {expanded && (
-        <div
-          id={detailsId}
-          className="mt-2 pt-2 border-t border-[var(--border-subtle)] space-y-1 text-[10.5px] leading-snug text-[var(--text-muted)] select-text"
-        >
+      <SmoothCollapse open={expanded} id={detailsId}>
+        <div className="mt-2 pt-2 border-t border-[var(--border-subtle)] space-y-1 text-[10.5px] leading-snug text-[var(--text-muted)] select-text">
           {account.identity && (
             <div className="flex items-center gap-1.5 min-w-0">
               <Icon name="user" size={11} className="shrink-0 opacity-70" />
@@ -262,7 +264,7 @@ function AccountCard({
             </div>
           )}
         </div>
-      )}
+      </SmoothCollapse>
     </li>
   );
 }

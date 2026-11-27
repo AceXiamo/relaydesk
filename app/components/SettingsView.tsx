@@ -7,6 +7,7 @@ import { FeedbackAgentSettingsCard } from "./FeedbackAgentSettingsCard.tsx";
 import { UtilityAiSettingsCard } from "./UtilityAiSettingsCard.tsx";
 import { LocalAgentsSettingsCard } from "./LocalAgentsSettingsCard.tsx";
 import { Icon } from "./Icon.tsx";
+import { SegmentedDetent } from "./MotionPrimitives.tsx";
 import {
   DEFAULT_BRANCH_PREFIX,
   DeliveryBranchFields,
@@ -722,81 +723,42 @@ export function SettingsView({
           </div>
 
           {mode === "settings" && (
-            <div
+            <SegmentedDetent<"project" | "global">
               role="tablist"
-              aria-label="设置作用域"
-              className="grid grid-cols-2 w-full sm:w-auto sm:inline-flex items-center gap-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-1"
-            >
-              <button
-                type="button"
-                role="tab"
-                id="settings-tab-project"
-                aria-selected={currentTab === "project"}
-                aria-controls="settings-panel-project"
-                onClick={() => setTab("project")}
-                className={`inline-flex items-center justify-center gap-1.5 sm:gap-2 rounded-lg px-2.5 sm:px-3.5 py-2 text-[12.5px] font-medium transition cursor-pointer ${
-                  currentTab === "project"
-                    ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-2xs ring-1 ring-[var(--border-subtle)]"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                }`}
-              >
-                <Icon
-                  name="folder-git-2"
-                  size={14}
-                  className={
+              ariaLabel="设置作用域"
+              size="md"
+              value={currentTab}
+              onChange={(next) => setTab(next)}
+              className="w-full sm:w-auto [&>button]:flex-1 sm:[&>button]:flex-initial"
+              options={[
+                {
+                  value: "project",
+                  label: "项目设置",
+                  icon: "folder-git-2",
+                  activeIconClassName: "text-indigo-600 dark:text-indigo-400",
+                  id: "settings-tab-project",
+                  ariaControls: "settings-panel-project",
+                  badge: project?.name,
+                  badgeClassName:
                     currentTab === "project"
-                      ? "text-indigo-600 dark:text-indigo-400"
-                      : "text-[var(--text-muted)]"
-                  }
-                />
-                <span>项目设置</span>
-                {project && (
-                  <span
-                    className={`hidden sm:inline-block max-w-[160px] truncate rounded-md px-1.5 py-0.5 text-[11px] font-normal ${
-                      currentTab === "project"
-                        ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300"
-                        : "bg-[var(--surface-card)]/70 text-[var(--text-muted)]"
-                    }`}
-                  >
-                    {project.name}
-                  </span>
-                )}
-              </button>
-
-              <button
-                type="button"
-                role="tab"
-                id="settings-tab-global"
-                aria-selected={currentTab === "global"}
-                aria-controls="settings-panel-global"
-                onClick={() => setTab("global")}
-                className={`inline-flex items-center justify-center gap-1.5 sm:gap-2 rounded-lg px-2.5 sm:px-3.5 py-2 text-[12.5px] font-medium transition cursor-pointer ${
-                  currentTab === "global"
-                    ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-2xs ring-1 ring-[var(--border-subtle)]"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                }`}
-              >
-                <Icon
-                  name="sliders-horizontal"
-                  size={14}
-                  className={
-                    currentTab === "global"
-                      ? "text-teal-600 dark:text-teal-400"
-                      : "text-[var(--text-muted)]"
-                  }
-                />
-                <span>全局设置</span>
-                <span
-                  className={`hidden sm:inline-block rounded-md px-1.5 py-0.5 text-[11px] font-normal ${
+                      ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300"
+                      : undefined,
+                },
+                {
+                  value: "global",
+                  label: "全局设置",
+                  icon: "sliders-horizontal",
+                  activeIconClassName: "text-teal-600 dark:text-teal-400",
+                  id: "settings-tab-global",
+                  ariaControls: "settings-panel-global",
+                  badge: "跨项目共享",
+                  badgeClassName:
                     currentTab === "global"
                       ? "bg-teal-500/12 text-teal-700 dark:text-teal-300"
-                      : "bg-[var(--surface-card)]/70 text-[var(--text-muted)]"
-                  }`}
-                >
-                  跨项目共享
-                </span>
-              </button>
-            </div>
+                      : undefined,
+                },
+              ]}
+            />
           )}
         </header>
 

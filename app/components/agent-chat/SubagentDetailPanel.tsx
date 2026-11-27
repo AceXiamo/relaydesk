@@ -18,6 +18,7 @@ import type {
 import { ChatWorkspaceImage } from "../ChatWorkspaceImage.tsx";
 import { Icon } from "../Icon.tsx";
 import { MarkdownContent } from "../MarkdownContent.tsx";
+import { MorphIcon } from "../MotionPrimitives.tsx";
 import { ToolChipsGroup } from "./AgentPrimitives.tsx";
 import { PixelGridMatrix, SubagentAvatar, renderToolOutputLines } from "./SubagentDock.tsx";
 
@@ -277,11 +278,11 @@ export function SubagentDetailPanel({
       <div
         aria-hidden="true"
         onClick={onClose}
-        className="fixed inset-0 bg-black/35 backdrop-blur-[2px] transition-opacity"
+        className="fixed inset-0 bg-black/35 backdrop-blur-[2px] animate-fade-in"
       />
 
       {/* Independent Slide-Over Conversation Panel */}
-      <aside className="relative z-10 flex h-full w-full max-w-[min(680px,100vw)] flex-col border-l border-[var(--border-subtle)] bg-[var(--surface-canvas)] shadow-2xl">
+      <aside className="relative z-10 flex h-full w-full max-w-[min(680px,100vw)] flex-col border-l border-[var(--border-subtle)] bg-[var(--surface-canvas)] shadow-2xl animate-slide-in-right">
         {/* Accent hairline */}
         <div
           aria-hidden="true"
@@ -305,9 +306,9 @@ export function SubagentDetailPanel({
                   data-subagent-tab={item.id}
                   onClick={() => onSelectId(item.id)}
                   className={cn(
-                    "rd-focus-ring inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-1 text-[11.5px] transition-colors cursor-pointer",
+                    "rd-focus-ring rd-press inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-1 text-[11.5px] transition-[color,background-color,border-color,transform] duration-150 cursor-pointer",
                     active
-                      ? "border-[var(--border-strong)] bg-[var(--surface-card)] text-[var(--text-primary)] font-medium shadow-xs"
+                      ? "border-[var(--border-strong)] bg-[var(--rd-plate)] text-[var(--text-primary)] font-medium shadow-xs"
                       : "border-transparent bg-transparent text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
                   )}
                 >
@@ -377,7 +378,7 @@ export function SubagentDetailPanel({
                 type="button"
                 onClick={() => void handleStopDelegated()}
                 disabled={stopping}
-                className="rd-focus-ring inline-flex items-center gap-1 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-[11.5px] font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-500/15 transition-colors cursor-pointer disabled:opacity-50"
+                className="rd-focus-ring rd-press inline-flex items-center gap-1 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-[11.5px] font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-500/15 transition-[color,background-color,transform] duration-150 cursor-pointer disabled:opacity-50"
               >
                 <Icon name="square" size={11} />
                 <span>{stopping ? "停止中" : "停止"}</span>
@@ -390,7 +391,7 @@ export function SubagentDetailPanel({
                   onClose();
                   onJumpToMessage(jumpMsgId);
                 }}
-                className="rd-focus-ring inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2.5 py-1 text-[11.5px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                className="rd-focus-ring rd-press inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--rd-plate)] px-2.5 py-1 text-[11.5px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-[color,background-color,transform] duration-150 cursor-pointer"
               >
                 <span>跳到父消息</span>
                 <Icon name="arrow-up-right" size={12} />
@@ -400,7 +401,7 @@ export function SubagentDetailPanel({
               type="button"
               aria-label="关闭子代理面板"
               onClick={onClose}
-              className="rd-focus-ring inline-flex h-7 w-7 items-center justify-center rounded-lg text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+              className="rd-focus-ring rd-press inline-flex h-7 w-7 items-center justify-center rounded-lg text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-[color,background-color,transform] duration-150 cursor-pointer"
             >
               <Icon name="x" size={15} />
             </button>
@@ -518,9 +519,15 @@ export function SubagentDetailPanel({
                     <button
                       type="button"
                       onClick={() => handleCopyNativeOutput(selectedItem.event.output ?? "")}
-                      className="rd-focus-ring inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                      className="rd-focus-ring rd-press inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-[color,background-color,transform] duration-150 cursor-pointer"
                     >
-                      <Icon name={copiedOutput ? "check" : "copy"} size={11} />
+                      <MorphIcon
+                        name="copy"
+                        activeName="check"
+                        active={copiedOutput}
+                        size={11}
+                        activeClassName="text-emerald-500"
+                      />
                       <span>{copiedOutput ? "已复制" : "复制"}</span>
                     </button>
                   )}

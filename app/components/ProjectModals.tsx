@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon.tsx";
+import { SegmentedDetent } from "./MotionPrimitives.tsx";
 import {
   DEFAULT_BRANCH_PREFIX,
   DeliveryBranchFields,
@@ -198,30 +199,22 @@ export function CreateProjectModal({
         </label>
 
         <div className="space-y-2.5">
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="text-[12.5px] font-medium text-[var(--text-primary)]">
               代码交付配置
             </span>
-            <div className="inline-flex items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-0.5">
-              {(["direct_push", "pr_automerge", "review_only"] as DeliveryMode[]).map((mode) => {
-                const active = deliveryMode === mode;
-                return (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setDeliveryMode(mode)}
-                    aria-pressed={active}
-                    className={`px-2 py-1 rounded-md text-[11.5px] font-medium transition cursor-pointer ${
-                      active
-                        ? "bg-[var(--surface-card)] text-indigo-600 dark:text-indigo-400 shadow-2xs"
-                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                    }`}
-                  >
-                    {DELIVERY_MODE_LABELS[mode]}
-                  </button>
-                );
-              })}
-            </div>
+            <SegmentedDetent<DeliveryMode>
+              size="xs"
+              ariaLabel="选择代码交付模式"
+              value={deliveryMode}
+              onChange={setDeliveryMode}
+              options={(["direct_push", "pr_automerge", "review_only"] as DeliveryMode[]).map(
+                (mode) => ({
+                  value: mode,
+                  label: DELIVERY_MODE_LABELS[mode],
+                }),
+              )}
+            />
           </div>
 
           <DeliveryBranchFields
@@ -351,9 +344,9 @@ export function CreateFeedbackModal({
                   key={p}
                   type="button"
                   onClick={() => setPriority(p)}
-                  className={`flex items-center justify-center gap-1.5 py-2.5 sm:py-2 px-2 rounded-lg border text-[12.5px] font-medium transition cursor-pointer ${
+                  className={`flex items-center justify-center gap-1.5 py-2.5 sm:py-2 px-2 rounded-lg border text-[12.5px] font-medium transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] active:scale-[0.97] cursor-pointer ${
                     active
-                      ? "border-indigo-500 bg-indigo-500/10 text-[var(--text-primary)]"
+                      ? "border-indigo-500 bg-indigo-500/10 text-[var(--text-primary)] shadow-[var(--rd-shadow-sm)]"
                       : "border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--text-secondary)] hover:border-[var(--border-strong)]"
                   }`}
                 >
@@ -419,12 +412,16 @@ export function CommandPaletteModal({
   onToggleTheme,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   useEffect(() => {
     if (open) {
       setQuery("");
-      setTimeout(() => inputRef.current?.focus(), 20);
+      setActiveIndex(0);
+      const rafId = window.requestAnimationFrame(() => inputRef.current?.focus());
+      return () => window.cancelAnimationFrame(rafId);
     }
   }, [open]);
 
@@ -475,7 +472,28 @@ export function CommandPaletteModal({
     );
   }, [projects, q]);
 
+  const flatRunners = useMemo(() => {
+    const list: Array<() => void> = [];
+    for (const item of actions) list.push(item.run);
+    for (const t of matchedTasks) list.push(() => onSelectTask(t.id));
+    if (matchedProjects.length > 1) {
+      for (const p of matchedProjects) list.push(() => onSelectProject(p.id));
+    }
+    return list;
+  }, [actions, matchedTasks, matchedProjects, onSelectTask, onSelectProject]);
+
+  const safeActiveIndex =
+    flatRunners.length > 0 ? Math.min(activeIndex, flatRunners.length - 1) : -1;
+
+  useEffect(() => {
+    if (!open || safeActiveIndex < 0) return;
+    optionRefs.current[safeActiveIndex]?.scrollIntoView?.({ block: "nearest" });
+  }, [open, safeActiveIndex]);
+
   if (!open) return null;
+
+  const tasksOffset = actions.length;
+  const projectsOffset = actions.length + matchedTasks.length;
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] px-4">
@@ -486,7 +504,7 @@ export function CommandPaletteModal({
       <div
         role="dialog"
         aria-label="快速命令"
-        className="relative z-10 w-full max-w-lg rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] shadow-2xl overflow-hidden animate-modal-in"
+        className="relative z-10 w-full max-w-lg rounded-2xl border border-[var(--border-subtle)] bg-[var(--rd-plate)] shadow-[var(--rd-shadow-lg)] overflow-hidden"
       >
         <div className="flex items-center gap-2.5 px-4 h-12 border-b border-[var(--border-subtle)]">
           <Icon name="search" size={16} className="text-[var(--text-muted)]" />
@@ -494,9 +512,37 @@ export function CommandPaletteModal({
             ref={inputRef}
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setActiveIndex(0);
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Escape") onClose();
+              if (e.key === "Escape") {
+                e.preventDefault();
+                onClose();
+                return;
+              }
+              if (flatRunners.length === 0) return;
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setActiveIndex((i) => (i + 1) % flatRunners.length);
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setActiveIndex((i) => (i - 1 + flatRunners.length) % flatRunners.length);
+              } else if (e.key === "Home") {
+                e.preventDefault();
+                setActiveIndex(0);
+              } else if (e.key === "End") {
+                e.preventDefault();
+                setActiveIndex(flatRunners.length - 1);
+              } else if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                const runner = flatRunners[safeActiveIndex];
+                if (runner) {
+                  onClose();
+                  runner();
+                }
+              }
             }}
             placeholder="搜索命令、任务编号或切换项目…"
             className="flex-1 bg-transparent text-[14px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
@@ -504,29 +550,45 @@ export function CommandPaletteModal({
           <Kbd>ESC</Kbd>
         </div>
 
-        <div className="max-h-[60vh] overflow-y-auto p-2 space-y-3">
+        <div className="max-h-[60vh] overflow-y-auto rd-scroll p-2 space-y-3">
           {actions.length > 0 && (
             <div>
               <div className="px-2.5 py-1 text-[11px] font-medium text-[var(--text-muted)]">
                 快捷操作
               </div>
-              {actions.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    onClose();
-                    item.run();
-                  }}
-                  className="w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-[13px] text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
-                >
-                  <span className="flex items-center gap-2.5">
-                    <Icon name={item.icon} size={15} className="text-[var(--text-muted)]" />
-                    {item.label}
-                  </span>
-                  {item.shortcut && <Kbd>{item.shortcut}</Kbd>}
-                </button>
-              ))}
+              {actions.map((item, idx) => {
+                const isSelected = safeActiveIndex === idx;
+                return (
+                  <button
+                    key={item.id}
+                    ref={(el) => {
+                      optionRefs.current[idx] = el;
+                    }}
+                    type="button"
+                    data-command-active={isSelected ? "true" : undefined}
+                    onMouseEnter={() => setActiveIndex(idx)}
+                    onClick={() => {
+                      onClose();
+                      item.run();
+                    }}
+                    className={`w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-[13px] transition-colors cursor-pointer ${
+                      isSelected
+                        ? "bg-indigo-500/12 text-[var(--text-primary)]"
+                        : "text-[var(--text-primary)] hover:bg-[var(--surface-hover)]"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2.5">
+                      <Icon
+                        name={item.icon}
+                        size={15}
+                        className={isSelected ? "text-indigo-500" : "text-[var(--text-muted)]"}
+                      />
+                      {item.label}
+                    </span>
+                    {item.shortcut && <Kbd>{item.shortcut}</Kbd>}
+                  </button>
+                );
+              })}
             </div>
           )}
 
@@ -535,25 +597,38 @@ export function CommandPaletteModal({
               <div className="px-2.5 py-1 text-[11px] font-medium text-[var(--text-muted)]">
                 任务
               </div>
-              {matchedTasks.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => {
-                    onClose();
-                    onSelectTask(t.id);
-                  }}
-                  className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-[13px] text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
-                >
-                  <span className="flex items-center gap-2 min-w-0">
-                    <span className="font-mono text-[11.5px] text-[var(--text-muted)] shrink-0">
-                      {taskCode(t.number)}
+              {matchedTasks.map((t, idx) => {
+                const flatIdx = tasksOffset + idx;
+                const isSelected = safeActiveIndex === flatIdx;
+                return (
+                  <button
+                    key={t.id}
+                    ref={(el) => {
+                      optionRefs.current[flatIdx] = el;
+                    }}
+                    type="button"
+                    data-command-active={isSelected ? "true" : undefined}
+                    onMouseEnter={() => setActiveIndex(flatIdx)}
+                    onClick={() => {
+                      onClose();
+                      onSelectTask(t.id);
+                    }}
+                    className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-[13px] transition-colors cursor-pointer ${
+                      isSelected
+                        ? "bg-indigo-500/12 text-[var(--text-primary)]"
+                        : "text-[var(--text-primary)] hover:bg-[var(--surface-hover)]"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span className="font-mono text-[11.5px] text-[var(--text-muted)] shrink-0">
+                        {taskCode(t.number)}
+                      </span>
+                      <span className="truncate">{t.title}</span>
                     </span>
-                    <span className="truncate">{t.title}</span>
-                  </span>
-                  <StatusBadge status={t.status} compact />
-                </button>
-              ))}
+                    <StatusBadge status={t.status} compact />
+                  </button>
+                );
+              })}
             </div>
           )}
 
@@ -562,26 +637,43 @@ export function CommandPaletteModal({
               <div className="px-2.5 py-1 text-[11px] font-medium text-[var(--text-muted)]">
                 切换项目
               </div>
-              {matchedProjects.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => {
-                    onClose();
-                    onSelectProject(p.id);
-                  }}
-                  className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-[13px] text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
-                >
-                  <span className="flex items-center gap-2 min-w-0">
-                    <Icon name="folder-git-2" size={14} className="text-[var(--text-muted)]" />
-                    <span className="truncate">{p.name}</span>
-                  </span>
-                  <span className="text-[11.5px] font-mono text-[var(--text-muted)] shrink-0">
-                    {p.repo}
-                    {(p.repos?.length ?? 1) > 1 ? ` +${p.repos.length - 1}` : ""}
-                  </span>
-                </button>
-              ))}
+              {matchedProjects.map((p, idx) => {
+                const flatIdx = projectsOffset + idx;
+                const isSelected = safeActiveIndex === flatIdx;
+                return (
+                  <button
+                    key={p.id}
+                    ref={(el) => {
+                      optionRefs.current[flatIdx] = el;
+                    }}
+                    type="button"
+                    data-command-active={isSelected ? "true" : undefined}
+                    onMouseEnter={() => setActiveIndex(flatIdx)}
+                    onClick={() => {
+                      onClose();
+                      onSelectProject(p.id);
+                    }}
+                    className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-[13px] transition-colors cursor-pointer ${
+                      isSelected
+                        ? "bg-indigo-500/12 text-[var(--text-primary)]"
+                        : "text-[var(--text-primary)] hover:bg-[var(--surface-hover)]"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <Icon
+                        name="folder-git-2"
+                        size={14}
+                        className={isSelected ? "text-indigo-500" : "text-[var(--text-muted)]"}
+                      />
+                      <span className="truncate">{p.name}</span>
+                    </span>
+                    <span className="text-[11.5px] font-mono text-[var(--text-muted)] shrink-0">
+                      {p.repo}
+                      {(p.repos?.length ?? 1) > 1 ? ` +${p.repos.length - 1}` : ""}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
 
@@ -590,6 +682,24 @@ export function CommandPaletteModal({
               没有找到匹配项
             </div>
           )}
+        </div>
+
+        <div className="hidden sm:flex items-center justify-between px-4 py-2 border-t border-[var(--border-subtle)] bg-[var(--rd-tray)]/75 text-[11px] text-[var(--text-muted)]">
+          <span className="inline-flex items-center gap-2">
+            <span className="inline-flex items-center gap-1">
+              <Kbd>↑</Kbd>
+              <Kbd>↓</Kbd>
+              <span>选择</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <Kbd>↵</Kbd>
+              <span>执行</span>
+            </span>
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <Kbd>ESC</Kbd>
+            <span>关闭</span>
+          </span>
         </div>
       </div>
     </div>

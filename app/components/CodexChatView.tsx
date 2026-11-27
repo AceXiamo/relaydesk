@@ -42,6 +42,7 @@ import {
 } from "./agent-chat/AgentPrimitives.tsx";
 import { Icon } from "./Icon.tsx";
 import { MarkdownContent } from "./MarkdownContent.tsx";
+import { MorphIcon } from "./MotionPrimitives.tsx";
 import { Button, EmptyState, LivePulseDot, useToast } from "./ui.tsx";
 
 interface CodexChatViewProps {
@@ -951,25 +952,27 @@ export function CodexChatView({
                         setMobileSessionsOpen(false);
                       }
                     }}
-                    className={`group rounded-lg px-2 py-2 lg:py-1.5 transition-colors cursor-pointer ${
+                    className={`group rounded-xl px-2.5 py-2 lg:py-1.5 transition-[color,background-color,box-shadow,border-color] duration-150 cursor-pointer ${
                       active
-                        ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-[var(--rd-shadow-sm)] ring-1 ring-[var(--border-subtle)]"
+                        ? "rd-plate text-[var(--text-primary)]"
                         : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
                     }`}
                   >
                     <div className="flex items-center justify-between gap-1.5">
-                      <span className="flex items-center gap-1.5 min-w-0">
+                      <span className="flex items-center gap-2 min-w-0">
                         {s.kind === "release" ? (
                           <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 border border-indigo-500/20 shrink-0">
                             <Icon name="rocket" size={10} />
                             发布
                           </span>
                         ) : (
-                          <span
-                            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                              s.runtime === "codex" ? "bg-emerald-500" : s.runtime === "agy" ? "bg-sky-500" : "bg-amber-500"
-                            }`}
-                          />
+                          <span className="inline-flex h-4 w-4 items-center justify-center rounded-[5px] bg-[var(--rd-tray)] ring-1 ring-[var(--border-subtle)]/70 shrink-0 overflow-hidden">
+                            <img
+                              src={`/runtime-logos/${s.runtime}.svg`}
+                              alt=""
+                              className="h-3 w-3 object-contain"
+                            />
+                          </span>
                         )}
                         <span className="text-[12.5px] font-medium truncate">{s.title}</span>
                       </span>
@@ -1030,12 +1033,19 @@ export function CodexChatView({
                         </span>
                       )}
                     </div>
-                    <div className="flex items-center justify-between gap-1.5 mt-0.5 pl-3 text-[10.5px] text-[var(--text-muted)]">
+                    <div className="flex items-center justify-between gap-1.5 mt-0.5 pl-6 text-[10.5px] text-[var(--text-muted)]">
                       <span className="font-mono uppercase text-[10px]">
                         {s.runtime}
                         {s.runtime === "codex" && s.network_access ? " · 联网" : ""}
                       </span>
-                      <span>{rowTurn?.running || (active && streaming) ? "回复中" : formatRelativeTime(s.updated_at)}</span>
+                      {rowTurn?.running || (active && streaming) ? (
+                        <span className="inline-flex items-center gap-1 font-medium text-indigo-600 dark:text-indigo-400">
+                          <LivePulseDot tone="indigo" active />
+                          回复中
+                        </span>
+                      ) : (
+                        <span>{formatRelativeTime(s.updated_at)}</span>
+                      )}
                     </div>
                   </div>
                 );
@@ -1053,7 +1063,7 @@ export function CodexChatView({
             setMobileSessionsOpen(false);
             onOpenCliSettings();
           }}
-          className="w-full p-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]/60 transition-colors text-left space-y-1.5 cursor-pointer"
+          className="w-full p-2.5 rounded-xl rd-plate rd-press hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]/50 transition-[color,background-color,border-color,transform] duration-150 text-left space-y-1.5 cursor-pointer"
         >
           <div className="flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--text-primary)]">
@@ -1296,10 +1306,13 @@ export function CodexChatView({
                 </div>
               </div>
             ) : messages.length === 0 ? (
-              <div className="pt-8 pb-4 space-y-7 animate-fade-up">
+              <div className="pt-8 pb-4 space-y-7">
                 {/* Hero Header */}
                 <div className="space-y-2.5">
-                  <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[11.5px] text-[var(--text-secondary)]">
+                  <div
+                    style={{ ["--stagger-delay" as string]: "0ms" }}
+                    className="rd-stagger-in inline-flex items-center gap-2 px-2.5 py-1 rounded-full rd-plate text-[11.5px] text-[var(--text-secondary)]"
+                  >
                     <LivePulseDot
                       tone={currentAuthMode === "unavailable" ? "zinc" : "emerald"}
                       active={currentAuthMode !== "unavailable"}
@@ -1313,10 +1326,16 @@ export function CodexChatView({
                       </span>
                     )}
                   </div>
-                  <h2 className="text-[22px] font-semibold tracking-tight text-[var(--text-primary)]">
+                  <h2
+                    style={{ ["--stagger-delay" as string]: "40ms" }}
+                    className="rd-stagger-in text-[22px] font-semibold tracking-tight text-[var(--text-primary)]"
+                  >
                     {project.name}
                   </h2>
-                  <p className="text-[13.5px] text-[var(--text-muted)] max-w-xl leading-relaxed">
+                  <p
+                    style={{ ["--stagger-delay" as string]: "80ms" }}
+                    className="rd-stagger-in text-[13.5px] text-[var(--text-muted)] max-w-xl leading-relaxed"
+                  >
                     工作区已挂载项目文件、数据库、手册与已同步代码仓库。输入{" "}
                     <kbd className="rd-kbd">@</kbd> 引用具体资源，或输入{" "}
                     <kbd className="rd-kbd">/</kbd> 调用快捷指令。
@@ -1580,12 +1599,14 @@ export function CodexChatView({
                           {visibleContent && <button
                             type="button"
                             onClick={() => handleCopyMessage(msg.id, visibleContent)}
-                            className="inline-flex items-center gap-1 h-7 px-2 rounded-md hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                            className="rd-press inline-flex items-center gap-1 h-7 px-2 rounded-md hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-[color,background-color,transform] duration-150 cursor-pointer"
                           >
-                            <Icon
-                              name={copiedMsgId === msg.id ? "check" : "copy"}
+                            <MorphIcon
+                              name="copy"
+                              activeName="check"
+                              active={copiedMsgId === msg.id}
                               size={12}
-                              className={copiedMsgId === msg.id ? "text-emerald-500" : ""}
+                              activeClassName="text-emerald-500"
                             />
                             <span>{copiedMsgId === msg.id ? "已复制" : "复制"}</span>
                           </button>}
@@ -1649,7 +1670,7 @@ export function CodexChatView({
                 setShowScrollBottom(false);
                 scrollToBottom("smooth");
               }}
-              className="pointer-events-auto inline-flex items-center gap-1.5 h-8 px-3 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-card)]/95 backdrop-blur-sm text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] shadow-[var(--rd-shadow-md)] transition cursor-pointer"
+              className="pointer-events-auto rd-press inline-flex items-center gap-1.5 h-8 px-3 rounded-full border border-[var(--border-subtle)] bg-[var(--rd-plate)]/92 backdrop-blur-md text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] shadow-[var(--rd-shadow-lg)] transition-[color,background-color,transform,box-shadow] duration-150 cursor-pointer"
             >
               <Icon name="arrow-down" size={13} />
               <span>回到底部</span>

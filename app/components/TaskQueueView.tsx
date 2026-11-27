@@ -1,5 +1,6 @@
 import { useMemo, useRef } from "react";
 import { Icon } from "./Icon.tsx";
+import { MorphIcon, RollingNumber } from "./MotionPrimitives.tsx";
 import {
   Button,
   DeliveryModeBadge,
@@ -376,11 +377,17 @@ export function TaskQueueView({
     }
   };
 
+  const totalFlow = Math.max(
+    1,
+    metrics.autoPending + metrics.agent + metrics.shipped + metrics.attention,
+  );
+
   const telemetryCards = [
     {
       key: "auto_pending" as const,
       label: "自动待消费",
       count: metrics.autoPending,
+      ratio: metrics.autoPending / totalFlow,
       subtitle: paused ? "已暂停" : "无需人工干预，下轮自动领取",
       icon: "zap",
       active: cockpitFilter === "auto_pending",
@@ -388,7 +395,7 @@ export function TaskQueueView({
       accentText: paused
         ? "text-amber-600 dark:text-amber-400"
         : "text-indigo-600 dark:text-indigo-400",
-      accentBg: paused ? "bg-amber-500/10" : "bg-indigo-500/10",
+      accentBar: paused ? "bg-amber-500" : "bg-indigo-500",
       activeRing:
         "border-indigo-500/55 ring-1 ring-indigo-500/25 bg-indigo-500/[0.05] dark:bg-indigo-500/[0.08]",
       onClick: () => {
@@ -402,12 +409,13 @@ export function TaskQueueView({
       key: "agent" as const,
       label: "Agent 执行中",
       count: metrics.agent,
+      ratio: metrics.agent / totalFlow,
       subtitle: metrics.agent > 0 ? "本机 Agent 持有租约运行中" : "空闲中，等待定时巡检",
       icon: "terminal",
       active: false,
       pulse: metrics.agent > 0,
       accentText: "text-amber-600 dark:text-amber-400",
-      accentBg: "bg-amber-500/10",
+      accentBar: "bg-amber-500",
       activeRing:
         "border-amber-500/55 ring-1 ring-amber-500/25 bg-amber-500/[0.05]",
       onClick: () => onNavigateView("agents"),
@@ -416,6 +424,7 @@ export function TaskQueueView({
       key: "shipped" as const,
       label: "已自动交付",
       count: metrics.shipped,
+      ratio: metrics.shipped / totalFlow,
       subtitle:
         metrics.dismissed > 0
           ? `含 ${metrics.dismissed} 条自动过滤噪音`
@@ -424,7 +433,7 @@ export function TaskQueueView({
       active: statusFilter === "done" && !cockpitFilter,
       pulse: false,
       accentText: "text-emerald-600 dark:text-emerald-400",
-      accentBg: "bg-emerald-500/10",
+      accentBar: "bg-emerald-500",
       activeRing:
         "border-emerald-500/55 ring-1 ring-emerald-500/25 bg-emerald-500/[0.05] dark:bg-emerald-500/[0.08]",
       onClick: () => {
@@ -436,6 +445,7 @@ export function TaskQueueView({
       key: "attention" as const,
       label: "异常 / 待看",
       count: metrics.attention,
+      ratio: metrics.attention / totalFlow,
       subtitle: metrics.attention > 0 ? "重试超限或待补充" : "流水线健康，暂无异常",
       icon: "alert-triangle",
       active: cockpitFilter === "attention",
@@ -444,8 +454,7 @@ export function TaskQueueView({
         metrics.attention > 0
           ? "text-rose-600 dark:text-rose-400"
           : "text-[var(--text-muted)]",
-      accentBg:
-        metrics.attention > 0 ? "bg-rose-500/10" : "bg-[var(--surface-subtle)]",
+      accentBar: metrics.attention > 0 ? "bg-rose-500" : "bg-zinc-400/50",
       activeRing:
         "border-rose-500/55 ring-1 ring-rose-500/25 bg-rose-500/[0.05] dark:bg-rose-500/[0.08]",
       onClick: () => {
@@ -463,12 +472,18 @@ export function TaskQueueView({
       <header className="shrink-0 px-3.5 sm:px-5 lg:px-7 py-2 lg:py-4 border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)]">
         {/* Autonomous Pipeline Control Bar */}
         <div
-          className={`mb-2 lg:mb-3.5 px-2.5 sm:px-3.5 py-1.5 lg:py-2 rounded-xl border flex items-center justify-between gap-2 transition-colors duration-200 ${
+          className={`relative overflow-hidden mb-2 lg:mb-3.5 px-2.5 sm:px-3.5 py-1.5 lg:py-2 rounded-xl border flex items-center justify-between gap-2 transition-[color,background-color,border-color] duration-200 rd-tray ${
             paused
               ? "border-amber-500/25 bg-amber-500/[0.045] dark:bg-amber-500/[0.06]"
-              : "border-emerald-500/20 bg-emerald-500/[0.035] dark:bg-emerald-500/[0.05]"
+              : "border-emerald-500/22 bg-emerald-500/[0.035] dark:bg-emerald-500/[0.05]"
           }`}
         >
+          {!paused && metrics.agent > 0 && (
+            <span
+              aria-hidden="true"
+              className="rd-waterfall-stripe pointer-events-none absolute inset-x-0 top-0 h-[2px]"
+            />
+          )}
           <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 overflow-hidden">
             <div className="inline-flex items-center gap-1.5 sm:gap-2 min-w-0 shrink-0">
               <LivePulseDot tone={paused ? "amber" : "emerald"} active={!paused} />
@@ -497,7 +512,7 @@ export function TaskQueueView({
               <button
                 type="button"
                 onClick={() => onNavigateView("agents")}
-                className="hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/12 text-amber-700 dark:text-amber-300 border border-amber-500/20 hover:bg-amber-500/20 transition-colors cursor-pointer shrink-0"
+                className="rd-press hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/12 text-amber-700 dark:text-amber-300 border border-amber-500/20 hover:bg-amber-500/20 transition-[background-color,transform] duration-150 cursor-pointer shrink-0"
               >
                 <LivePulseDot tone="amber" active />
                 {metrics.agent} 个 Agent 执行中
@@ -509,7 +524,7 @@ export function TaskQueueView({
             <button
               type="button"
               onClick={handleSkillLink}
-              className="inline-flex items-center gap-1 sm:gap-1.5 h-7 px-2 sm:px-2.5 rounded-lg text-[11.5px] sm:text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] bg-[var(--surface-card)]/80 hover:bg-[var(--surface-card)] border border-[var(--border-subtle)] hover:border-[var(--border-strong)] transition-all duration-150 cursor-pointer"
+              className="rd-press inline-flex items-center gap-1 sm:gap-1.5 h-7 px-2 sm:px-2.5 rounded-lg text-[11.5px] sm:text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] rd-plate hover:border-[var(--border-strong)] transition-[color,background-color,border-color,transform] duration-150 cursor-pointer"
             >
               <Icon name="terminal" size={12.5} className="text-indigo-500" />
               <span className="sm:hidden">Skill</span>
@@ -520,16 +535,16 @@ export function TaskQueueView({
               type="button"
               disabled={automationBusy}
               onClick={() => void onToggleAutomation(!paused)}
-              className={`inline-flex items-center gap-1 sm:gap-1.5 h-7 px-2 sm:px-2.5 rounded-lg text-[11.5px] sm:text-[12px] font-medium border transition-all duration-150 cursor-pointer disabled:opacity-50 ${
+              className={`rd-press inline-flex items-center gap-1 sm:gap-1.5 h-7 px-2 sm:px-2.5 rounded-lg text-[11.5px] sm:text-[12px] font-medium border transition-[color,background-color,border-color,transform] duration-150 cursor-pointer disabled:opacity-50 ${
                 paused
                   ? "bg-emerald-600 hover:bg-emerald-700 text-white border-transparent shadow-2xs"
-                  : "bg-[var(--surface-card)] text-[var(--text-secondary)] hover:text-amber-700 dark:hover:text-amber-300 border-[var(--border-subtle)] hover:border-amber-500/40"
+                  : "bg-[var(--rd-plate)] text-[var(--text-secondary)] hover:text-amber-700 dark:hover:text-amber-300 border-[var(--border-subtle)] hover:border-amber-500/40"
               }`}
             >
               {automationBusy ? (
                 <Icon name="loader-2" size={12.5} className="animate-spin" />
               ) : (
-                <Icon name={paused ? "zap" : "pause-circle"} size={12.5} />
+                <MorphIcon name="pause-circle" activeName="zap" active={paused} size={12.5} />
               )}
               <span className="sm:hidden">{paused ? "恢复" : "暂停"}</span>
               <span className="hidden sm:inline">
@@ -663,10 +678,10 @@ export function TaskQueueView({
                     key={card.key}
                     type="button"
                     onClick={card.onClick}
-                    className={`flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-lg border px-1.5 text-center sm:flex-row sm:gap-2 transition-colors cursor-pointer ${
+                    className={`rd-press flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-lg border px-1.5 text-center sm:flex-row sm:gap-2 transition-[color,background-color,border-color,transform] duration-150 cursor-pointer ${
                       card.active
                         ? `${card.activeRing} shadow-2xs`
-                        : "border-[var(--border-subtle)] bg-[var(--surface-card)] active:bg-[var(--surface-hover)]"
+                        : "rd-plate active:bg-[var(--surface-hover)]"
                     }`}
                   >
                     <div className="flex items-center justify-center gap-1 text-[10.5px] font-medium text-[var(--text-muted)] leading-none">
@@ -682,53 +697,58 @@ export function TaskQueueView({
                             : "text-[var(--text-primary)]"
                       }`}
                     >
-                      {card.count}
+                      <RollingNumber value={card.count} />
                     </div>
                   </button>
                 );
               })}
             </div>
 
-            {/* Full KPI cards alongside the desktop navigation */}
+            {/* Goal-Numerals KPI cards alongside the desktop navigation */}
             <div className="hidden lg:grid grid-cols-4 gap-2.5 mt-3.5">
               {telemetryCards.map((card) => (
                 <button
                   key={card.key}
                   type="button"
                   onClick={card.onClick}
-                  className={`group relative flex flex-col justify-between px-3.5 py-2.5 rounded-xl border text-left transition-all duration-150 ease-out cursor-pointer ${
+                  className={`group rd-interactive-card relative overflow-hidden flex flex-col justify-between px-3.5 pt-3 pb-3 rounded-xl border text-left cursor-pointer ${
                     card.active
                       ? `${card.activeRing} shadow-2xs`
-                      : "border-[var(--border-subtle)] bg-[var(--surface-card)] hover:border-[var(--border-strong)] hover:-translate-y-[1px] hover:shadow-[var(--rd-shadow-sm)]"
+                      : "rd-plate hover:border-[var(--border-strong)]"
                   }`}
                 >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--text-muted)]">
-                        <span className="truncate">{card.label}</span>
-                        {card.pulse && <LivePulseDot tone="amber" active />}
-                      </div>
-                      <div
-                        className={`text-[21px] font-semibold font-mono tabular-nums leading-tight mt-0.5 ${
-                          card.key === "shipped" && card.count > 0
-                            ? "text-emerald-600 dark:text-emerald-400"
-                            : card.key === "attention" && card.count > 0
-                              ? "text-rose-600 dark:text-rose-400"
-                              : "text-[var(--text-primary)]"
-                        }`}
-                      >
-                        {card.count}
-                      </div>
-                    </div>
-                    <div
-                      className={`w-8 h-8 rounded-lg ${card.accentBg} ${card.accentText} flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform duration-150`}
-                    >
-                      <Icon name={card.icon} size={15} />
-                    </div>
+                  <div className="flex items-center justify-between gap-2 text-[11.5px] font-medium text-[var(--text-muted)]">
+                    <span className="inline-flex items-center gap-1.5 min-w-0">
+                      <Icon name={card.icon} size={13} className={`${card.accentText} shrink-0`} />
+                      <span className="truncate">{card.label}</span>
+                    </span>
+                    {card.pulse && <LivePulseDot tone="amber" active />}
                   </div>
-                  <div className="mt-1.5 text-[11px] text-[var(--text-muted)] truncate">
+                  <div
+                    className={`mt-1.5 text-[22px] font-semibold font-mono tabular-nums leading-tight ${
+                      card.key === "shipped" && card.count > 0
+                        ? "text-emerald-600 dark:text-emerald-400"
+                        : card.key === "attention" && card.count > 0
+                          ? "text-rose-600 dark:text-rose-400"
+                          : "text-[var(--text-primary)]"
+                    }`}
+                  >
+                    <RollingNumber value={card.count} />
+                  </div>
+                  <div className="mt-1 text-[11px] text-[var(--text-muted)] truncate">
                     {card.subtitle}
                   </div>
+                  <span
+                    aria-hidden="true"
+                    className="mt-2.5 block h-[3px] w-full rounded-full rd-tray overflow-hidden"
+                  >
+                    <span
+                      className={`block h-full origin-left ${card.accentBar} opacity-80 transition-transform duration-500 ease-[var(--ease-out)]`}
+                      style={{
+                        transform: `scaleX(${card.count > 0 ? Math.max(0.06, Math.min(1, card.ratio)) : 0})`,
+                      }}
+                    />
+                  </span>
                 </button>
               ))}
             </div>
@@ -947,7 +967,7 @@ export function TaskQueueView({
                   {/* Subtle left accent bar */}
                   <span
                     aria-hidden="true"
-                    className={`absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-full transition-all duration-150 ${
+                    className={`absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-full transition-[opacity,background-color] duration-150 ${
                       selected
                         ? "bg-indigo-500 opacity-100"
                         : isAgentActive
@@ -1079,8 +1099,12 @@ export function TaskQueueView({
 
                   {/* Desktop (>= md) compact single-line layout */}
                   {/* Priority */}
-                  <div className="hidden md:flex shrink-0 w-[56px] items-center">
-                    <PriorityBadge priority={task.priority} />
+                  {/* Priority */}
+                  <div className="hidden md:flex shrink-0 w-[58px] items-center">
+                    <PriorityBadge
+                      priority={task.priority}
+                      showLabel={task.priority === "urgent" || task.priority === "high"}
+                    />
                   </div>
 
                   {/* Code */}
@@ -1202,12 +1226,12 @@ export function TaskQueueView({
                   </div>
 
                   {/* Hover quick actions */}
-                  <div className="hidden xl:flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-150">
+                  <div className="hidden xl:flex items-center gap-1 opacity-0 translate-x-1.5 group-hover:opacity-100 group-hover:translate-x-0 focus-within:opacity-100 focus-within:translate-x-0 transition-[opacity,transform] duration-150 ease-[var(--ease-out)]">
                     {canReopen && (
                       <button
                         type="button"
                         onClick={(e) => void triggerQuick(e, task, "reopen")}
-                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11.5px] font-medium border border-[var(--border-subtle)] bg-[var(--surface-card)] text-indigo-600 dark:text-indigo-400 hover:border-indigo-500/50 hover:bg-indigo-500/[0.06] transition cursor-pointer"
+                        className="rd-press inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11.5px] font-medium rd-plate text-indigo-600 dark:text-indigo-400 hover:border-indigo-500/50 hover:bg-indigo-500/[0.06] transition-[color,background-color,border-color,transform] duration-150 cursor-pointer"
                       >
                         <Icon name="refresh-cw" size={11} />
                         重新入队
@@ -1217,7 +1241,7 @@ export function TaskQueueView({
                       <button
                         type="button"
                         onClick={(e) => void triggerQuick(e, task, "done")}
-                        className="px-2 py-1 rounded-md text-[11.5px] font-medium border border-[var(--border-subtle)] bg-[var(--surface-card)] text-emerald-600 dark:text-emerald-400 hover:border-emerald-500/50 hover:bg-emerald-500/[0.06] transition cursor-pointer"
+                        className="rd-press px-2 py-1 rounded-md text-[11.5px] font-medium rd-plate text-emerald-600 dark:text-emerald-400 hover:border-emerald-500/50 hover:bg-emerald-500/[0.06] transition-[color,background-color,border-color,transform] duration-150 cursor-pointer"
                       >
                         验收通过
                       </button>
@@ -1226,7 +1250,7 @@ export function TaskQueueView({
                       <button
                         type="button"
                         onClick={(e) => void triggerQuick(e, task, "claim")}
-                        className="px-2 py-1 rounded-md text-[11.5px] font-medium border border-[var(--border-subtle)] bg-[var(--surface-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] transition cursor-pointer"
+                        className="rd-press px-2 py-1 rounded-md text-[11.5px] font-medium rd-plate text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] transition-[color,background-color,border-color,transform] duration-150 cursor-pointer"
                       >
                         我来处理
                       </button>

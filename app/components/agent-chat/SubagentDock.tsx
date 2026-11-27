@@ -308,7 +308,7 @@ export function SubagentTaskList({
             data-subagent-id={ev.id}
             data-subagent-status={status}
             className={cn(
-              "rounded-lg border border-[var(--border-subtle)] border-l-2 bg-[var(--surface-card)] overflow-hidden transition-all",
+              "rounded-lg border border-[var(--border-subtle)] border-l-2 bg-[var(--rd-plate)] overflow-hidden transition-[border-color,box-shadow,background-color] duration-150",
               statusMeta.accentClass,
               isHighlighted && "ring-2 ring-indigo-500/45 border-indigo-500/50",
             )}

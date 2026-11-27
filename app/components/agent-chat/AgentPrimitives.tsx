@@ -43,6 +43,13 @@ import type {
   WorkspaceFileEntry,
 } from "~/lib/types.ts";
 import { Icon } from "../Icon.tsx";
+import {
+  EffortDetentTrack,
+  MorphIcon,
+  SegmentedDetent,
+  SmoothCollapse,
+  type EffortDetentOption,
+} from "../MotionPrimitives.tsx";
 import { Select, type SelectOption } from "../Select.tsx";
 import { LivePulseDot } from "../ui.tsx";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./RichPromptEditor.tsx";
@@ -202,22 +209,24 @@ export function ThinkingTrace({
         )}
       </button>
 
-      {isOpen && (
-        <div className="mt-1.5 ml-1 pl-3 pr-1 border-l border-[var(--border-subtle)] space-y-1.5 max-h-72 overflow-y-auto rd-scroll animate-fade-in">
-          {entries.map((item) => (
-            <div
-              key={item.id}
-              className={cn(
-                "text-[12px] leading-relaxed",
-                item.kind === "reasoning"
-                  ? "text-[var(--text-secondary)] whitespace-pre-wrap break-words"
-                  : "text-[var(--text-muted)] font-mono text-[11.5px]",
-              )}
-            >
-              {item.text}
-            </div>
-          ))}
-        </div>
+      {hasEntries && (
+        <SmoothCollapse open={isOpen}>
+          <div className="mt-1.5 ml-1 pl-3 pr-1 border-l border-[var(--border-subtle)] space-y-1.5 max-h-72 overflow-y-auto rd-scroll">
+            {entries.map((item) => (
+              <div
+                key={item.id}
+                className={cn(
+                  "text-[12px] leading-relaxed",
+                  item.kind === "reasoning"
+                    ? "text-[var(--text-secondary)] whitespace-pre-wrap break-words"
+                    : "text-[var(--text-muted)] font-mono text-[11.5px]",
+                )}
+              >
+                {item.text}
+              </div>
+            ))}
+          </div>
+        </SmoothCollapse>
       )}
     </div>
   );
@@ -472,14 +481,23 @@ function RegularToolChipsPanel({
     ? `正在执行工具 (${events.length - runningCount}/${events.length})`
     : `已调用 ${events.length} 个工具`;
 
+  const doneCount = Math.max(0, events.length - runningCount - errorCount);
+  const donePct = events.length > 0 ? Math.round(((events.length - runningCount) / events.length) * 100) : 0;
+
   return (
-    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/70 dark:bg-[var(--surface-card)]/50 overflow-hidden">
-      {/* Compact Group Header */}
+    <div className="relative rounded-xl rd-plate overflow-hidden">
+      {runningCount > 0 && (
+        <span
+          aria-hidden="true"
+          className="rd-waterfall-stripe pointer-events-none block h-[2px] w-full"
+        />
+      )}
+      {/* Compact Run-Waterfall Header */}
       <button
         type="button"
         onClick={() => setGroupOpen((v) => !v)}
         aria-expanded={groupOpen}
-        className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left hover:bg-[var(--surface-hover)]/70 transition-colors cursor-pointer"
+        className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left hover:bg-[var(--surface-hover)]/65 transition-colors duration-150 cursor-pointer"
       >
         <span className="flex items-center gap-2 min-w-0">
           {runningCount > 0 ? (
@@ -498,33 +516,61 @@ function RegularToolChipsPanel({
             </span>
           )}
         </span>
-        <Icon
-          name="chevron-down"
-          size={13}
-          className={cn(
-            "text-[var(--text-muted)] transition-transform duration-200 shrink-0",
-            groupOpen ? "rotate-180" : "rotate-0",
+        <span className="flex items-center gap-2 shrink-0">
+          {events.length > 1 && (
+            <span
+              aria-hidden="true"
+              className="hidden sm:inline-flex items-center gap-1.5 text-[10.5px] font-mono tabular-nums text-[var(--text-muted)]"
+            >
+              <span className="w-10 h-1 rounded-full rd-tray overflow-hidden">
+                <span
+                  className={cn(
+                    "block h-full origin-left transition-transform duration-300 ease-[var(--ease-out)]",
+                    errorCount > 0 ? "bg-rose-500/80" : runningCount > 0 ? "bg-indigo-500" : "bg-emerald-500/80",
+                  )}
+                  style={{ transform: `scaleX(${Math.max(0.08, donePct / 100)})` }}
+                />
+              </span>
+              <span>{doneCount}/{events.length}</span>
+            </span>
           )}
-        />
+          <Icon
+            name="chevron-down"
+            size={13}
+            className={cn(
+              "text-[var(--text-muted)] transition-transform duration-200 ease-[var(--ease-out)] shrink-0",
+              groupOpen ? "rotate-180" : "rotate-0",
+            )}
+          />
+        </span>
       </button>
 
       {groupOpen && (
-        <div className="border-t border-[var(--border-subtle)] divide-y divide-[var(--border-subtle)]/60">
-          {visibleEvents.map((ev) => {
+        <div
+          className={cn(
+            "border-t border-[var(--border-subtle)]/80 divide-y divide-[var(--border-subtle)]/50",
+            isStreaming && "max-h-[420px] overflow-y-auto rd-scroll",
+          )}
+        >
+          {visibleEvents.map((ev, rowIdx) => {
             const meta = parseToolMeta(ev);
             const hasDetail = Boolean(ev.output || ev.exit_code !== undefined);
             const isOpen = expandedIds.has(ev.id);
 
             return (
-              <div key={ev.id} className="text-[12px]">
+              <div
+                key={ev.id}
+                className="text-[12px] rd-stagger-in"
+                style={{ ["--stagger-delay" as string]: `${Math.min(rowIdx, 8) * 18}ms` }}
+              >
                 <button
                   type="button"
                   onClick={() => hasDetail && toggleItem(ev.id)}
                   disabled={!hasDetail}
                   aria-expanded={hasDetail ? isOpen : undefined}
                   className={cn(
-                    "w-full px-3 py-1.5 flex items-center justify-between gap-2 text-left transition-colors",
-                    hasDetail ? "hover:bg-[var(--surface-hover)]/60 cursor-pointer" : "cursor-default",
+                    "w-full px-3 py-1.5 flex items-center justify-between gap-2 text-left transition-colors duration-150",
+                    hasDetail ? "hover:bg-[var(--surface-hover)]/55 cursor-pointer" : "cursor-default",
                   )}
                 >
                   <span className="flex items-center gap-2 min-w-0 flex-1">
@@ -541,7 +587,7 @@ function RegularToolChipsPanel({
                     {meta.target && (
                       <span
                         className={cn(
-                          "px-1.5 py-0.5 rounded-[6px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[var(--text-primary)] truncate min-w-0 max-w-full sm:max-w-[440px]",
+                          "px-1.5 py-0.5 rounded-[6px] bg-[var(--rd-tray)] text-[var(--text-primary)] truncate min-w-0 max-w-full sm:max-w-[440px]",
                           meta.mono ? "font-mono text-[11px]" : "text-[11.5px]",
                         )}
                         title={meta.target}
@@ -564,7 +610,7 @@ function RegularToolChipsPanel({
                         name="chevron-right"
                         size={12}
                         className={cn(
-                          "text-[var(--text-muted)] transition-transform duration-150",
+                          "text-[var(--text-muted)] transition-transform duration-150 ease-[var(--ease-out)]",
                           isOpen && "rotate-90",
                         )}
                       />
@@ -573,16 +619,22 @@ function RegularToolChipsPanel({
                 </button>
 
                 {isOpen && hasDetail && (
-                  <div className="px-3 py-2 bg-[var(--surface-subtle)]/75 dark:bg-[#0d0f13]/80 border-t border-[var(--border-subtle)]/70 animate-fade-in">
+                  <div className="px-3 py-2 bg-[var(--rd-tray)] border-t border-[var(--border-subtle)]/70 animate-fade-in">
                     <div className="flex items-center justify-between gap-2 mb-1.5 text-[11px] text-[var(--text-muted)]">
                       <span className="font-mono truncate">{ev.summary}</span>
                       {ev.output && (
                         <button
                           type="button"
                           onClick={() => handleCopyOutput(ev.id, ev.output!)}
-                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition cursor-pointer shrink-0"
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded rd-press hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-[color,background-color] duration-150 cursor-pointer shrink-0"
                         >
-                          <Icon name={copiedId === ev.id ? "check" : "copy"} size={11} />
+                          <MorphIcon
+                            name="copy"
+                            activeName="check"
+                            active={copiedId === ev.id}
+                            size={11}
+                            activeClassName="text-emerald-500"
+                          />
                           {copiedId === ev.id ? "已复制" : "复制输出"}
                         </button>
                       )}
@@ -705,20 +757,21 @@ export function FollowUpList({
           {heading}
         </div>
       )}
-      <div className="divide-y divide-[var(--border-subtle)]/70 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/70 overflow-hidden">
-        {items.map((item) => (
+      <div className="divide-y divide-[var(--border-subtle)]/70 rounded-xl border border-[var(--border-subtle)] rd-tray overflow-hidden">
+        {items.map((item, idx) => (
           <button
             key={item.title}
             type="button"
             disabled={disabled}
             onClick={() => onSelect(item.prompt)}
+            style={{ ["--stagger-delay" as string]: `${idx * 32}ms` }}
             className={cn(
-              "group w-full flex items-center justify-between gap-3 text-left transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-50 cursor-pointer",
+              "group rd-stagger-in w-full flex items-center justify-between gap-3 text-left transition-colors duration-150 hover:bg-[var(--surface-card)]/90 disabled:opacity-50 cursor-pointer",
               compact ? "px-3 py-2" : "px-3.5 py-2.5",
             )}
           >
             <div className="flex items-start gap-2.5 min-w-0">
-              <span className="mt-0.5 text-[var(--text-muted)] group-hover:text-indigo-500 transition-colors shrink-0">
+              <span className="mt-0.5 text-[var(--text-muted)] group-hover:text-indigo-500 transition-colors duration-150 shrink-0">
                 <Icon name={item.icon} size={14} />
               </span>
               <div className="min-w-0">
@@ -735,7 +788,7 @@ export function FollowUpList({
             <Icon
               name="arrow-right"
               size={13}
-              className="text-[var(--text-muted)] opacity-50 group-hover:opacity-100 group-hover:translate-x-0.5 group-hover:text-[var(--text-primary)] transition-all shrink-0"
+              className="text-[var(--text-muted)] opacity-50 group-hover:opacity-100 group-hover:translate-x-0.5 group-hover:text-[var(--text-primary)] transition-[opacity,transform,color] duration-150 ease-[var(--ease-out)] shrink-0"
             />
           </button>
         ))}
@@ -977,7 +1030,7 @@ function FastModeButton({
         onKeyDown={(e) => { if (e.key === "Escape") setHintDismissed(true); }}
         onClick={() => { if (!disabled) onChange(nextMode); }}
         className={cn(
-          "rd-focus-ring inline-flex size-8 sm:size-7 items-center justify-center rounded-lg transition-all duration-150 cursor-pointer aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
+          "rd-focus-ring inline-flex size-8 sm:size-7 items-center justify-center rounded-lg transition-[color,background-color,transform] duration-150 cursor-pointer aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
           pressed
             ? "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300 [&_path]:fill-current"
             : "text-[var(--text-muted)]",
@@ -990,10 +1043,11 @@ function FastModeButton({
       <span
         id={hintId}
         role="tooltip"
+        style={{ transformOrigin: "bottom right" }}
         className={cn(
-          "pointer-events-none invisible opacity-0 translate-y-1 scale-[0.98]",
-          "absolute right-0 bottom-full mb-2 z-40 w-max max-w-56 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)]/95 backdrop-blur-md px-2.5 py-1.5 text-[11.5px] leading-relaxed text-[var(--text-secondary)] shadow-[var(--rd-shadow-lg)]",
-          "transition-all duration-150 ease-[cubic-bezier(0.16,1,0.3,1)]",
+          "pointer-events-none invisible opacity-0 translate-y-1 scale-[0.96]",
+          "absolute right-0 bottom-full mb-2 z-40 w-max max-w-56 rounded-xl border border-[var(--border-subtle)] bg-[var(--rd-plate)]/96 backdrop-blur-md px-2.5 py-1.5 text-[11.5px] leading-relaxed text-[var(--text-secondary)] shadow-[var(--rd-shadow-lg)]",
+          "transition-[opacity,transform,visibility] duration-150 ease-[var(--ease-out)]",
           !hintDismissed &&
             "group-hover/fast:visible group-hover/fast:opacity-100 group-hover/fast:translate-y-0 group-hover/fast:scale-100 group-focus-within/fast:visible group-focus-within/fast:opacity-100 group-focus-within/fast:translate-y-0 group-focus-within/fast:scale-100",
         )}
@@ -1127,6 +1181,18 @@ function ModelControls({
     return list;
   }, [levels, runtime, settings, activeLocalAgent]);
 
+  const effortDetentOptions = useMemo<EffortDetentOption[]>(
+    () =>
+      effortOptions.map((item) => ({
+        value: item.value,
+        label: item.label,
+        shortLabel: item.label,
+        description: item.description ?? "",
+        dotClassName: item.dotClassName,
+      })),
+    [effortOptions],
+  );
+
   useEffect(() => {
     if (open) inputRef.current?.focus();
   }, [open, runtime]);
@@ -1162,7 +1228,15 @@ function ModelControls({
     if (closeAfter) close();
   };
   const pillClass =
-    "inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-all duration-150 enabled:active:scale-[0.97] disabled:opacity-50 cursor-pointer min-w-0";
+    "inline-flex items-center gap-1.5 h-7 px-2 rounded-lg text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition-[color,background-color,transform] duration-150 enabled:active:scale-[0.97] disabled:opacity-50 cursor-pointer min-w-0";
+  const runtimeSegmentOptions = useMemo(
+    () =>
+      (["claude", "codex", "agy"] as const).map((rt) => ({
+        value: rt,
+        label: rt === "claude" ? "Claude Code" : rt === "agy" ? "Antigravity" : "Codex CLI",
+      })),
+    [],
+  );
   return (
     <div
       className="contents"
@@ -1205,38 +1279,40 @@ function ModelControls({
         <div
           role="dialog"
           aria-label="选择运行工具与模型"
-          className="absolute left-0 right-0 sm:right-auto sm:w-[360px] bottom-full mb-2 z-30 max-h-[55dvh] sm:max-h-none flex flex-col rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up"
+          style={{ transformOrigin: "bottom left" }}
+          className="absolute left-0 right-0 sm:right-auto sm:w-[376px] bottom-full mb-2 z-30 max-h-[60dvh] sm:max-h-none flex flex-col rounded-2xl border border-[var(--border-subtle)] bg-[var(--rd-plate)] shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up"
         >
-          <div className="flex gap-1 p-1.5 border-b border-[var(--border-subtle)]">
-            {(["claude", "codex", "agy"] as const).map((rt) => (
-              <button
-                key={rt}
-                type="button"
-                disabled={disabled}
-                aria-pressed={runtime === rt}
-                onClick={() => {
-                  if (runtime === rt) return;
-                  const nextAgent = resolveActiveLocalAgent(
-                    runtimeInfo,
-                    projectId,
-                    executionTarget,
-                    rt,
-                  );
-                  const nextDefault = resolveDefaultModelForTarget(rt, nextAgent, settings);
-                  choose(rt, nextDefault, false);
-                }}
-                className={cn(
-                  "flex-1 rounded-lg px-2 py-1.5 text-[12px] font-medium transition-colors cursor-pointer",
-                  runtime === rt
-                    ? "bg-[var(--surface-hover)] text-[var(--text-primary)]"
-                    : "text-[var(--text-muted)] hover:text-[var(--text-primary)]",
-                )}
-              >
-                {rt === "claude" ? "Claude Code" : rt === "agy" ? "Antigravity" : "Codex CLI"}
-              </button>
-            ))}
+          <div className="p-1.5 border-b border-[var(--border-subtle)]">
+            <SegmentedDetent<ChatRuntime>
+              options={runtimeSegmentOptions}
+              value={runtime}
+              fullWidth
+              disabled={disabled}
+              ariaLabel="选择运行工具"
+              onChange={(rt) => {
+                if (runtime === rt) return;
+                const nextAgent = resolveActiveLocalAgent(
+                  runtimeInfo,
+                  projectId,
+                  executionTarget,
+                  rt,
+                );
+                const nextDefault = resolveDefaultModelForTarget(rt, nextAgent, settings);
+                choose(rt, nextDefault, false);
+              }}
+            />
           </div>
-          <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-[var(--border-subtle)] bg-[var(--surface-subtle)]/50 text-[11px] text-[var(--text-muted)]">
+          {showEffortControl(runtime, current) && (
+            <div className="px-2.5 py-2 border-b border-[var(--border-subtle)] bg-[var(--rd-tray)]/55">
+              <EffortDetentTrack
+                options={effortDetentOptions}
+                value={displayedEffort}
+                disabled={!adjustable || disabled}
+                onChange={(next) => onChangeEffort(next)}
+              />
+            </div>
+          )}
+          <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40 text-[11px] text-[var(--text-muted)]">
             <span className="inline-flex items-center gap-1.5 min-w-0 truncate">
               {activeLocalAgent ? (
                 <>
@@ -1651,7 +1727,7 @@ export function PromptBar({
         setActiveIndex((i) => (i - 1 + filteredMentions.length) % filteredMentions.length);
         return true;
       }
-      if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
         e.preventDefault();
         const chosen = filteredMentions[activeIndex % filteredMentions.length];
         if (chosen) pickMention(chosen);
@@ -1675,7 +1751,7 @@ export function PromptBar({
         setActiveIndex((i) => (i - 1 + filteredSlash.length) % filteredSlash.length);
         return true;
       }
-      if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
         e.preventDefault();
         const chosen = filteredSlash[activeIndex % filteredSlash.length];
         if (chosen) pickSlash(chosen);
@@ -1709,8 +1785,11 @@ export function PromptBar({
     <div ref={barRef} className="relative">
       {/* Mention Popover (@) */}
       {popover === "mention" && (
-        <div className="absolute left-0 right-0 sm:right-auto sm:w-[380px] bottom-full mb-2 z-30 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up">
-          <div className="px-2.5 py-2 border-b border-[var(--border-subtle)] flex items-center gap-2 bg-[var(--surface-subtle)]/50">
+        <div
+          style={{ transformOrigin: "bottom left" }}
+          className="absolute left-0 right-0 sm:right-auto sm:w-[396px] bottom-full mb-2 z-30 rounded-2xl border border-[var(--border-subtle)] bg-[var(--rd-plate)]/98 backdrop-blur-md shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up"
+        >
+          <div className="px-2.5 py-2 border-b border-[var(--border-subtle)] flex items-center gap-2 bg-[var(--rd-tray)]/55">
             <Icon name="search" size={13} className="text-[var(--text-muted)] shrink-0" />
             <input
               value={mentionQuery}
@@ -1723,32 +1802,22 @@ export function PromptBar({
             />
             <span className="hidden sm:inline text-[10.5px] font-mono text-[var(--text-muted)]">↑↓ ↵</span>
           </div>
-          <div className="flex border-b border-[var(--border-subtle)] text-[11.5px] px-1.5 pt-1 gap-0.5 overflow-x-auto no-scrollbar whitespace-nowrap">
-            {(
-              [
-                { id: "all", label: `全部 (${allMentions.length})` },
-                { id: "files", label: `文件 (${workspaceFiles.length})` },
-                { id: "databases", label: `数据库 (${workspaceDatabases.length})` },
-                { id: "tasks", label: `工单 (${openTasks.length})` },
-              ] as const
-            ).map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => {
-                  setMentionTab(t.id);
-                  setActiveIndex(0);
-                }}
-                className={cn(
-                  "px-2 py-1.5 rounded-t-md font-medium transition cursor-pointer shrink-0",
-                  mentionTab === t.id
-                    ? "text-[var(--text-primary)] border-b-2 border-indigo-500"
-                    : "text-[var(--text-muted)] hover:text-[var(--text-primary)]",
-                )}
-              >
-                {t.label}
-              </button>
-            ))}
+          <div className="border-b border-[var(--border-subtle)] px-2 py-1.5 overflow-x-auto no-scrollbar">
+            <SegmentedDetent<"all" | "files" | "databases" | "tasks">
+              size="xs"
+              ariaLabel="筛选引用类型"
+              value={mentionTab}
+              onChange={(next) => {
+                setMentionTab(next);
+                setActiveIndex(0);
+              }}
+              options={[
+                { value: "all", label: "全部", badge: allMentions.length },
+                { value: "files", label: "文件", badge: workspaceFiles.length },
+                { value: "databases", label: "数据库", badge: workspaceDatabases.length },
+                { value: "tasks", label: "工单", badge: openTasks.length },
+              ]}
+            />
           </div>
           <div className="max-h-[45dvh] sm:max-h-56 overflow-y-auto rd-scroll p-1.5 space-y-0.5">
             {filteredMentions.length === 0 ? (
@@ -1808,8 +1877,11 @@ export function PromptBar({
 
       {/* Slash Command Popover (/) */}
       {popover === "slash" && (
-        <div className="absolute left-0 right-0 sm:right-auto sm:w-[360px] bottom-full mb-2 z-30 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up">
-          <div className="px-3 py-1.5 border-b border-[var(--border-subtle)] flex items-center justify-between text-[11px] text-[var(--text-muted)] bg-[var(--surface-subtle)]/50">
+        <div
+          style={{ transformOrigin: "bottom left" }}
+          className="absolute left-0 right-0 sm:right-auto sm:w-[360px] bottom-full mb-2 z-30 rounded-2xl border border-[var(--border-subtle)] bg-[var(--rd-plate)]/98 backdrop-blur-md shadow-[var(--rd-shadow-lg)] overflow-hidden animate-popover-in-up"
+        >
+          <div className="px-3 py-1.5 border-b border-[var(--border-subtle)] flex items-center justify-between text-[11px] text-[var(--text-muted)] bg-[var(--rd-tray)]/55">
             <span>快捷指令</span>
             <span className="hidden sm:inline font-mono">↑↓ ↵</span>
           </div>
@@ -1854,118 +1926,128 @@ export function PromptBar({
         </div>
       )}
 
-      {/* Outer Execution Environment Bar (above composer card) */}
-      <div className="mb-2 px-0.5 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2 min-w-0">
-          {onChangeExecutionTarget && (
-            <ExecutionTargetSelect
-              projectId={projectId}
-              runtime={runtime}
-              runtimeInfo={runtimeInfo}
-              executionTarget={executionTarget ?? "auto"}
-              disabled={streaming || settingsBusy}
-              onChangeExecutionTarget={onChangeExecutionTarget}
-              onOpenChange={() => setPopover("none")}
-            />
-          )}
-          {subagentSlot && (
-            <>
-              {onChangeExecutionTarget && (
-                <span className="hidden sm:inline-block h-3.5 w-px bg-[var(--border-subtle)]" />
-              )}
-              {subagentSlot}
-            </>
-          )}
-        </div>
-
-        <div className="flex items-center gap-1.5 shrink-0">
-          {/* Sandbox Mode Toggle Pill */}
-          <button
-            type="button"
-            disabled={streaming || settingsBusy}
-            onClick={() =>
-              onChangeSandboxMode(sandboxMode === "read-only" ? "workspace-write" : "read-only")
-            }
-            title={
-              sandboxMode === "workspace-write"
-                ? "当前允许编辑项目空间文件、HANDBOOK.md 与 DEPLOY.md；点击切回只读探索"
-                : "当前为只读探索模式；点击切为可写项目空间"
-            }
-            className={cn(
-              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-all duration-150 enabled:active:scale-[0.97] cursor-pointer disabled:opacity-50",
-              sandboxMode === "workspace-write"
-                ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/18"
-                : "border-[var(--border-subtle)] bg-[var(--surface-card)]/90 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]",
+      {/* Detent Quiet Tray + Elevated Composer Plate */}
+      <div className="rounded-[22px] border border-[var(--border-subtle)] rd-tray p-[5px] transition-[border-color,box-shadow] duration-200 focus-within:border-[var(--border-strong)]">
+        {/* Top Shelf inside Tray */}
+        <div className="px-2 pt-0.5 pb-1.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            {onChangeExecutionTarget && (
+              <ExecutionTargetSelect
+                projectId={projectId}
+                runtime={runtime}
+                runtimeInfo={runtimeInfo}
+                executionTarget={executionTarget ?? "auto"}
+                disabled={streaming || settingsBusy}
+                onChangeExecutionTarget={onChangeExecutionTarget}
+                onOpenChange={() => setPopover("none")}
+              />
             )}
-          >
-            <Icon
-              name={sandboxMode === "workspace-write" ? "pen-line" : "shield-check"}
-              size={12}
-            />
-            <span>{sandboxMode === "workspace-write" ? "可写空间" : "只读"}</span>
-          </button>
+            {subagentSlot && (
+              <>
+                {onChangeExecutionTarget && (
+                  <span className="hidden sm:inline-block h-3.5 w-px bg-[var(--border-subtle)]" />
+                )}
+                {subagentSlot}
+              </>
+            )}
+          </div>
 
-          {/* Codex Network Toggle Pill */}
-          {runtime === "codex" && (
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* Sandbox Mode Toggle Pill */}
             <button
               type="button"
               disabled={streaming || settingsBusy}
-              onClick={onToggleNetworkAccess}
+              onClick={() =>
+                onChangeSandboxMode(sandboxMode === "read-only" ? "workspace-write" : "read-only")
+              }
               title={
-                networkAccess
-                  ? "已开启 Codex 沙箱联网，可直连外部数据库或网络；点击关闭"
-                  : "Codex 沙箱当前断网；点击开启联网"
+                sandboxMode === "workspace-write"
+                  ? "当前允许编辑项目空间文件、HANDBOOK.md 与 DEPLOY.md；点击切回只读探索"
+                  : "当前为只读探索模式；点击切为可写项目空间"
               }
               className={cn(
-                "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-all duration-150 enabled:active:scale-[0.97] cursor-pointer disabled:opacity-50",
-                networkAccess
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/18"
-                  : "border-[var(--border-subtle)] bg-[var(--surface-card)]/90 text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]",
+                "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-[color,background-color,border-color,transform] duration-150 enabled:active:scale-[0.97] cursor-pointer disabled:opacity-50",
+                sandboxMode === "workspace-write"
+                  ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/18"
+                  : "border-[var(--border-subtle)] bg-[var(--rd-plate)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]",
               )}
             >
-              <Icon name={networkAccess ? "wifi" : "wifi-off"} size={12} />
-              <span className="hidden sm:inline">{networkAccess ? "联网" : "断网"}</span>
+              <Icon
+                name={sandboxMode === "workspace-write" ? "pen-line" : "shield-check"}
+                size={12}
+              />
+              <span>{sandboxMode === "workspace-write" ? "可写空间" : "只读"}</span>
             </button>
-          )}
 
-          <span className="hidden sm:inline-block h-3.5 w-px bg-[var(--border-subtle)] mx-0.5" />
+            {/* Codex Network Toggle Pill */}
+            {runtime === "codex" && (
+              <button
+                type="button"
+                disabled={streaming || settingsBusy}
+                onClick={onToggleNetworkAccess}
+                title={
+                  networkAccess
+                    ? "已开启 Codex 沙箱联网，可直连外部数据库或网络；点击关闭"
+                    : "Codex 沙箱当前断网；点击开启联网"
+                }
+                className={cn(
+                  "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border text-[11.5px] font-medium transition-[color,background-color,border-color,transform] duration-150 enabled:active:scale-[0.97] cursor-pointer disabled:opacity-50",
+                  networkAccess
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/18"
+                    : "border-[var(--border-subtle)] bg-[var(--rd-plate)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]",
+                )}
+              >
+                <Icon name={networkAccess ? "wifi" : "wifi-off"} size={12} />
+                <span className="hidden sm:inline">{networkAccess ? "联网" : "断网"}</span>
+              </button>
+            )}
 
-          <ContextUsageLabel session={contextSession} variant="pill" align="right" />
+            <span className="hidden sm:inline-block h-3.5 w-px bg-[var(--border-subtle)] mx-0.5" />
+
+            <ContextUsageLabel session={contextSession} variant="pill" align="right" />
+          </div>
         </div>
-      </div>
 
-      {/* Main Composer Card */}
-      <div
-        onDragOver={(e) => {
-          if (!onUploadImages) return;
-          if (Array.from(e.dataTransfer.types ?? []).includes("Files")) {
-            e.preventDefault();
-            if (!dragOverImage) setDragOverImage(true);
-          }
-        }}
-        onDragLeave={(e) => {
-          if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node | null)) {
+        {/* Elevated Main Composer Plate (concentric: 22px - 5px = 17px) */}
+        <div
+          onDragOver={(e) => {
+            if (!onUploadImages) return;
+            if (Array.from(e.dataTransfer.types ?? []).includes("Files")) {
+              e.preventDefault();
+              if (!dragOverImage) setDragOverImage(true);
+            }
+          }}
+          onDragLeave={(e) => {
+            if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node | null)) {
+              setDragOverImage(false);
+            }
+          }}
+          onDrop={(e) => {
             setDragOverImage(false);
-          }
-        }}
-        onDrop={(e) => {
-          setDragOverImage(false);
-          if (!onUploadImages) return;
-          const files = Array.from(e.dataTransfer.files ?? []).filter((f) => f.type.startsWith("image/"));
-          if (files.length > 0) {
-            e.preventDefault();
-            onUploadImages(files);
-          }
-        }}
-        className={cn(
-          "relative rounded-2xl border bg-[var(--surface-elevated)] shadow-[var(--rd-shadow-md)] focus-within:border-[var(--border-strong)] focus-within:ring-2 focus-within:ring-[var(--rd-ring)]/35 transition-all duration-200",
-          dragOverImage
-            ? "border-indigo-500 ring-2 ring-indigo-500/30"
-            : "border-[var(--border-subtle)]",
-        )}
-      >
+            if (!onUploadImages) return;
+            const files = Array.from(e.dataTransfer.files ?? []).filter((f) => f.type.startsWith("image/"));
+            if (files.length > 0) {
+              e.preventDefault();
+              onUploadImages(files);
+            }
+          }}
+          className={cn(
+            "relative rounded-[17px] border bg-[var(--rd-plate)] shadow-[var(--rd-shadow-composer)] focus-within:border-[var(--border-strong)] focus-within:ring-2 focus-within:ring-indigo-500/15 transition-[border-color,box-shadow] duration-200",
+            dragOverImage
+              ? "border-indigo-500 ring-2 ring-indigo-500/30"
+              : "border-[var(--border-subtle)]/90",
+          )}
+        >
+          {streaming && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 top-0 h-[17px] overflow-hidden rounded-t-[17px]"
+            >
+              <span className="rd-waterfall-stripe block h-[2px] w-full" />
+            </div>
+          )}
         {dragOverImage && (
-          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-[var(--surface-elevated)]/80 backdrop-blur-[2px] animate-fade-in">
+          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-[17px] bg-[var(--surface-elevated)]/80 backdrop-blur-[2px] animate-fade-in">
             <span className="inline-flex items-center gap-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-3 py-1 text-[12px] font-medium text-indigo-600 dark:text-indigo-300 shadow-xs">
               <Icon name="image" size={13} />
               释放以上传图片
@@ -2068,7 +2150,7 @@ export function PromptBar({
                   title="上传图片（也支持粘贴或拖入）"
                   aria-label="上传图片"
                   className={cn(
-                    "inline-flex items-center justify-center gap-1 h-8 w-8 sm:w-auto sm:h-7 sm:px-2 rounded-lg text-[12px] font-medium transition-all duration-150 enabled:active:scale-[0.96] cursor-pointer disabled:opacity-50 shrink-0",
+                    "inline-flex items-center justify-center gap-1 h-8 w-8 sm:w-auto sm:h-7 sm:px-2 rounded-lg text-[12px] font-medium transition-[color,background-color,transform] duration-150 enabled:active:scale-[0.96] cursor-pointer disabled:opacity-50 shrink-0",
                     hasImageAttachment
                       ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                       : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
@@ -2092,7 +2174,7 @@ export function PromptBar({
               }}
               title="引用项目空间文件、数据库或工单 (@)"
               className={cn(
-                "inline-flex items-center justify-center gap-1 h-8 px-2 sm:h-7 rounded-lg text-[12px] font-medium transition-all duration-150 enabled:active:scale-[0.96] cursor-pointer disabled:opacity-50 shrink-0",
+                "inline-flex items-center justify-center gap-1 h-8 px-2 sm:h-7 rounded-lg text-[12px] font-medium transition-[color,background-color,transform] duration-150 enabled:active:scale-[0.96] cursor-pointer disabled:opacity-50 shrink-0",
                 popover === "mention" || attachments.length > 0
                   ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
@@ -2117,7 +2199,7 @@ export function PromptBar({
               }}
               title="快捷指令 (/)"
               className={cn(
-                "inline-flex items-center justify-center h-8 w-8 sm:h-7 sm:w-7 rounded-lg text-[12px] font-mono font-medium transition-all duration-150 enabled:active:scale-[0.96] cursor-pointer disabled:opacity-50 shrink-0",
+                "inline-flex items-center justify-center h-8 w-8 sm:h-7 sm:w-7 rounded-lg text-[12px] font-mono font-medium transition-[color,background-color,transform] duration-150 enabled:active:scale-[0.96] cursor-pointer disabled:opacity-50 shrink-0",
                 popover === "slash"
                   ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
                   : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)]",
@@ -2171,7 +2253,7 @@ export function PromptBar({
                 onClick={onAbort}
                 title="停止生成"
                 aria-label="停止生成"
-                className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full bg-rose-500/12 text-rose-600 dark:text-rose-400 border border-rose-500/25 enabled:hover:bg-rose-600 enabled:hover:text-white enabled:active:scale-[0.95] text-[12px] font-medium transition-all duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full bg-rose-500/12 text-rose-600 dark:text-rose-400 border border-rose-500/25 enabled:hover:bg-rose-600 enabled:hover:text-white enabled:active:scale-[0.95] text-[12px] font-medium transition-[color,background-color,border-color,transform] duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Icon name="square" size={10} />
                 <span>停止</span>
@@ -2184,7 +2266,7 @@ export function PromptBar({
               title={streaming ? "停止当前回复并发送追问" : "发送消息"}
               aria-label={streaming ? "停止当前回复并发送追问" : "发送消息"}
               className={cn(
-                "group/send inline-flex items-center justify-center h-7 w-7 rounded-full transition-all duration-150",
+                "group/send inline-flex items-center justify-center h-7 w-7 rounded-full transition-[color,background-color,opacity,transform,box-shadow] duration-150",
                 canSend
                   ? "bg-[var(--rd-ink)] text-[var(--rd-surface)] hover:opacity-92 enabled:hover:scale-[1.04] enabled:active:scale-[0.92] shadow-xs cursor-pointer"
                   : "bg-[var(--surface-subtle)] text-[var(--text-muted)] opacity-60 cursor-not-allowed",
@@ -2197,6 +2279,7 @@ export function PromptBar({
               />
             </button>
           </div>
+        </div>
         </div>
       </div>
     </div>

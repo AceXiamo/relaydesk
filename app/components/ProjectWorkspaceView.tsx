@@ -1,4 +1,5 @@
-import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { prefersReducedMotion } from "~/lib/detent.ts";
 import { api } from "~/lib/api.ts";
 import { formatRelativeTime } from "~/lib/format.ts";
 import type {
@@ -27,6 +28,8 @@ import { MarkdownContent } from "./MarkdownContent.tsx";
 import { Select } from "./Select.tsx";
 import { WorkspaceMediaPreview } from "./WorkspaceMediaPreview.tsx";
 import { Button, EmptyState, Modal, useToast } from "./ui.tsx";
+
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 export type WorkspaceTab = "files" | "databases" | "handbook" | "deploy" | "repos";
 
@@ -1027,74 +1030,19 @@ export function ProjectWorkspaceView({
           }}
         />
 
-        {/* Tabs */}
-        <div className="flex items-center gap-1 mt-3 -mb-3 sm:-mb-3.5 overflow-x-auto no-scrollbar whitespace-nowrap">
-          {(
-            [
-              { id: "files", label: "文件管理", icon: "folder-open", count: fileCountOnly },
-              { id: "databases", label: "数据库 / 数据源", icon: "database", count: databases.length },
-              {
-                id: "handbook",
-                label: "项目手册",
-                icon: "book-open",
-                badge: handbook?.exists ? "已配置" : "未填写",
-                badgeReady: Boolean(handbook?.exists),
-              },
-              {
-                id: "deploy",
-                label: "部署文档",
-                icon: "rocket",
-                badge: deployDoc?.exists ? "已配置" : "未填写",
-                badgeReady: Boolean(deployDoc?.exists),
-              },
-              {
-                id: "repos",
-                label: "绑定仓库",
-                icon: "folder-git-2",
-                count: readyRepoCount,
-              },
-            ] as const
-          ).map((item) => {
-            const active = tab === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  setTab(item.id);
-                  setMobilePane("list");
-                }}
-                className={`relative shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors cursor-pointer ${
-                  active
-                    ? "text-indigo-600 dark:text-indigo-400"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                }`}
-              >
-                <Icon name={item.icon} size={14} />
-                <span>{item.label}</span>
-                {"count" in item && (
-                  <span className="text-[11px] font-mono px-1.5 py-0.2 rounded-full bg-[var(--surface-subtle)] text-[var(--text-muted)]">
-                    {item.count}
-                  </span>
-                )}
-                {"badge" in item && (
-                  <span
-                    className={`text-[10.5px] px-1.5 py-0.2 rounded-full ${
-                      item.badgeReady
-                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                        : "bg-[var(--surface-subtle)] text-[var(--text-muted)]"
-                    }`}
-                  >
-                    {item.badge}
-                  </span>
-                )}
-                {active && (
-                  <span className="absolute left-2 right-2 bottom-0 h-[2px] rounded-full bg-indigo-500" />
-                )}
-              </button>
-            );
-          })}
-        </div>
+        {/* Tabs with gliding underline */}
+        <WorkspaceTabStrip
+          tab={tab}
+          fileCountOnly={fileCountOnly}
+          databasesCount={databases.length}
+          handbookExists={Boolean(handbook?.exists)}
+          deployDocExists={Boolean(deployDoc?.exists)}
+          readyRepoCount={readyRepoCount}
+          onChangeTab={(next) => {
+            setTab(next);
+            setMobilePane("list");
+          }}
+        />
       </header>
 
       {/* TAB 1: FILES */}
@@ -2737,6 +2685,147 @@ export function ProjectWorkspaceView({
           </div>
         </div>
       </Modal>
+    </div>
+  );
+}
+
+function WorkspaceTabStrip({
+  tab,
+  fileCountOnly,
+  databasesCount,
+  handbookExists,
+  deployDocExists,
+  readyRepoCount,
+  onChangeTab,
+}: {
+  tab: WorkspaceTab;
+  fileCountOnly: number;
+  databasesCount: number;
+  handbookExists: boolean;
+  deployDocExists: boolean;
+  readyRepoCount: number;
+  onChangeTab: (next: WorkspaceTab) => void;
+}) {
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const btnRefs = useRef<Map<WorkspaceTab, HTMLButtonElement>>(new Map());
+  const measuredRef = useRef(false);
+  const [line, setLine] = useState<{ left: number; width: number; animate: boolean }>({
+    left: 0,
+    width: 0,
+    animate: false,
+  });
+
+  const measure = useCallback(() => {
+    const activeEl = btnRefs.current.get(tab);
+    if (!activeEl) return;
+    const width = Math.max(0, activeEl.offsetWidth - 16);
+    const left = activeEl.offsetLeft + 8;
+    const animate = measuredRef.current && !prefersReducedMotion();
+    measuredRef.current = true;
+    setLine((prev) =>
+      prev.left === left && prev.width === width && prev.animate === animate
+        ? prev
+        : { left, width, animate },
+    );
+  }, [tab]);
+
+  useIsomorphicLayoutEffect(() => {
+    measure();
+    const bar = barRef.current;
+    if (!bar || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => measure());
+    observer.observe(bar);
+    for (const el of btnRefs.current.values()) {
+      observer.observe(el);
+    }
+    return () => observer.disconnect();
+  }, [measure, fileCountOnly, databasesCount, handbookExists, deployDocExists, readyRepoCount]);
+
+  const items = [
+    { id: "files" as const, label: "文件管理", icon: "folder-open", count: fileCountOnly },
+    { id: "databases" as const, label: "数据库 / 数据源", icon: "database", count: databasesCount },
+    {
+      id: "handbook" as const,
+      label: "项目手册",
+      icon: "book-open",
+      badge: handbookExists ? "已配置" : "未填写",
+      badgeReady: handbookExists,
+    },
+    {
+      id: "deploy" as const,
+      label: "部署文档",
+      icon: "rocket",
+      badge: deployDocExists ? "已配置" : "未填写",
+      badgeReady: deployDocExists,
+    },
+    {
+      id: "repos" as const,
+      label: "绑定仓库",
+      icon: "folder-git-2",
+      count: readyRepoCount,
+    },
+  ];
+
+  return (
+    <div
+      ref={barRef}
+      role="tablist"
+      aria-label="项目空间标签页"
+      className="relative flex items-center gap-1 mt-3 -mb-3 sm:-mb-3.5 overflow-x-auto no-scrollbar whitespace-nowrap"
+    >
+      {items.map((item) => {
+        const active = tab === item.id;
+        return (
+          <button
+            key={item.id}
+            ref={(el) => {
+              if (el) btnRefs.current.set(item.id, el);
+              else btnRefs.current.delete(item.id);
+            }}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChangeTab(item.id)}
+            className={`relative shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors duration-150 cursor-pointer ${
+              active
+                ? "text-indigo-600 dark:text-indigo-400"
+                : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            }`}
+          >
+            <Icon name={item.icon} size={14} />
+            <span>{item.label}</span>
+            {"count" in item && (
+              <span className="text-[11px] font-mono tabular-nums px-1.5 py-0.2 rounded-full bg-[var(--surface-subtle)] text-[var(--text-muted)]">
+                {item.count}
+              </span>
+            )}
+            {"badge" in item && (
+              <span
+                className={`text-[10.5px] px-1.5 py-0.2 rounded-full ${
+                  item.badgeReady
+                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                    : "bg-[var(--surface-subtle)] text-[var(--text-muted)]"
+                }`}
+              >
+                {item.badge}
+              </span>
+            )}
+          </button>
+        );
+      })}
+      {line.width > 0 && (
+        <span
+          aria-hidden="true"
+          style={{
+            width: `${line.width}px`,
+            transform: `translate3d(${line.left}px, 0, 0)`,
+            transition: line.animate
+              ? "transform 240ms var(--ease-spring-snappy), width 240ms var(--ease-spring-snappy)"
+              : "none",
+          }}
+          className="pointer-events-none absolute left-0 bottom-0 h-[2px] rounded-full bg-indigo-500"
+        />
+      )}
     </div>
   );
 }

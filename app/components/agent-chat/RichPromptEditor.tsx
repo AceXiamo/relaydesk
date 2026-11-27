@@ -24,6 +24,122 @@ export interface RichPromptEditorHandle {
 const INLINE_CODE_CLASS =
   "inline-block align-baseline px-1.5 py-[0.5px] mx-[1px] rounded-[5px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] font-mono text-[12px] leading-[1.45] text-[var(--text-primary)]";
 
+const KNOWN_CODE_LANGS = new Set([
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "json",
+  "bash",
+  "sh",
+  "zsh",
+  "shell",
+  "py",
+  "python",
+  "sql",
+  "go",
+  "rust",
+  "rs",
+  "css",
+  "scss",
+  "html",
+  "xml",
+  "yaml",
+  "yml",
+  "toml",
+  "ini",
+  "md",
+  "markdown",
+  "diff",
+  "java",
+  "c",
+  "cpp",
+  "swift",
+  "kt",
+  "kotlin",
+  "rb",
+  "ruby",
+  "php",
+  "dockerfile",
+  "docker",
+  "graphql",
+  "text",
+  "txt",
+]);
+
+function createSentinelBr(): HTMLBRElement {
+  const el = document.createElement("br");
+  el.dataset.rdSentinel = "true";
+  return el;
+}
+
+function isSentinelBr(node: Node | null): node is HTMLBRElement {
+  return (
+    node?.nodeType === Node.ELEMENT_NODE &&
+    (node as HTMLElement).tagName === "BR" &&
+    (node as HTMLElement).dataset.rdSentinel === "true"
+  );
+}
+
+function isIgnorableEmptyNode(node: Node): boolean {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return (node.textContent ?? "").replaceAll(ZERO_WIDTH, "").length === 0;
+  }
+  return isSentinelBr(node);
+}
+
+function hasVisibleContentAfter(node: Node, root: HTMLElement): boolean {
+  const afterRange = document.createRange();
+  afterRange.selectNodeContents(root);
+  afterRange.setStartAfter(node);
+  const frag = afterRange.cloneContents();
+  const walker = document.createTreeWalker(frag, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  let curr: Node | null = walker.nextNode();
+  while (curr) {
+    if (curr.nodeType === Node.TEXT_NODE) {
+      if ((curr.textContent ?? "").replaceAll(ZERO_WIDTH, "").length > 0) return true;
+    } else if (curr.nodeType === Node.ELEMENT_NODE) {
+      const el = curr as HTMLElement;
+      if (el.tagName === "BR" && el.dataset.rdSentinel !== "true") return true;
+      if (el.tagName === "CODE" || el.dataset.inlineCode === "true") {
+        if ((el.textContent ?? "").replaceAll(ZERO_WIDTH, "").length > 0) return true;
+      }
+    }
+    curr = walker.nextNode();
+  }
+  return false;
+}
+
+function hasRealBrBefore(node: Node, root: HTMLElement): boolean {
+  const beforeRange = document.createRange();
+  beforeRange.selectNodeContents(root);
+  beforeRange.setEndBefore(node);
+  const frag = beforeRange.cloneContents();
+  const children = Array.from(frag.childNodes);
+  for (let i = children.length - 1; i >= 0; i -= 1) {
+    const child = children[i]!;
+    if (child.nodeType === Node.TEXT_NODE) {
+      if ((child.textContent ?? "").replaceAll(ZERO_WIDTH, "").length === 0) continue;
+      return false;
+    }
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      const el = child as HTMLElement;
+      if (el.tagName === "BR" && el.dataset.rdSentinel !== "true") return true;
+      return false;
+    }
+  }
+  return false;
+}
+
+function cleanupStaleSentinels(root: HTMLElement): void {
+  const sentinels = Array.from(root.querySelectorAll("br[data-rd-sentinel='true']"));
+  for (const s of sentinels) {
+    if (hasVisibleContentAfter(s, root) || !hasRealBrBefore(s, root)) {
+      s.remove();
+    }
+  }
+}
+
 function createInlineCodeElement(text: string): HTMLElement {
   const el = document.createElement("code");
   el.setAttribute("data-inline-code", "true");
@@ -61,7 +177,7 @@ function renderInlineMarkdownToDom(container: HTMLElement, text: string): void {
   });
 
   if (text.endsWith("\n")) {
-    frag.appendChild(document.createElement("br"));
+    frag.appendChild(createSentinelBr());
   }
   container.appendChild(frag);
 }
@@ -74,7 +190,9 @@ function serializeDomToInlineMarkdown(container: HTMLElement): string {
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
     const el = node as HTMLElement;
     const tag = el.tagName;
-    if (tag === "BR") return "\n";
+    if (tag === "BR") {
+      return el.dataset.rdSentinel === "true" ? "" : "\n";
+    }
     if (tag === "CODE" || el.dataset.inlineCode === "true") {
       const inner = (el.textContent ?? "").replaceAll(ZERO_WIDTH, "").replace(/\n/g, " ");
       return inner ? `\`${inner}\`` : "";
@@ -92,17 +210,7 @@ function serializeDomToInlineMarkdown(container: HTMLElement): string {
   let out = "";
   const children = Array.from(container.childNodes);
   for (let i = 0; i < children.length; i += 1) {
-    const child = children[i]!;
-    if (
-      i === children.length - 1 &&
-      child.nodeType === Node.ELEMENT_NODE &&
-      (child as HTMLElement).tagName === "BR" &&
-      out.endsWith("\n")
-    ) {
-      // Ignore browser-inserted trailing sentinel <br> when already ending in newline.
-      continue;
-    }
-    out += walk(child);
+    out += walk(children[i]!);
   }
   return out.replace(/^\n/, (m) => (children[0]?.nodeName === "DIV" ? "" : m));
 }
@@ -270,10 +378,33 @@ function TextSegment({
     return true;
   }, []);
 
+  const tryAutoConvertCodeFence = useCallback(
+    (el: HTMLElement): boolean => {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return false;
+      const range = sel.getRangeAt(0);
+      if (!el.contains(range.startContainer)) return false;
+      if (getInlineCodeAncestor(range.startContainer, el)) return false;
+
+      const { before, after } = getMarkdownBeforeCaret(el, range);
+      if (!/(^|[^`])```$/.test(before)) return false;
+
+      const beforeText = before.slice(0, -3).replace(/\n$/, "");
+      const afterText = after.replace(/^\n/, "");
+      renderInlineMarkdownToDom(el, beforeText);
+      lastDomTextRef.current = beforeText;
+      onConvertToCodeBlock(id, beforeText, "", afterText);
+      return true;
+    },
+    [id, onConvertToCodeBlock],
+  );
+
   const syncFromDom = useCallback(() => {
     const el = divRef.current;
     if (!el) return;
+    cleanupStaleSentinels(el);
     if (!composingRef.current) {
+      if (tryAutoConvertCodeFence(el)) return;
       tryAutoConvertInlineCode(el);
     }
     // Remove empty inline code tags left behind by deleting all characters inside one.
@@ -285,7 +416,44 @@ function TextSegment({
     const serialized = serializeDomToInlineMarkdown(el);
     lastDomTextRef.current = serialized;
     onTextChange(id, serialized);
-  }, [id, onTextChange, tryAutoConvertInlineCode]);
+  }, [id, onTextChange, tryAutoConvertCodeFence, tryAutoConvertInlineCode]);
+
+  const insertLineBreak = useCallback(
+    (el: HTMLElement, sel: Selection, range: Range) => {
+      const codeAncestor = getInlineCodeAncestor(range.startContainer, el);
+      if (codeAncestor) {
+        range.setStartAfter(codeAncestor);
+        range.collapse(true);
+      } else {
+        range.deleteContents();
+      }
+
+      const br = document.createElement("br");
+      range.insertNode(br);
+
+      if (!hasVisibleContentAfter(br, el)) {
+        // Strip empty trailing text nodes / old sentinels so caret sits reliably on the new empty line.
+        let sibling = br.nextSibling;
+        while (sibling) {
+          const next = sibling.nextSibling;
+          if (isIgnorableEmptyNode(sibling)) {
+            sibling.parentNode?.removeChild(sibling);
+          }
+          sibling = next;
+        }
+        br.after(createSentinelBr());
+      }
+
+      const nextRange = document.createRange();
+      nextRange.setStartAfter(br);
+      nextRange.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(nextRange);
+      br.scrollIntoView?.({ block: "nearest" });
+      syncFromDom();
+    },
+    [syncFromDom],
+  );
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (disabled) return;
@@ -350,7 +518,7 @@ function TextSegment({
     }
 
     // 3. Detect ``` or ```lang + Space / Enter -> convert to Code Block Card
-    if ((e.key === " " || (e.key === "Enter" && !e.shiftKey)) && range && range.collapsed) {
+    if ((e.key === " " || e.key === "Enter") && range && range.collapsed) {
       if (!getInlineCodeAncestor(range.startContainer, el)) {
         const { before, after } = getMarkdownBeforeCaret(el, range);
         const linesBefore = before.split("\n");
@@ -361,6 +529,8 @@ function TextSegment({
           const lang = fenceMatch[1] ?? "";
           const preceding = linesBefore.slice(0, -1).join("\n");
           const remaining = after.replace(/^\n/, "");
+          renderInlineMarkdownToDom(el, preceding);
+          lastDomTextRef.current = preceding;
           onConvertToCodeBlock(id, preceding, lang, remaining);
           return;
         }
@@ -391,21 +561,8 @@ function TextSegment({
         submitMode === "mod-enter" ? e.metaKey || e.ctrlKey : !e.shiftKey;
       if (!shouldSubmit) {
         e.preventDefault();
-        if (range) {
-          range.deleteContents();
-          const br = document.createElement("br");
-          range.insertNode(br);
-          // Ensure caret can sit on the newly created trailing line
-          if (!br.nextSibling) {
-            const sentinel = document.createElement("br");
-            br.after(sentinel);
-          }
-          const nextRange = document.createRange();
-          nextRange.setStartAfter(br);
-          nextRange.collapse(true);
-          sel!.removeAllRanges();
-          sel!.addRange(nextRange);
-          syncFromDom();
+        if (sel && range) {
+          insertLineBreak(el, sel, range);
         }
         return;
       }
@@ -619,6 +776,13 @@ function CodeSegmentCard({
           onExitBelow(id);
           return;
         }
+        // Promote ```lang + Enter muscle-memory into the code block language badge
+        const trimmedLang = code.trim().toLowerCase();
+        if (!lang && !code.includes("\n") && pos === code.length && KNOWN_CODE_LANGS.has(trimmedLang)) {
+          e.preventDefault();
+          onChange(id, { lang: trimmedLang, code: "" });
+          return;
+        }
       }
     }
 
@@ -657,8 +821,8 @@ function CodeSegmentCard({
   };
 
   return (
-    <div className="my-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/90 dark:bg-[#0d0f13]/90 overflow-hidden">
-      <div className="h-7 px-2.5 border-b border-[var(--border-subtle)]/80 bg-[var(--surface-card)]/70 flex items-center justify-between gap-2">
+    <div className="my-1.5 rounded-xl rd-plate overflow-hidden">
+      <div className="h-7 px-2.5 border-b border-[var(--border-subtle)]/80 bg-[var(--rd-tray)]/85 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           <Icon name="code-2" size={12} className="text-indigo-500 shrink-0" />
           <input
@@ -738,47 +902,68 @@ export const RichPromptEditor = forwardRef<RichPromptEditorHandle, RichPromptEdi
     ref,
   ) {
     const [blocks, setBlocks] = useState<EditorBlock[]>(() => parseMarkdownToBlocks(value));
+    const blocksRef = useRef<EditorBlock[]>(blocks);
+    blocksRef.current = blocks;
     const lastEmittedRef = useRef<string>(value);
     const textRefs = useRef<Map<string, HTMLDivElement>>(new Map());
     const codeRefs = useRef<Map<string, HTMLTextAreaElement>>(new Map());
+    const pendingFocusRef = useRef<{ id: string; position: "start" | "end" } | null>(null);
 
     // Sync when parent changes `value` externally (clear after send, starter prompt, @mention cleanup)
     useEffect(() => {
       if (value === lastEmittedRef.current) return;
       lastEmittedRef.current = value;
-      setBlocks(parseMarkdownToBlocks(value));
+      const parsed = parseMarkdownToBlocks(value);
+      blocksRef.current = parsed;
+      setBlocks(parsed);
     }, [value]);
 
     const commitBlocks = useCallback(
       (updater: (prev: EditorBlock[]) => EditorBlock[]) => {
-        setBlocks((prev) => {
-          const next = ensureTextBoundaries(updater(prev));
-          const serialized = serializeBlocksToMarkdown(next);
-          lastEmittedRef.current = serialized;
-          onChange(serialized);
-          return next;
-        });
+        const next = ensureTextBoundaries(updater(blocksRef.current));
+        blocksRef.current = next;
+        const serialized = serializeBlocksToMarkdown(next);
+        lastEmittedRef.current = serialized;
+        setBlocks(next);
+        onChange(serialized);
       },
       [onChange],
     );
 
-    const focusBlock = useCallback((blockId: string, position: "start" | "end" = "end") => {
-      window.requestAnimationFrame(() => {
-        const textEl = textRefs.current.get(blockId);
-        if (textEl) {
-          textEl.focus();
-          if (position === "start") setCaretAtStart(textEl);
-          else setCaretAtEnd(textEl);
-          return;
-        }
-        const codeEl = codeRefs.current.get(blockId);
-        if (codeEl) {
-          codeEl.focus();
-          const pos = position === "start" ? 0 : codeEl.value.length;
-          codeEl.selectionStart = codeEl.selectionEnd = pos;
-        }
-      });
+    const applyFocusToDom = useCallback((blockId: string, position: "start" | "end"): boolean => {
+      const textEl = textRefs.current.get(blockId);
+      if (textEl) {
+        textEl.focus();
+        if (position === "start") setCaretAtStart(textEl);
+        else setCaretAtEnd(textEl);
+        return true;
+      }
+      const codeEl = codeRefs.current.get(blockId);
+      if (codeEl) {
+        codeEl.focus();
+        const pos = position === "start" ? 0 : codeEl.value.length;
+        codeEl.selectionStart = codeEl.selectionEnd = pos;
+        return true;
+      }
+      return false;
     }, []);
+
+    useLayoutEffect(() => {
+      const pending = pendingFocusRef.current;
+      if (!pending) return;
+      if (applyFocusToDom(pending.id, pending.position)) {
+        pendingFocusRef.current = null;
+      }
+    }, [blocks, applyFocusToDom]);
+
+    const focusBlock = useCallback(
+      (blockId: string, position: "start" | "end" = "end") => {
+        if (!applyFocusToDom(blockId, position)) {
+          pendingFocusRef.current = { id: blockId, position };
+        }
+      },
+      [applyFocusToDom],
+    );
 
     useImperativeHandle(
       ref,
