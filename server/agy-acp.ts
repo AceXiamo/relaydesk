@@ -16,6 +16,8 @@ interface ConfigOption {
   options?: { value?: string; name?: string; options?: { value: string; name: string }[] }[];
 }
 
+const acpToolKinds = new Set(["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"]);
+
 // One ACP worker and one outstanding client request per Relaydesk turn.
 // Feed events into the existing Agy parser so redaction and output limits stay shared.
 export function agyAcpTurn(
@@ -33,7 +35,7 @@ export function agyAcpTurn(
   let finished = false;
   let modelChanging = false;
   const settings: { method: string; params: Record<string, unknown> }[] = [];
-  const tools = new Map<string, { index: number; name: string }>();
+  const tools = new Map<string, { index: number; name: string; title: string }>();
   const send = (message: object) => stdin.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
   const emit = (event: object) => emitLine(JSON.stringify(event) + "\n");
   function request(name: string, params: object) {
@@ -92,13 +94,14 @@ export function agyAcpTurn(
             [u.sessionUpdate === "agent_message_chunk" ? "text_delta" : "thinking_delta"]: u.content.text,
           });
       } else if (u.sessionUpdate === "tool_call" || u.sessionUpdate === "tool_call_update") {
-        const tool = tools.get(u.toolCallId) ?? { index: tools.size, name: "tool" };
-        if (u.title) tool.name = u.title;
+        const tool = tools.get(u.toolCallId) ?? { index: tools.size, name: acpToolKinds.has(u.kind) ? u.kind as string : "tool", title: "" };
+        if (typeof u.title === "string" && u.title.trim()) tool.title = u.title;
         tools.set(u.toolCallId, tool);
         step({
           step_type: "tool",
           step_index: tool.index,
           tool_name: tool.name,
+          tool_title: tool.title,
           state: u.status === "completed" ? "DONE" : u.status === "failed" ? "ERROR" : "ACTIVE",
           tool_info: {
             parameters: u.rawInput,

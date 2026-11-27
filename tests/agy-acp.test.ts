@@ -50,10 +50,11 @@ it("uses model-specific effort options and keeps permission, tool and streaming 
   const prompt = f.requests.at(-1)!;
   expect(prompt.method).toBe("session/prompt");
   const update = (u: object) => f.write({ method: "session/update", params: { sessionId: "s", update: u } });
-  update({ sessionUpdate: "tool_call", toolCallId: "t", title: "read marker" });
+  update({ sessionUpdate: "tool_call", toolCallId: "t", kind: "read", title: "Read " + "x".repeat(400) });
   update({
     sessionUpdate: "tool_call_update",
     toolCallId: "t",
+    title: "Read fixture-token " + "y".repeat(5000),
     status: "completed",
     content: [{ type: "content", content: { type: "text", text: "ok fixture-token" } }],
   });
@@ -65,7 +66,8 @@ it("uses model-specific effort options and keeps permission, tool and streaming 
   expect(f.state.text).toBe("ok");
   expect(f.state.toolEvents.get("agy-step-0")).toMatchObject({
     status: "done",
-    tool: "read marker",
+    tool: "read",
+    summary: ("Read [redacted] " + "y".repeat(5000)).slice(0, 4096),
     output: "ok [redacted]",
   });
 });

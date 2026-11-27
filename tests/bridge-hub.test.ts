@@ -3,7 +3,7 @@ import { readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { getProjectFilesDir } from "../server/workspace.ts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { bearer, fixture, operator, sha256, type Fixture } from "./bridge-fixture.ts";
 
@@ -172,6 +172,35 @@ describe("BridgeHub registration and connection lifecycle", () => {
     expect(f.srv.bridgeHub.hasActiveWriteLease(id, p)).toBe(false);
     await stream;
     expect((await session.detail()).messages.at(-1).status).toBe(change === "cancel" ? "aborted" : "error");
+  });
+
+  it("accepts legacy Agy titles on live and terminal frames", async () => {
+    const { id, token } = await f.register(), p = await f.project(), conn = await f.connect(token);
+    await conn.hello(bindings(p));
+    const session = await f.session(p, id);
+    const stream = (await session.turn("run")).text();
+    const ids = { run_id: (await conn.next("chat.start")).payload.run_id, session_id: session.id };
+    const tool = { id: "agy-step-0", tool: "Read " + "x".repeat(5000), summary: "File details", status: "done" };
+    conn.send("chat.event", { ...ids, event: { type: "tool", event: tool } });
+    conn.send("chat.event", { ...ids, event: { type: "done" }, result: { status: "done", content: "ok", events: [tool], externalSessionId: "" } });
+    expect(await stream).toContain('"tool":"tool"');
+    expect((await session.detail()).messages.at(-1).status).toBe("done");
+  });
+
+  it("logs validation paths and lengths without tool content", async () => {
+    const { id, token } = await f.register(), p = await f.project(), conn = await f.connect(token);
+    await conn.hello(bindings(p));
+    const session = await f.session(p, id);
+    const stream = (await session.turn("run")).text();
+    const run_id = (await conn.next("chat.start")).payload.run_id;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      conn.send("chat.event", { run_id, session_id: session.id, event: { type: "tool", event: {
+        id: "other", tool: "private".repeat(20), status: "running", summary: "sensitive content",
+      } } });
+      await stream;
+      expect(warn).toHaveBeenCalledWith("[bridge] rejected frame: validation=too_big field=event.tool length=140");
+    } finally { warn.mockRestore(); }
   });
 
   it("streams the latest context sample, persists it on reload, and clears it on model changes", async () => {

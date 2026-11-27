@@ -304,9 +304,14 @@ export async function runLocalChat(o: RunnerOptions): Promise<RunChatTurnResult>
   };
   function redactObject<T>(obj: T): T {
     return JSON.parse(
-      JSON.stringify(obj, (k, value: unknown) =>
-        typeof value === "string" && k !== "type" && k !== "status" ? clean(value) : value,
-      ),
+      JSON.stringify(obj, (k, value: unknown) => {
+        if (typeof value !== "string" || k === "type" || k === "status") return value;
+        const redacted = clean(value);
+        // Redaction can expand short secrets after the parser applied its limits.
+        if (k === "summary") return redacted.slice(0, 4096);
+        if (k === "tool") return redacted.length <= 128 ? redacted : "tool";
+        return redacted;
+      }),
     );
   }
   // A CLI may split a credential across two JSON deltas. Withhold a possible

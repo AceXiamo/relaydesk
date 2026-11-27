@@ -1124,7 +1124,8 @@ function handleAgyJsonLine(
       const params = toolInfo?.parameters && typeof toolInfo.parameters === "object"
         ? (toolInfo.parameters as Record<string, unknown>)
         : null;
-      const summary = redactSecrets(summarizeAgyTool(toolName, params), secrets);
+      const title = typeof step.tool_title === "string" && step.tool_title ? step.tool_title : summarizeAgyTool(toolName, params);
+      const summary = redactSecrets(title, secrets).slice(0, 4096);
       const status: ChatToolEvent["status"] = stepState === "DONE"
         ? "done"
         : stepState === "ERROR" || stepState === "FAILED" || stepState === "CANCELED" || stepState === "CANCELLED"
@@ -1132,7 +1133,7 @@ function handleAgyJsonLine(
           : "running";
       const rawOutput = typeof toolInfo?.output === "string" ? toolInfo.output : "";
       const output = rawOutput ? redactSecrets(rawOutput, secrets).slice(0, MAX_TOOL_OUTPUT_CHARS) : undefined;
-      upsertToolEvent(state, { id, tool: toolName, summary, status, ...(output ? { output } : {}) }, emit);
+      upsertToolEvent(state, { id, tool: toolName.length <= 128 ? toolName : "tool", summary, status, ...(output ? { output } : {}) }, emit);
       return;
     }
     return;

@@ -75,7 +75,7 @@ const catalog = z.object({
 const frame = z.object({ type: text(64), id: text(128).min(1).optional(), payload: z.record(z.string(), z.unknown()) });
 type Payload = z.infer<typeof frame>["payload"];
 const toolImage = z.object({ url: text(2048), alt: text(256).optional() });
-const tool = z.object({ id: text(256), tool: text(128), summary: text(4096), status: z.enum(["running", "done", "error"]),
+const toolFields = z.object({ id: text(256), tool: text(128), summary: text(4096), status: z.enum(["running", "done", "error"]),
   output: text(32_768).optional(), exit_code: z.number().int().nullable().optional(),
   images: z.array(toolImage).max(4).optional(),
   subagent: z.object({
@@ -86,6 +86,29 @@ const tool = z.object({ id: text(256), tool: text(128), summary: text(4096), sta
     model: text(200).optional(),
     delegated: z.boolean().optional(),
   }).optional() });
+// Older Agy bridges used the display title as the tool name.
+const tool = z.preprocess(value => {
+  if (value && typeof value === "object" && "id" in value && typeof value.id === "string" &&
+      /^agy-step-\d+$/.test(value.id) && "tool" in value && typeof value.tool === "string" && value.tool.length > 128 &&
+      "summary" in value && typeof value.summary === "string") {
+    return { ...value, tool: "tool", summary: value.summary.slice(0, 4096) };
+  }
+  return value;
+}, toolFields);
+
+const diagnosticFields = new Set(["event", "events", "id", "type", "tool", "summary", "status", "output", "images", "url", "alt",
+  "subagent", "activity", "session_id", "runtime", "model", "text", "delta", "message", "content", "error", "externalSessionId", "payload"]);
+function frameFailure(err: unknown) {
+  if (!(err instanceof z.ZodError)) return err instanceof SyntaxError ? "invalid_json" : "handler_error";
+  const issue = err.issues[0];
+  if (!issue) return "validation_error";
+  // Only schema-owned labels and lengths are safe in production logs.
+  const field = issue.path.map(key => typeof key === "number" ? "[]" : diagnosticFields.has(String(key)) ? key : "?").join(".");
+  const input = issue.input;
+  const length = typeof input === "string" || Array.isArray(input) ? ` length=${input.length}` : "";
+  return `validation=${issue.code} field=${field || "<root>"}${length}`;
+}
+
 const contextUsageFrame = z.object({ type: z.literal("context_usage"), usage: z.object({
   used_tokens: z.number().int().nonnegative(), window_tokens: z.number().int().positive().optional(),
 }) });
@@ -261,7 +284,8 @@ export class BridgeHub {
           const msg = frame.parse(JSON.parse(data.toString()));
           if (!conn.ready && msg.type !== "hello") throw new Error();
           this.receive(conn, msg.type, msg.id, msg.payload);
-        } catch {
+        } catch (err) {
+          console.warn(`[bridge] rejected frame: ${frameFailure(err)}`);
           this.disconnect(conn.id, 1008, "Invalid bridge frame");
         }
       });
@@ -565,7 +589,7 @@ export class BridgeHub {
       } catch { run.stop("项目目录绑定已失效"); return; }
       const tag = z.object({ type: z.string() }).parse(p.event).type;
       if (tag === "done" || tag === "error") {
-        const result = terminal.parse(p.result);
+        const result = terminal.parse(p.result, { reportInput: true });
         if (tag === "error" && result.status === "done") throw new Error();
         // The HTTP caller persists the result before emitting the authoritative terminal event.
         run.finish(redact(result, run.secrets));
@@ -574,7 +598,7 @@ export class BridgeHub {
         // Optional telemetry must never tear down the execution connection.
         const sample = contextUsageFrame.safeParse(p.event);
         if (sample.success) run.onEvent(sample.data);
-      } else run.onEvent(intermediate.parse(p.event));
+      } else run.onEvent(intermediate.parse(p.event, { reportInput: true }));
     } else if (type === "cli_run.event") {
       const ev = cliRunEventSchema.parse(p);
       const cli = this.cliRuns.get(ev.run_id);
