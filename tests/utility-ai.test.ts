@@ -105,14 +105,19 @@ describe("utility AI global config & title helpers", () => {
     expect(serializeBlocksToMarkdown(blocks)).toBe(md);
   });
 
-  it("preserves soft line breaks in prose and consecutive quote lines without touching fenced code blocks", () => {
-    const input = "第一行\n第二行\n```bash\necho a\necho b\n```";
+  it("preserves soft line breaks in prose and consecutive quote lines without touching fenced code or math blocks", () => {
+    const input = "第一行\n第二行\n```bash\necho a\necho b\n```\n$$\na + b\nc + d\n$$";
     const out = preserveSoftLineBreaks(input);
-    expect(out).toBe("第一行  \n第二行\n```bash\necho a\necho b\n```");
+    expect(out).toBe("第一行  \n第二行\n```bash\necho a\necho b\n```\n$$\na + b\nc + d\n$$");
 
     const quoteInput = "> 引用第一行\n> 引用第二行\n>\n>> 嵌套一\n>> 嵌套二";
     expect(preserveSoftLineBreaks(quoteInput)).toBe(
       "> 引用第一行  \n> 引用第二行\n>\n>> 嵌套一  \n>> 嵌套二",
+    );
+
+    const alertInput = "> [!NOTE]\n> 提示第一行\n> 提示第二行";
+    expect(preserveSoftLineBreaks(alertInput)).toBe(
+      "> [!NOTE]\n> 提示第一行  \n> 提示第二行",
     );
   });
 

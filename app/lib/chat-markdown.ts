@@ -277,6 +277,7 @@ export function preserveSoftLineBreaks(markdown: string): string {
   const lines = markdown.split(/\r?\n/);
   const out: string[] = [];
   let inFence = false;
+  let inMathBlock = false;
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? "";
@@ -288,7 +289,13 @@ export function preserveSoftLineBreaks(markdown: string): string {
       continue;
     }
 
-    if (inFence) {
+    if (!inFence && /^\$\$\s*$/.test(trimmed)) {
+      inMathBlock = !inMathBlock;
+      out.push(line);
+      continue;
+    }
+
+    if (inFence || inMathBlock) {
       out.push(line);
       continue;
     }
@@ -299,10 +306,15 @@ export function preserveSoftLineBreaks(markdown: string): string {
       /^>+\s+\S/.test(trimmed) && /^>+\s+\S/.test(nextTrimmed);
     const quoteBoundary =
       !bothNonEmptyQuotes && (/^>\s?/.test(trimmed) || /^>\s?/.test(nextTrimmed));
+    const alertHeaderRe = /^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/i;
     const isBlockBoundary =
       !trimmed ||
       !nextTrimmed ||
       /^```/.test(nextTrimmed) ||
+      /^\$\$/.test(trimmed) ||
+      /^\$\$/.test(nextTrimmed) ||
+      alertHeaderRe.test(trimmed) ||
+      alertHeaderRe.test(nextTrimmed) ||
       /^#{1,6}\s/.test(trimmed) ||
       /^#{1,6}\s/.test(nextTrimmed) ||
       quoteBoundary ||

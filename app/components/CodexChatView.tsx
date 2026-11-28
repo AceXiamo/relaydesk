@@ -1553,7 +1553,7 @@ export function CodexChatView({
                     <article
                       key={msg.id}
                       data-message-id={msg.id}
-                      className={`group/msg space-y-1 animate-fade-up transition-colors ${
+                      className={`min-w-0 group/msg space-y-1 animate-fade-up transition-colors ${
                         highlightedMsgId === msg.id
                           ? "rounded-xl ring-2 ring-indigo-500/40 bg-indigo-500/[0.04] px-2.5 py-2 -mx-2.5"
                           : ""
@@ -1608,7 +1608,7 @@ export function CodexChatView({
 
                       {/* Streamed Markdown Prose */}
                       {visibleContent && (
-                        <div className="text-[14px] leading-[1.7] text-[var(--text-primary)]">
+                        <div className="min-w-0 text-[14px] leading-[1.7] text-[var(--text-primary)]">
                           <MarkdownContent content={visibleContent} projectId={project.id} streaming={isStreamingMsg} />
                           {isStreamingMsg && (
                             <span

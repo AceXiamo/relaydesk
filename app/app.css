@@ -457,6 +457,182 @@
     overflow-wrap: anywhere;
   }
 
+  .rd-md .rd-md-table {
+    width: 100%;
+    border-collapse: collapse;
+    overflow-wrap: break-word;
+    word-break: normal;
+  }
+
+  .rd-md .rd-md-cell {
+    overflow-wrap: break-word;
+    word-break: normal;
+  }
+
+  .rd-md .rd-md-cell-md {
+    min-width: 10.5rem;
+  }
+
+  .rd-md .rd-md-cell-lg {
+    min-width: 17.5rem;
+  }
+
+  .rd-md-modal .rd-md-table {
+    width: 100%;
+    border-collapse: collapse;
+    overflow-wrap: break-word;
+    word-break: normal;
+  }
+
+  .rd-md-modal .rd-md-cell {
+    overflow-wrap: break-word;
+    word-break: normal;
+  }
+
+  .rd-md-modal .rd-md-cell-md {
+    min-width: 12.5rem;
+  }
+
+  .rd-md-modal .rd-md-cell-lg {
+    min-width: 21rem;
+  }
+
+  .rd-md-table-expanded thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background-color: var(--surface-subtle);
+  }
+
+  .rd-md .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.35rem 0;
+    margin: 0.5rem 0;
+  }
+
+  .rd-md .katex {
+    font-size: 1.04em;
+  }
+
+  .rd-md section.footnotes ol {
+    padding-left: 1.25rem;
+    margin-top: 0.35rem;
+    margin-bottom: 0;
+  }
+
+  .rd-md section.footnotes li {
+    margin-top: 0.25rem;
+  }
+
+  .rd-md details > summary + * {
+    margin-top: 0.5rem;
+  }
+
+  .rd-mermaid-svg svg {
+    display: block;
+    max-width: none;
+    height: auto;
+  }
+
+  /* Code syntax highlighting (highlight.js) */
+  .hljs-comment,
+  .hljs-quote {
+    color: #71717a;
+    font-style: italic;
+  }
+
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-literal,
+  .hljs-section,
+  .hljs-link {
+    color: #7c3aed;
+  }
+
+  .hljs-string,
+  .hljs-title,
+  .hljs-name,
+  .hljs-regexp,
+  .hljs-symbol,
+  .hljs-bullet,
+  .hljs-addition {
+    color: #059669;
+  }
+
+  .hljs-number,
+  .hljs-meta,
+  .hljs-built_in,
+  .hljs-builtin-name,
+  .hljs-params,
+  .hljs-type {
+    color: #d97706;
+  }
+
+  .hljs-attr,
+  .hljs-attribute,
+  .hljs-variable,
+  .hljs-template-variable {
+    color: #0284c7;
+  }
+
+  .hljs-deletion {
+    color: #dc2626;
+    background-color: rgba(239, 68, 68, 0.1);
+  }
+
+  .hljs-emphasis {
+    font-style: italic;
+  }
+
+  .hljs-strong {
+    font-weight: 600;
+  }
+
+  .dark .hljs-comment,
+  .dark .hljs-quote {
+    color: #a1a1aa;
+  }
+
+  .dark .hljs-keyword,
+  .dark .hljs-selector-tag,
+  .dark .hljs-literal,
+  .dark .hljs-section,
+  .dark .hljs-link {
+    color: #c084fc;
+  }
+
+  .dark .hljs-string,
+  .dark .hljs-title,
+  .dark .hljs-name,
+  .dark .hljs-regexp,
+  .dark .hljs-symbol,
+  .dark .hljs-bullet,
+  .dark .hljs-addition {
+    color: #34d399;
+  }
+
+  .dark .hljs-number,
+  .dark .hljs-meta,
+  .dark .hljs-built_in,
+  .dark .hljs-builtin-name,
+  .dark .hljs-params,
+  .dark .hljs-type {
+    color: #fbbf24;
+  }
+
+  .dark .hljs-attr,
+  .dark .hljs-attribute,
+  .dark .hljs-variable,
+  .dark .hljs-template-variable {
+    color: #38bdf8;
+  }
+
+  .dark .hljs-deletion {
+    color: #f87171;
+    background-color: rgba(248, 113, 113, 0.14);
+  }
+
   .rd-md pre {
     max-width: 100%;
     overflow-x: auto;

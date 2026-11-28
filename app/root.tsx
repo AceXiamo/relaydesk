@@ -9,6 +9,7 @@ import {
 import type { LinksFunction } from "react-router";
 import { ImageLightboxProvider } from "./components/ImageLightbox.tsx";
 import "./app.css";
+import "katex/dist/katex.min.css";
 
 export const links: LinksFunction = () => [
   {
