@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import { ImageLightboxLink } from "./ImageLightbox.tsx";
 
 export const ImageTurnStreaming = createContext(false);
 const BACKOFF = [1200, 3000, 8000];
@@ -32,8 +33,24 @@ export function ChatWorkspaceImage({ url, alt, className, linkClassName, streami
     <button type="button" className="underline" onClick={retry} aria-label={`重新加载图片：${alt}`}>重新加载</button>
   </span>;
   const src = workspace && attempt ? `${url}&preview_retry=${attempt}` : url;
-  return <a href={url} target="_blank" rel="noopener noreferrer" className={linkClassName}>
-    <img key={attempt} src={src} alt={alt} loading="lazy" className={className}
-      onError={() => { setFailedWhileRunning(running); setFailed(true); }} />
-  </a>;
+  return (
+    <ImageLightboxLink
+      src={src}
+      openUrl={url}
+      alt={alt}
+      className={linkClassName}
+    >
+      <img
+        key={attempt}
+        src={src}
+        alt={alt}
+        loading="lazy"
+        className={className}
+        onError={() => {
+          setFailedWhileRunning(running);
+          setFailed(true);
+        }}
+      />
+    </ImageLightboxLink>
+  );
 }

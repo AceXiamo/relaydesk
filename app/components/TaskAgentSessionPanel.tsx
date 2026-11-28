@@ -18,6 +18,7 @@ import type {
 import { ChatFailureNotice, SubagentDetailPanel, SubagentDock, ThinkingTrace, ToolChipsGroup } from "./agent-chat/AgentPrimitives.tsx";
 import { RichPromptEditor, type RichPromptEditorHandle } from "./agent-chat/RichPromptEditor.tsx";
 import { Icon } from "./Icon.tsx";
+import { ImageLightboxLink } from "./ImageLightbox.tsx";
 import {
   adaptSelectionForRuntimeSwitch,
   LocalAgentEffortSelect,
@@ -527,7 +528,7 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
           onScroll={e => { const el = e.currentTarget; followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 72; }}
           className="rd-scroll min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6"
         >
-          <div className="mx-auto max-w-3xl space-y-6">
+          <div className="mx-auto max-w-3xl space-y-6" data-rd-lightbox-scope="task-agent-thread">
             {messages.map((msg, index) => {
               if (!msg.content && msg.role === "user" && !msg.attachments.length) return null;
               const brief = index === 0 && msg.role === "user";
@@ -563,27 +564,30 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                 {errorReason && <ChatFailureNotice reason={errorReason} />}
                 {msg.attachments.length > 0 && (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
-                    {msg.attachments.map(ref =>
-                      ref.kind === "image" ? (
-                        <a
-                          key={`${ref.kind}-${ref.ref}`}
-                          href={`/api/projects/${encodeURIComponent(task.project_id)}/workspace/file?path=${encodeURIComponent(ref.ref)}&inline=1`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="group relative block overflow-hidden rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)]"
-                        >
-                          <img
-                            src={`/api/projects/${encodeURIComponent(task.project_id)}/workspace/file?path=${encodeURIComponent(ref.ref)}&inline=1`}
+                    {msg.attachments.map(ref => {
+                      if (ref.kind === "image") {
+                        const imgUrl = `/api/projects/${encodeURIComponent(task.project_id)}/workspace/file?path=${encodeURIComponent(ref.ref)}&inline=1`;
+                        return (
+                          <ImageLightboxLink
+                            key={`${ref.kind}-${ref.ref}`}
+                            src={imgUrl}
                             alt={ref.label || ref.ref}
-                            className="h-16 w-16 object-cover transition-transform group-hover:scale-105"
-                          />
-                        </a>
-                      ) : (
+                            className="group relative block overflow-hidden rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)]"
+                          >
+                            <img
+                              src={imgUrl}
+                              alt={ref.label || ref.ref}
+                              className="h-16 w-16 object-cover transition-transform group-hover:scale-105"
+                            />
+                          </ImageLightboxLink>
+                        );
+                      }
+                      return (
                         <span key={`${ref.kind}-${ref.ref}`} className="inline-flex items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2 py-0.5 text-xs text-[var(--text-muted)]">
                           {ref.label || ref.ref}
                         </span>
-                      ),
-                    )}
+                      );
+                    })}
                   </div>
                 )}
               </article>;
@@ -685,33 +689,56 @@ function SessionPanel({ task, streams, routing, paused, initialDraftConfig, onTa
                   <span className="rd-waterfall-stripe block h-[2px] w-full" />
                 </div>
               )}
-              {attachments.length > 0 && (
-                <div className="flex flex-wrap items-center gap-2 px-3 pt-2.5 pb-1">
-                  {attachments.map((att) => (
-                    <span
-                      key={`${att.kind}-${att.ref}`}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-1 pr-2 text-[11px] text-[var(--text-secondary)]"
-                    >
-                      {att.kind === "image" && (
-                        <img
-                          src={`/api/projects/${encodeURIComponent(task.project_id)}/workspace/file?path=${encodeURIComponent(att.ref)}&inline=1`}
-                          alt={att.label}
-                          className="h-6 w-6 rounded object-cover"
-                        />
-                      )}
-                      <span className="max-w-[140px] truncate">{att.label || att.ref}</span>
-                      <button
-                        type="button"
-                        aria-label={`移除 ${att.label || att.ref}`}
-                        onClick={() => removeAttachment(att)}
-                        className="rounded p-0.5 text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] cursor-pointer"
-                      >
-                        <Icon name="x" size={11} />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
+              {attachments.length > 0 && (() => {
+                const composerImages = attachments
+                  .filter((a) => a.kind === "image")
+                  .map((a) => ({
+                    src: `/api/projects/${encodeURIComponent(task.project_id)}/workspace/file?path=${encodeURIComponent(a.ref)}&inline=1`,
+                    alt: a.label || a.ref,
+                  }));
+                let imageIdx = 0;
+                return (
+                  <div className="flex flex-wrap items-center gap-2 px-3 pt-2.5 pb-1">
+                    {attachments.map((att) => {
+                      const imgUrl = att.kind === "image"
+                        ? `/api/projects/${encodeURIComponent(task.project_id)}/workspace/file?path=${encodeURIComponent(att.ref)}&inline=1`
+                        : "";
+                      const currentImgIndex = att.kind === "image" ? imageIdx++ : -1;
+                      return (
+                        <span
+                          key={`${att.kind}-${att.ref}`}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-1 pr-2 text-[11px] text-[var(--text-secondary)]"
+                        >
+                          {att.kind === "image" && (
+                            <ImageLightboxLink
+                              src={imgUrl}
+                              alt={att.label || att.ref}
+                              gallery={composerImages}
+                              galleryIndex={currentImgIndex}
+                              className="block shrink-0"
+                            >
+                              <img
+                                src={imgUrl}
+                                alt={att.label}
+                                className="h-6 w-6 rounded object-cover"
+                              />
+                            </ImageLightboxLink>
+                          )}
+                          <span className="max-w-[140px] truncate">{att.label || att.ref}</span>
+                          <button
+                            type="button"
+                            aria-label={`移除 ${att.label || att.ref}`}
+                            onClick={() => removeAttachment(att)}
+                            className="rounded p-0.5 text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] cursor-pointer"
+                          >
+                            <Icon name="x" size={11} />
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
 
               <RichPromptEditor
                 ref={composerRef}

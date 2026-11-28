@@ -39,6 +39,7 @@ import {
   type TraceEntry,
 } from "./agent-chat/AgentPrimitives.tsx";
 import { Icon } from "./Icon.tsx";
+import { ImageLightboxLink } from "./ImageLightbox.tsx";
 import { MarkdownContent } from "./MarkdownContent.tsx";
 import { MorphIcon } from "./MotionPrimitives.tsx";
 import { Button, EmptyState, LivePulseDot, useToast } from "./ui.tsx";
@@ -1438,7 +1439,7 @@ export function CodexChatView({
                 )}
               </div>
             ) : (
-              <div className="space-y-7">
+              <div className="space-y-7" data-rd-lightbox-scope="chat-thread">
                 {messages.map((msg, idx) => {
                   const isUser = msg.role === "user";
                   const isStreamingMsg = msg.status === "streaming";
@@ -1470,11 +1471,10 @@ export function CodexChatView({
                                     {imageAtts.map((att) => {
                                       const imgUrl = `/api/projects/${encodeURIComponent(project.id)}/workspace/file?path=${encodeURIComponent(att.ref)}&inline=1`;
                                       return (
-                                        <a
+                                        <ImageLightboxLink
                                           key={`${att.kind}:${att.ref}`}
-                                          href={imgUrl}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
+                                          src={imgUrl}
+                                          alt={att.label}
                                           className="block group"
                                         >
                                           <img
@@ -1483,7 +1483,7 @@ export function CodexChatView({
                                             loading="lazy"
                                             className="max-h-52 w-auto max-w-[260px] rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-card)] object-contain shadow-2xs group-hover:border-indigo-500/50 transition-colors"
                                           />
-                                        </a>
+                                        </ImageLightboxLink>
                                       );
                                     })}
                                   </div>

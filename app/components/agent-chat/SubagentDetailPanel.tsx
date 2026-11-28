@@ -409,7 +409,10 @@ export function SubagentDetailPanel({
         </header>
 
         {/* Independent Conversation / Execution Body */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 space-y-4 rd-scroll">
+        <div
+          className="min-h-0 flex-1 overflow-y-auto px-5 py-4 space-y-4 rd-scroll"
+          data-rd-lightbox-scope="subagent-detail"
+        >
           {isDelegated ? (
             <>
               {childState.loading && (

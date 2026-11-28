@@ -2,6 +2,11 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+
+vi.mock("../app/components/Icon.tsx", () => ({
+  Icon: ({ name }: { name: string }) => createElement("span", { "data-icon": name }),
+}));
+
 import { ChatWorkspaceImage } from "../app/components/ChatWorkspaceImage.tsx";
 
 const url = "/api/projects/demo/workspace/file?path=demo.png&inline=1";
@@ -30,4 +35,27 @@ it("never polls remote images", () => {
   render(true, "https://example.invalid/demo.png"); fail();
   act(() => { vi.advanceTimersByTime(60_000); });
   render(false, "https://example.invalid/demo.png"); expect(image()).toBeNull();
+});
+
+it("opens in-page lightbox on plain left-click and preserves modifier new-tab click", () => {
+  render(false);
+  const anchor = el.querySelector("a")!;
+  expect(anchor.getAttribute("href")).toBe(url);
+
+  const metaEvent = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, metaKey: true });
+  act(() => { anchor.dispatchEvent(metaEvent); });
+  expect(metaEvent.defaultPrevented).toBe(false);
+  expect(document.body.querySelector('[role="dialog"][aria-label="图片预览"]')).toBeNull();
+
+  const plainEvent = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+  act(() => { anchor.dispatchEvent(plainEvent); });
+  expect(plainEvent.defaultPrevented).toBe(true);
+  const dialog = document.body.querySelector('[role="dialog"][aria-label="图片预览"]');
+  expect(dialog).not.toBeNull();
+  expect(dialog?.querySelector("img")?.getAttribute("src")).toBe(url);
+
+  act(() => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  });
+  expect(document.body.querySelector('[role="dialog"][aria-label="图片预览"]')).toBeNull();
 });

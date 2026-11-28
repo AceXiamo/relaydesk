@@ -1,4 +1,5 @@
 import { ChatWorkspaceImage } from "../ChatWorkspaceImage.tsx";
+import { ImageLightboxLink } from "../ImageLightbox.tsx";
 import { ContextUsageLabel } from "./ContextUsageLabel.tsx";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
@@ -1984,65 +1985,82 @@ export function PromptBar({
           </div>
         )}
         {/* Attached Context Chips inside Composer */}
-        {attachments.length > 0 && (
-          <div className="px-3 pt-2.5 pb-0.5 flex flex-wrap items-center gap-1.5">
-            {attachments.map((att) =>
-              att.kind === "image" && projectId ? (
-                <div
-                  key={`${att.kind}:${att.ref}`}
-                  className="relative group inline-flex items-center rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-1 animate-fade-in"
-                >
-                  <a
-                    href={`/api/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(att.ref)}&inline=1`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block"
+        {attachments.length > 0 && (() => {
+          const composerImageGallery = projectId
+            ? attachments
+                .filter((a) => a.kind === "image")
+                .map((a) => ({
+                  src: `/api/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(a.ref)}&inline=1`,
+                  alt: a.label,
+                }))
+            : [];
+          let imageIdx = 0;
+          return (
+            <div className="px-3 pt-2.5 pb-0.5 flex flex-wrap items-center gap-1.5">
+              {attachments.map((att) => {
+                if (att.kind === "image" && projectId) {
+                  const imgUrl = `/api/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(att.ref)}&inline=1`;
+                  const currentImgIndex = imageIdx++;
+                  return (
+                    <div
+                      key={`${att.kind}:${att.ref}`}
+                      className="relative group inline-flex items-center rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-1 animate-fade-in"
+                    >
+                      <ImageLightboxLink
+                        src={imgUrl}
+                        alt={att.label}
+                        gallery={composerImageGallery}
+                        galleryIndex={currentImgIndex}
+                        className="block"
+                      >
+                        <img
+                          src={imgUrl}
+                          alt={att.label}
+                          className="h-12 w-12 rounded-lg object-cover bg-[var(--surface-card)]"
+                        />
+                      </ImageLightboxLink>
+                      <button
+                        type="button"
+                        aria-label={`移除 ${att.label}`}
+                        onClick={() => onToggleAttachment(att)}
+                        className="absolute -top-1.5 -right-1.5 h-4 w-4 rounded-full bg-[var(--surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] flex items-center justify-center shadow-xs transition cursor-pointer"
+                      >
+                        <Icon name="x" size={10} />
+                      </button>
+                    </div>
+                  );
+                }
+                return (
+                  <span
+                    key={`${att.kind}:${att.ref}`}
+                    className="inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-[7px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[11.5px] font-mono text-[var(--text-secondary)] animate-fade-in"
                   >
-                    <img
-                      src={`/api/projects/${encodeURIComponent(projectId)}/workspace/file?path=${encodeURIComponent(att.ref)}&inline=1`}
-                      alt={att.label}
-                      className="h-12 w-12 rounded-lg object-cover bg-[var(--surface-card)]"
+                    <Icon
+                      name={
+                        att.kind === "database"
+                          ? "database"
+                          : att.kind === "task"
+                            ? "inbox"
+                            : "file-text"
+                      }
+                      size={11}
+                      className="text-indigo-500 shrink-0"
                     />
-                  </a>
-                  <button
-                    type="button"
-                    aria-label={`移除 ${att.label}`}
-                    onClick={() => onToggleAttachment(att)}
-                    className="absolute -top-1.5 -right-1.5 h-4 w-4 rounded-full bg-[var(--surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] flex items-center justify-center shadow-xs transition cursor-pointer"
-                  >
-                    <Icon name="x" size={10} />
-                  </button>
-                </div>
-              ) : (
-                <span
-                  key={`${att.kind}:${att.ref}`}
-                  className="inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-[7px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[11.5px] font-mono text-[var(--text-secondary)] animate-fade-in"
-                >
-                  <Icon
-                    name={
-                      att.kind === "database"
-                        ? "database"
-                        : att.kind === "task"
-                          ? "inbox"
-                          : "file-text"
-                    }
-                    size={11}
-                    className="text-indigo-500 shrink-0"
-                  />
-                  <span className="max-w-[200px] truncate">{att.label}</span>
-                  <button
-                    type="button"
-                    aria-label={`移除 ${att.label}`}
-                    onClick={() => onToggleAttachment(att)}
-                    className="p-0.5 rounded hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition cursor-pointer"
-                  >
-                    <Icon name="x" size={11} />
-                  </button>
-                </span>
-              ),
-            )}
-          </div>
-        )}
+                    <span className="max-w-[200px] truncate">{att.label}</span>
+                    <button
+                      type="button"
+                      aria-label={`移除 ${att.label}`}
+                      onClick={() => onToggleAttachment(att)}
+                      className="p-0.5 rounded hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] transition cursor-pointer"
+                    >
+                      <Icon name="x" size={11} />
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {/* Rich Markdown Composer (auto-converts `inline` & ```code blocks```) */}
         <RichPromptEditor
